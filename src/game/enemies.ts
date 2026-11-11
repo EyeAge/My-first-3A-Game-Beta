@@ -4,8 +4,10 @@ import type { GameAudio } from '../audio/audio';
 import type { Effects } from '../render/effects';
 import type { Colliders } from '../world/colliders';
 import type { NavGrid } from '../world/nav';
+import type { Decals } from '../render/decals';
 import { BOUNDS } from '../world/port';
 import type { Player } from './player';
+import { instantiate, rigDef } from './rig';
 
 export type Kind = 'gull' | 'hound' | 'guard';
 export const KIND_NAME: Record<Kind, string> = { gull: '机械飞鸥', hound: '机械猎犬', guard: '机械守卫' };
@@ -13,8 +15,8 @@ export const KIND_NAME: Record<Kind, string> = { gull: '机械飞鸥', hound: '�
 interface Spec { hp: number; speed: number; bodyY: number; bodyR: number; weak: [number, number, number]; weakR: number }
 const SPEC: Record<Kind, Spec> = {
   gull: { hp: 45, speed: 9, bodyY: 0, bodyR: 0.6, weak: [0, 0.02, 0.7], weakR: 0.2 },
-  hound: { hp: 75, speed: 7.4, bodyY: 0.68, bodyR: 0.62, weak: [0, 0.82, 0.86], weakR: 0.26 },
-  guard: { hp: 240, speed: 2.7, bodyY: 1.45, bodyR: 0.85, weak: [0, 2.3, 0.08], weakR: 0.3 },
+  hound: { hp: 75, speed: 7.4, bodyY: 0.68, bodyR: 0.62, weak: [0, 0.92, 0.98], weakR: 0.27 },
+  guard: { hp: 240, speed: 2.7, bodyY: 1.45, bodyR: 0.85, weak: [0, 2.48, 0.06], weakR: 0.3 },
 };
 
 export interface Enemy {
@@ -23,7 +25,11 @@ export interface Enemy {
   hp: number; alive: boolean;
   yaw: number; flash: number;
   bodyMat: THREE.MeshStandardMaterial;
-  limbs: THREE.Object3D[]; glow: THREE.MeshBasicMaterial | null;
+  mesh: THREE.SkinnedMesh; bones: Record<string, THREE.Bone>; glow: THREE.MeshBasicMaterial | null;
+  move: number;                 // 0 站立 .. 1 全速，步态动画的权重
+  hitK: number; hitSide: number; // 中弹时的身体抖动
+  act: number; recoil: number;   // 扑咬动作计时、开火后坐
+  aimYaw: number; aimPitch: number; guardK: number;
   path: number[] | null; pathI: number; pathT: number;
   attackT: number; burst: number; burstT: number; charge: number;
   losT: number; hasLos: boolean;
@@ -31,84 +37,30 @@ export interface Enemy {
   orbit: number; alt: number; vel: THREE.Vector3;
 }
 export interface HitResult { enemy: Enemy; t: number; weak: boolean }
-export interface World { colliders: Colliders; nav: NavGrid; effects: Effects; audio: GameAudio; camera: THREE.Camera }
+export interface World { colliders: Colliders; nav: NavGrid; effects: Effects; decals: Decals; audio: GameAudio; camera: THREE.Camera }
 
-const BOX = new THREE.BoxGeometry(1, 1, 1);
 const SPH = new THREE.SphereGeometry(1, 12, 8);
-const BODY = new THREE.MeshStandardMaterial({ color: 0x2a2f34, roughness: 0.38, metalness: 0.75 });
-const ACCENT = new THREE.MeshStandardMaterial({ color: 0xb85a1c, roughness: 0.45, metalness: 0.4 });
+
+/** 机体表面的磨损贴图：划痕和斑驳，同时用作粗糙度和凹凸。 */
+function wornMetal() {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const g = c.getContext('2d')!;
+  g.fillStyle = '#b4b4b4'; g.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 2600; i++) { const v = 120 + Math.random() * 120; g.fillStyle = `rgba(${v},${v},${v},0.22)`; g.fillRect(Math.random() * 256, Math.random() * 256, 1 + Math.random() * 3, 1 + Math.random() * 3); }
+  for (let i = 0; i < 90; i++) {
+    const x = Math.random() * 256, y = Math.random() * 256, a = Math.random() * 6.28, l = 6 + Math.random() * 40, v = Math.random() < 0.6 ? 70 : 235;
+    g.strokeStyle = `rgba(${v},${v},${v},${0.25 + Math.random() * 0.4})`; g.lineWidth = 0.6 + Math.random();
+    g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke();
+  }
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(2, 2);
+  return t;
+}
+const WORN = wornMetal();
+const BODY = new THREE.MeshStandardMaterial({ color: 0x343a40, roughness: 0.62, metalness: 0.75, roughnessMap: WORN, bumpMap: WORN, bumpScale: 0.6 });
+const ACCENT = new THREE.MeshStandardMaterial({ color: 0xb85a1c, roughness: 0.7, metalness: 0.4, roughnessMap: WORN });
 const DARK = new THREE.MeshStandardMaterial({ color: 0x121416, roughness: 0.5, metalness: 0.6 });
 const EYE = new THREE.MeshBasicMaterial({ color: new THREE.Color(3.2, 0.25, 0.12) });
 const BOLT = new THREE.MeshBasicMaterial({ color: new THREE.Color(9, 1.6, 0.5) });
-
-function part(parent: THREE.Object3D, mat: THREE.Material, sx: number, sy: number, sz: number, x: number, y: number, z: number, geo: THREE.BufferGeometry = BOX) {
-  const m = new THREE.Mesh(geo, mat);
-  m.scale.set(sx, sy, sz); m.position.set(x, y, z);
-  m.castShadow = true;
-  parent.add(m);
-  return m;
-}
-function pivot(parent: THREE.Object3D, x: number, y: number, z: number) {
-  const g = new THREE.Group(); g.position.set(x, y, z); parent.add(g); return g;
-}
-
-// 三种敌人的外形都是用方盒子拼出来的；本地坐标 +z 是它的正前方。
-function buildGull(body: THREE.Material) {
-  const g = new THREE.Group(); const limbs: THREE.Object3D[] = [];
-  part(g, body, 0.46, 0.3, 1.0, 0, 0, 0);
-  part(g, ACCENT, 0.3, 0.1, 0.5, 0, 0.18, -0.1);
-  part(g, body, 0.28, 0.26, 0.34, 0, 0.02, 0.6);
-  part(g, EYE, 0.1, 0.1, 0.06, 0, 0.02, 0.79, SPH);
-  part(g, DARK, 0.08, 0.08, 0.5, 0, -0.2, 0.3);
-  part(g, body, 0.5, 0.05, 0.3, 0, 0.05, -0.62);
-  part(g, body, 0.05, 0.3, 0.26, 0, 0.2, -0.64);
-  for (const s of [-1, 1]) {
-    const w = pivot(g, s * 0.22, 0.08, 0);
-    part(w, body, 1.2, 0.04, 0.5, s * 0.6, 0, 0);
-    part(w, ACCENT, 0.5, 0.045, 0.3, s * 1.3, 0, -0.06);
-    limbs.push(w);
-  }
-  return { g, limbs, glow: null as THREE.MeshBasicMaterial | null };
-}
-function buildHound(body: THREE.Material) {
-  const g = new THREE.Group(); const limbs: THREE.Object3D[] = [];
-  part(g, body, 0.52, 0.46, 1.25, 0, 0.7, 0);
-  part(g, ACCENT, 0.3, 0.08, 0.9, 0, 0.96, -0.05);
-  part(g, body, 0.38, 0.34, 0.5, 0, 0.84, 0.8);
-  part(g, DARK, 0.3, 0.14, 0.3, 0, 0.72, 1.08);
-  part(g, EYE, 0.32, 0.07, 0.04, 0, 0.9, 1.06);
-  part(g, DARK, 0.1, 0.1, 0.4, 0, 0.82, -0.78);
-  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
-    const l = pivot(g, sx * 0.25, 0.62, sz * 0.46);
-    part(l, DARK, 0.13, 0.36, 0.16, 0, -0.16, 0.05);
-    part(l, body, 0.1, 0.34, 0.1, 0, -0.45, -0.03);
-    limbs.push(l);
-  }
-  return { g, limbs, glow: null as THREE.MeshBasicMaterial | null };
-}
-function buildGuard(body: THREE.Material) {
-  const g = new THREE.Group(); const limbs: THREE.Object3D[] = [];
-  for (const s of [-1, 1]) {
-    const l = pivot(g, s * 0.32, 1.25, 0);
-    part(l, body, 0.3, 0.62, 0.36, 0, -0.3, 0);
-    part(l, DARK, 0.24, 0.62, 0.28, 0, -0.9, 0.04);
-    part(l, body, 0.34, 0.12, 0.52, 0, -1.19, 0.08);
-    limbs.push(l);
-  }
-  part(g, DARK, 0.7, 0.3, 0.42, 0, 1.3, 0);
-  part(g, body, 1.08, 0.86, 0.66, 0, 1.78, 0);
-  part(g, ACCENT, 0.5, 0.4, 0.1, 0, 1.82, 0.36);
-  part(g, EYE, 0.12, 0.12, 0.05, 0, 1.82, 0.42, SPH);
-  part(g, body, 0.4, 0.34, 0.4, 0, 2.38, 0.04);
-  part(g, EYE, 0.3, 0.07, 0.04, 0, 2.4, 0.25);
-  for (const s of [-1, 1]) part(g, body, 0.36, 0.34, 0.44, s * 0.72, 2.0, 0);
-  part(g, DARK, 0.2, 0.7, 0.24, -0.74, 1.5, 0.05);
-  part(g, body, 0.5, 0.9, 0.08, -0.82, 1.45, 0.3); // 左臂挂一块护盾
-  part(g, DARK, 0.24, 0.26, 1.0, 0.74, 1.62, 0.32); // 右臂是炮管
-  const glow = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.4, 0.08, 0.03) });
-  part(g, glow, 0.14, 0.14, 0.06, 0.74, 1.62, 0.84, SPH);
-  return { g, limbs, glow };
-}
 
 interface Bolt { mesh: THREE.Mesh; vel: THREE.Vector3; life: number; dmg: number }
 
@@ -131,20 +83,24 @@ export class Enemies {
   get aliveCount() { return this.list.length; }
 
   clear() {
-    for (const e of this.list) this.group.remove(e.group);
+    for (const e of this.list) { this.group.remove(e.group); e.mesh.skeleton.dispose(); e.bodyMat.dispose(); }
     this.list.length = 0;
     for (const b of this.bolts) { b.life = 0; b.mesh.visible = false; }
   }
 
   spawn(kind: Kind, x: number, z: number) {
     const bodyMat = BODY.clone();
-    const built = kind === 'gull' ? buildGull(bodyMat) : kind === 'hound' ? buildHound(bodyMat) : buildGuard(bodyMat);
+    const glow = kind === 'guard' ? new THREE.MeshBasicMaterial({ color: new THREE.Color(0.4, 0.08, 0.03) }) : null;
+    const rig = instantiate(rigDef(kind), { body: bodyMat, accent: ACCENT, dark: DARK, eye: EYE, glow: glow ?? EYE });
     const spec = SPEC[kind];
-    built.g.position.set(x, kind === 'gull' ? 20 : 0, z);
-    this.group.add(built.g);
+    const group = new THREE.Group();
+    group.add(rig.mesh);
+    group.position.set(x, kind === 'gull' ? 20 : 0, z);
+    this.group.add(group);
     const e: Enemy = {
-      kind, spec, group: built.g, pos: built.g.position, hp: spec.hp, alive: true, yaw: 0, flash: 0, bodyMat,
-      limbs: built.limbs, glow: built.glow, path: null, pathI: 0, pathT: Math.random() * 0.6,
+      kind, spec, group, pos: group.position, hp: spec.hp, alive: true, yaw: 0, flash: 0, bodyMat,
+      mesh: rig.mesh, bones: rig.bones, glow, move: 0, hitK: 0, hitSide: 1, act: 0, recoil: 0, aimYaw: 0, aimPitch: 0, guardK: 0,
+      path: null, pathI: 0, pathT: Math.random() * 0.6,
       attackT: 1.5 + Math.random() * 2, burst: 0, burstT: 0, charge: 0, losT: Math.random() * 0.3, hasLos: false,
       phase: Math.random() * 6.28, anim: 0, orbit: Math.random() * 6.28, alt: 11 + Math.random() * 4, vel: new THREE.Vector3(),
     };
@@ -189,6 +145,7 @@ export class Enemies {
   damage(e: Enemy, amount: number, weak: boolean) {
     if (!e.alive) return false;
     e.hp -= amount; e.flash = 1;
+    e.hitK = Math.min(1, e.hitK + (weak ? 1 : 0.6)); e.hitSide = Math.random() < 0.5 ? -1 : 1;
     e.attackT = Math.max(e.attackT, 0.25);
     if (e.hp <= 0) { this.kill(e, weak); return true; }
     return false;
@@ -201,7 +158,7 @@ export class Enemies {
     const [vol, pan] = this.spatial(c);
     this.world.audio.explode(vol, pan);
     this.group.remove(e.group);
-    e.bodyMat.dispose();
+    e.bodyMat.dispose(); e.glow?.dispose(); e.mesh.skeleton.dispose();
     this.list.splice(this.list.indexOf(e), 1);
     this.onKill(e, weak);
   }
@@ -241,6 +198,7 @@ export class Enemies {
       e.flash = Math.max(0, e.flash - dt * 6);
       e.bodyMat.emissive.setScalar(e.flash * 0.9);
       e.attackT -= dt; e.losT -= dt; e.pathT -= dt;
+      e.hitK = Math.max(0, e.hitK - dt * 5); e.recoil = Math.max(0, e.recoil - dt * 6); e.act = Math.max(0, e.act - dt);
       const headY = e.kind === 'gull' ? e.pos.y : e.pos.y + (e.kind === 'guard' ? 2.2 : 0.9);
       if (e.losT <= 0) {
         e.losT = 0.22 + Math.random() * 0.1;
@@ -262,11 +220,9 @@ export class Enemies {
         e.vel.x = damp(e.vel.x, _a.x, 2.5, dt); e.vel.y = damp(e.vel.y, _a.y, 2.5, dt); e.vel.z = damp(e.vel.z, _a.z, 2.5, dt);
         e.pos.addScaledVector(e.vel, dt);
         e.pos.y = Math.max(2.2, e.pos.y);
-        const flap = Math.sin(t * 13 + e.phase) * 0.5;
-        e.limbs[0].rotation.z = flap; e.limbs[1].rotation.z = -flap;
         e.group.rotation.z = clamp(-e.vel.x * Math.cos(e.yaw) * 0.04 + e.vel.z * Math.sin(e.yaw) * 0.04, -0.5, 0.5);
         if (e.attackT <= 0 && e.hasLos && dist < 48) {
-          e.attackT = 2.0 + Math.random() * 1.4;
+          e.attackT = 2.0 + Math.random() * 1.4; e.recoil = 1;
           this.fire(_a.set(e.pos.x, e.pos.y - 0.2, e.pos.z), _d.copy(chest).addScaledVector(player.vel, dist / 60), 36, 5, 0.035);
         }
       } else {
@@ -295,24 +251,24 @@ export class Enemies {
             if (!e.hasLos || dist > 14) wantYaw = Math.atan2(mx, mz);
           }
         }
-        e.anim += dt * (moving ? (e.kind === 'hound' ? 15 : 5.5) : 0);
-        const sw = moving ? Math.sin(e.anim) : 0;
+        e.move = damp(e.move, moving ? 1 : 0, 7, dt);
+        e.anim += dt * e.move * (e.kind === 'hound' ? 14 : 6.4);
         if (e.kind === 'hound') {
-          e.limbs[0].rotation.x = sw * 0.8; e.limbs[3].rotation.x = sw * 0.8; e.limbs[1].rotation.x = -sw * 0.8; e.limbs[2].rotation.x = -sw * 0.8;
-          e.group.position.y = Math.abs(Math.sin(e.anim)) * 0.06;
           if (dist < 2.1 && Math.abs(player.pos.y - e.pos.y) < 1.8 && e.attackT <= 0) {
-            e.attackT = 1.2;
+            e.attackT = 1.2; e.act = 0.4;
             this.onPlayerHit(11, e.pos);
             const [vol, pan] = this.spatial(e.pos);
             audio.bark(vol, pan);
           }
         } else {
-          e.limbs[0].rotation.x = sw * 0.5; e.limbs[1].rotation.x = -sw * 0.5;
-          const muzzle = _a.set(e.pos.x + 0.74 * Math.cos(e.yaw) + 0.9 * Math.sin(e.yaw), e.pos.y + 1.62, e.pos.z - 0.74 * Math.sin(e.yaw) + 0.9 * Math.cos(e.yaw));
+          // 上身会转向玩家，炮口位置要跟着上身的朝向和俯仰算
+          const ay = e.yaw + e.aimYaw, cp = Math.cos(e.aimPitch), sp = Math.sin(e.aimPitch);
+          const fz = 1.24 * cp + 0.38 * sp, sa = Math.sin(ay), ca = Math.cos(ay);
+          const muzzle = _a.set(e.pos.x + 0.76 * ca + fz * sa, e.pos.y + 2.0 - 0.38 * cp + 1.24 * sp, e.pos.z - 0.76 * sa + fz * ca);
           // 守卫开火前炮口会先充能发亮，给玩家留出找掩体的时间
           if (e.burst > 0) {
             e.burstT -= dt;
-            if (e.burstT <= 0) { e.burst--; e.burstT = 0.16; this.fire(muzzle, chest, 52, 9, 0.03); }
+            if (e.burstT <= 0) { e.burst--; e.burstT = 0.16; this.fire(muzzle, chest, 52, 9, 0.03); e.recoil = 1; }
           } else if (e.charge > 0) {
             e.charge -= dt;
             if (e.charge <= 0) { e.burst = 3; e.burstT = 0; }
@@ -332,6 +288,12 @@ export class Enemies {
       dy = Math.atan2(Math.sin(dy), Math.cos(dy));
       e.yaw += dy * Math.min(1, dt * (e.kind === 'guard' ? 4 : 8));
       e.group.rotation.y = e.yaw;
+
+      // 骨骼动画：rel 是玩家相对它正前方的偏角，头和上身用它来盯人
+      const rel = Math.atan2(Math.sin(Math.atan2(dx, dz) - e.yaw), Math.cos(Math.atan2(dx, dz) - e.yaw));
+      if (e.kind === 'gull') poseGull(e, t, rel, dist, chest.y);
+      else if (e.kind === 'hound') poseHound(e, t, rel, dist);
+      else poseGuard(e, dt, t, rel, dist, chest.y);
     }
 
     // 同类之间互相推开一点，免得叠在一起
@@ -347,12 +309,17 @@ export class Enemies {
       if (b.life <= 0) continue;
       b.life -= dt;
       const p = b.mesh.position;
+      _c.copy(p);
       p.addScaledVector(b.vel, dt);
       if (p.distanceToSquared(chest) < 0.55 * 0.55 || (Math.hypot(p.x - px, p.z - pz) < 0.42 && p.y > player.pos.y && p.y < player.pos.y + player.height)) {
-        this.onPlayerHit(b.dmg, _c.copy(p).addScaledVector(b.vel, -1));
+        this.onPlayerHit(b.dmg, _d.copy(p).addScaledVector(b.vel, -1));
         b.life = 0;
       } else if (p.y < 0.03 || colliders.pointInside(p.x, p.y, p.z)) {
         effects.sparks(p, -b.vel.x * 0.02, 0.5, -b.vel.z * 0.02, 5);
+        // 从上一帧的位置补一条射线，求出打中的是哪个面，在那里留一块焦痕
+        const sp = b.vel.length(), len = sp * dt + 0.2;
+        if (colliders.raycast(_c.x, _c.y, _c.z, b.vel.x / sp || 1e-9, b.vel.y / sp || 1e-9, b.vel.z / sp || 1e-9, len, _hit) < len)
+          this.world.decals.add(_d.copy(_c).addScaledVector(b.vel, _hit.t / sp), _hit.nx, _hit.ny, _hit.nz, 'scorch');
         const [vol, pan] = this.spatial(p);
         if (vol > 0.5) audio.impact(vol, pan);
         b.life = 0;
@@ -371,4 +338,92 @@ function raySphere(o: THREE.Vector3, d: THREE.Vector3, cx: number, cy: number, c
   const t = -b - Math.sqrt(disc);
   return t > 0 ? t : Infinity;
 }
+
+// ---------------------------------------------------------------------------
+// 姿势函数：每帧根据敌人的状态算出每根骨骼该转多少。
+// 约定：rotation.x 为正 = 向下的肢体往后摆 / 朝前的部件往下低头。
+
+/** 摆完姿势后把身体整体上下挪一下，让最低的那只脚正好踩在地面上。 */
+function plant(e: Enemy, tips: string[]) {
+  e.group.updateMatrixWorld(true);
+  let min = Infinity;
+  for (const k of tips) min = Math.min(min, e.bones[k].matrixWorld.elements[13]);
+  e.bones.root.position.y += e.pos.y - min;
+}
+const rest = (b: THREE.Bone) => b.userData.rest as THREE.Vector3;
+
+// 奔跑步态：两条后腿先后蹬地，两条前腿再先后落地
+const HOUND_LEGS: [string, number, number][] = [['bl', 0, 0.75], ['br', 0.8, 0.75], ['fl', 3.0, 0.62], ['fr', 3.8, 0.62]];
+const HOUND_TIPS = ['blT', 'brT', 'flT', 'frT'];
+function poseHound(e: Enemy, t: number, rel: number, dist: number) {
+  const b = e.bones, m = e.move, ph = e.anim;
+  const bite = e.act > 0 ? Math.sin((1 - e.act / 0.4) * Math.PI) : 0;
+  for (const [id, off, amp] of HOUND_LEGS) {
+    const p = ph + off, lift = Math.max(0, -Math.cos(p)); // 腿往前收的那半圈要抬脚
+    b[id + '1'].rotation.x = m * amp * Math.sin(p) + bite * 0.2;
+    b[id + '2'].rotation.x = m * lift * 1.0;
+    b[id + '3'].rotation.x = -m * lift * 0.6;
+  }
+  const flex = Math.sin(ph + 0.4);
+  b.root.rotation.x = m * Math.sin(ph + 1.2) * 0.07 - e.hitK * 0.08;
+  b.spine.rotation.x = m * flex * 0.1;
+  b.spine.rotation.z = e.hitK * 0.3 * e.hitSide;
+  b.chest.rotation.x = -m * flex * 0.13 + bite * 0.22;
+  const look = clamp(rel, -0.9, 0.9);
+  b.neck.rotation.x = -(b.root.rotation.x + b.spine.rotation.x + b.chest.rotation.x) * 0.8 - bite * 0.4 + e.hitK * 0.2;
+  b.neck.rotation.y = look * 0.5; b.head.rotation.y = look * 0.4;
+  b.head.rotation.x = bite * 0.2;
+  b.head.rotation.z = Math.sin(t * 2.3 + e.phase) * 0.05 * (1 - m);
+  b.jaw.rotation.x = bite * 0.75 + (dist < 10 ? 0.14 + Math.sin(t * 13 + e.phase) * 0.07 : 0.02);
+  b.tail1.rotation.y = Math.sin(t * 8 + e.phase) * (0.15 + m * 0.3); b.tail2.rotation.y = Math.sin(t * 8 + e.phase - 1) * (0.2 + m * 0.4);
+  b.tail1.rotation.x = -0.25 * m + 0.2 * (1 - m);
+  const r = rest(b.root);
+  b.root.position.set(r.x, r.y, r.z + bite * 0.3);
+  plant(e, HOUND_TIPS);
+  b.root.position.y += m * Math.max(0, Math.sin(ph * 2 + 1)) * 0.06; // 奔跑时四脚有短暂的腾空
+}
+
+const GUARD_TIPS = ['legLT', 'legRT'];
+function poseGuard(e: Enemy, dt: number, t: number, rel: number, dist: number, targetY: number) {
+  const b = e.bones, m = e.move, ph = e.anim;
+  e.aimYaw = damp(e.aimYaw, e.hasLos ? clamp(rel, -0.8, 0.8) : 0, 6, dt);
+  e.aimPitch = damp(e.aimPitch, e.hasLos ? clamp(Math.atan2(targetY - (e.pos.y + 2.0), dist), -0.5, 0.6) : -0.25, 6, dt);
+  e.guardK = damp(e.guardK, e.hasLos ? 1 : 0, 4, dt);
+  const brace = e.charge > 0 ? 1 - e.charge / 0.55 : e.burst > 0 ? 1 : 0; // 充能和连射时压低重心
+  for (const [id, off] of [['legL', 0], ['legR', Math.PI]] as [string, number][]) {
+    const p = ph + off, th = m * 0.5 * Math.sin(p) - brace * 0.1, kn = m * Math.max(0, -Math.cos(p)) * 0.95 + brace * 0.22;
+    b[id + '1'].rotation.x = th; b[id + '2'].rotation.x = kn; b[id + '3'].rotation.x = -(th + kn) * 0.8;
+  }
+  b.root.rotation.z = m * Math.sin(ph) * 0.035;
+  b.root.rotation.y = m * Math.sin(ph) * 0.07;
+  b.torso.rotation.y = e.aimYaw - b.root.rotation.y;
+  b.torso.rotation.x = m * 0.05 + brace * 0.1 - e.hitK * 0.12 - e.recoil * 0.03;
+  b.torso.rotation.z = e.hitK * 0.09 * e.hitSide - b.root.rotation.z;
+  b.torso.position.y = rest(b.torso).y + Math.sin(t * 1.7 + e.phase) * 0.008;
+  b.head.rotation.y = clamp(rel - e.aimYaw, -0.7, 0.7);
+  b.head.rotation.x = -e.aimPitch * 0.6 + e.hitK * 0.15;
+  b.armR1.rotation.x = -e.aimPitch - e.recoil * 0.07;
+  b.gun.position.z = rest(b.gun).z - e.recoil * 0.16;
+  // 左臂：看得见玩家时把护盾举到身前，否则随步伐摆动
+  b.armL1.rotation.x = -0.5 * e.guardK + (1 - e.guardK) * m * Math.sin(ph + Math.PI) * 0.3;
+  b.armL2.rotation.x = -0.25 * e.guardK; b.armL2.rotation.y = 0.45 * e.guardK;
+  const r = rest(b.root);
+  b.root.position.set(r.x + m * Math.sin(ph) * 0.04, r.y, r.z);
+  plant(e, GUARD_TIPS);
+}
+
+function poseGull(e: Enemy, t: number, rel: number, dist: number, targetY: number) {
+  const b = e.bones;
+  const w = t * 11 + e.phase, amp = 0.44 - clamp(e.vel.length() / 9, 0, 1) * 0.16; // 飞得快时改为滑翔，扇得浅一些
+  const u1 = Math.sin(w) * amp + 0.1, u2 = Math.sin(w - 1.0) * amp * 1.3;           // 外翼比内翼慢半拍，翅膀才有"甩"的感觉
+  b.wingL1.rotation.z = -u1; b.wingL2.rotation.z = -u2; b.wingR1.rotation.z = u1; b.wingR2.rotation.z = u2;
+  b.root.position.y = -Math.sin(w) * 0.05;
+  b.root.rotation.x = clamp(-e.vel.y * 0.04, -0.3, 0.3) - e.recoil * 0.22 + e.hitK * 0.25;
+  b.root.rotation.z = e.hitK * 0.4 * e.hitSide;
+  b.head.rotation.y = clamp(rel, -0.9, 0.9);
+  b.head.rotation.x = clamp(Math.atan2(e.pos.y - targetY, Math.max(1, dist)), -0.2, 1.0) * 0.8;
+  b.tail.rotation.x = Math.sin(w - 0.6) * 0.1 - clamp(e.vel.y * 0.05, -0.3, 0.3);
+}
+
+const _hit = { t: 0, nx: 0, ny: 0, nz: 0 };
 const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _c = new THREE.Vector3(), _d = new THREE.Vector3(), _chest = new THREE.Vector3();

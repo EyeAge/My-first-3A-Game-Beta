@@ -52,7 +52,7 @@ export class Mission {
     this.stats = { shots: 0, hits: 0, kills: 0 };
     this.events = []; this.trickleT = 16; this.lowHpT = 0; this.evacHintT = 0;
     this.port.relays.forEach((r) => r.reset());
-    this.at(1.6, () => this.radio('几猫队员，这里是指挥中心。港区主控已封锁泊位。切断堆场、仓库、码头的三处中继。'));
+    this.at(1.6, () => this.radio('激战队员，这里是指挥中心。港区主控已封锁泊位。切断堆场、仓库、码头的三处中继。'));
     this.at(10, () => { this.radio('你已被发现！空中有机械飞鸥，地面有机械猎犬。消灭它们。'); this.audio.alarm(); this.wave(0); });
   }
 

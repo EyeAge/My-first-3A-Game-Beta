@@ -39,7 +39,7 @@ export class UI {
       <div class="objective"><div class="k">任务目标</div><div class="t" data-f="obj"></div>
         <div class="relays"><i></i><i></i><i></i><span data-f="relayN">中继 0/3</span></div></div>
       <div class="status"><div class="k">生命状态</div><div class="hp"><b data-f="hp">100</b><div class="bar"><i data-f="hpbar"></i></div></div></div>
-      <div class="ammo"><div class="n"><b data-f="ammo">30</b><span data-f="reserve">120</span></div><div class="w">几猫九式突击步枪</div><div class="msg" data-f="ammomsg"></div></div>
+      <div class="ammo"><div class="n"><b data-f="ammo">30</b><span data-f="reserve">120</span></div><div class="w">九式突击步枪</div><div class="msg" data-f="ammomsg"></div></div>
       <div class="cross" data-f="cross"><i></i><i></i><i></i><i></i><u></u></div>
       <div class="hitmark" data-f="hitmark"><i></i><i></i><i></i><i></i></div>
       <div class="dmgdir" data-f="dmgdir"><i></i></div>
@@ -47,7 +47,7 @@ export class UI {
       <div class="radio" data-f="radio"><div class="who">指挥中心</div><div class="txt" data-f="radiotxt"></div></div>
       <div class="feed" data-f="feed"></div>
       <div class="hint" data-f="hint"></div>
-      <div class="loc" data-f="loc"><div class="a">B4</div><div><b>几猫突击小队</b><span>几猫港区 · 四号泊位 · 05:42</span></div></div>
+      <div class="loc" data-f="loc"><div class="a">B4</div><div><b>激战突击小队</b><span>北澜港 · 四号泊位 · 05:42</span></div></div>
       <div class="markers" data-f="markers"></div>
     </div>
     <div class="touch" data-f="touch">
@@ -58,8 +58,8 @@ export class UI {
     </div>
     <div class="menu" data-f="menu">
       <section data-s="main">
-        <div class="eyebrow">几猫突击小队 · 几猫港区 · 05:42</div>
-        <h1>几猫<small>3A大作</small></h1>
+        <div class="eyebrow">激战突击小队 · 北澜港 · 05:42</div>
+        <h1>激战<small>港区行动</small></h1>
         <p class="lead">港区防御系统失控。切断三处中继，突破封锁，登船撤离。</p>
         <nav><button class="primary" data-a="start">开始行动</button><button data-a="settings">设置</button><button data-a="controls">操作说明</button><button data-a="about">项目介绍</button></nav>
         <p class="foot">复刻练手版 · 国产第一人称射击游戏 · 开发体验版</p>
@@ -75,7 +75,7 @@ export class UI {
         <nav><button class="primary" data-a="restart">重试</button></nav>
       </section>
       <section data-s="win">
-        <div class="eyebrow">四号泊位 · 行动简报</div><h2>几猫港区已解除封锁</h2>
+        <div class="eyebrow">四号泊位 · 行动简报</div><h2>北澜港已解除封锁</h2>
         <div class="rating"><span>行动评级</span><b data-f="w-rating"></b></div>
         <dl><div><dt>用时</dt><dd data-f="w-time"></dd></div><div><dt>命中率</dt><dd data-f="w-acc"></dd></div><div><dt>摧毁机械</dt><dd data-f="w-kills"></dd></div><div><dt>重试次数</dt><dd data-f="w-retries"></dd></div></dl>
         <nav><button class="primary" data-a="restart">再次出击</button></nav>
@@ -100,7 +100,7 @@ export class UI {
         <p class="note">左手拇指在左侧任意位置滑动来移动，右手在屏幕右侧拖动转动视角。屏幕按钮：开火 · 瞄准 · 换弹 · 跳跃 · 交互。</p>
       </div>
       <div data-p="about">
-        <p>《几猫》是一款运行在浏览器里的第一人称射击游戏。这一版是对照原版 demo 的效果，用 Vite + TypeScript + three.js 从零重写的复刻练手版。</p>
+        <p>《激战》是一款运行在浏览器里的第一人称射击游戏。这一版是对照原版 demo 的效果，用 Vite + TypeScript + three.js 从零重写的复刻练手版。</p>
         <p>和原版一样：没有任何图片、模型或音频文件。集装箱的涂装和锈迹、湿地面的反光、天空、雨、枪声，全部是代码在你打开页面时现场生成的。</p>
         <p>目前仍在持续开发中，欢迎体验并提出建议。</p>
       </div>

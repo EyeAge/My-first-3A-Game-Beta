@@ -5,7 +5,7 @@ import { NavGrid } from './nav';
 import { SUN_DIR } from './atmosphere';
 import { asphaltTexture, containerEndTexture, containerSideTexture, corrugationNormal, signTexture, stencilTexture, windowsTexture } from './textures';
 
-// 几猫港区 · 四号泊位。
+// 北澜港 · 四号泊位。
 // 坐标约定：+x 是东（海在东边），-z 是北。玩家从西南角进场，撤离艇在码头南端。
 
 export const QUAY_X = 62;
@@ -31,7 +31,7 @@ export interface Port {
 }
 
 const PALETTE = [0x9a3b26, 0x1f5488, 0x1d6f6c, 0xb85a1c, 0x70787c, 0x2f6240, 0xb38d2c, 0xb5b2a8, 0x24304a, 0x7a2430];
-const BRANDS: [string, string][] = [['几猫远洋', '集装箱运输'], ['几猫北航', '北极 · 大西洋 · 支线运输'], ['几猫太平洋', '远洋 · 冷链 · 散货'], ['几猫联运', '多式联运']];
+const BRANDS: [string, string][] = [['北澜远洋', '集装箱运输'], ['北澜北航', '北极 · 大西洋 · 支线运输'], ['北澜太平洋', '远洋 · 冷链 · 散货'], ['北澜联运', '多式联运']];
 
 export function buildPort(progress: (msg: string) => void): Port {
   const rng = mulberry32(4207);
@@ -66,7 +66,7 @@ export function buildPort(progress: (msg: string) => void): Port {
         float gWet = pfbm(vWp.xz * 0.7 + 3.0);
         roughnessFactor = mix(mix(0.62, 0.3, gWet), 0.03, gPud);`);
   };
-  groundMat.customProgramCacheKey = () => 'jimao-wet-ground';
+  groundMat.customProgramCacheKey = () => 'wet-ground';
   const ground = new THREE.Mesh(new THREE.PlaneGeometry(462, 600), groundMat);
   ground.rotation.x = -Math.PI / 2;
   ground.position.set(QUAY_X - 231, 0, 0);
@@ -202,7 +202,7 @@ export function buildPort(progress: (msg: string) => void): Port {
     group.add(m);
     return m;
   };
-  plane(signTexture(['四号泊位维修车间', '几猫港区 · 港务局'], { w: 1024, h: 180, bg: '#1b2227', fg: '#e8e4da', size: 84 }), 17, 3, -73.85, 8.9, 0, Math.PI / 2, 0.25);
+  plane(signTexture(['四号泊位维修车间', '北澜港 · 港务局'], { w: 1024, h: 180, bg: '#1b2227', fg: '#e8e4da', size: 84 }), 17, 3, -73.85, 8.9, 0, Math.PI / 2, 0.25);
   plane(signTexture(['危险', '请勿靠近 · 自动作业车辆'], { stripe: true }), 2.4, 1.2, -73.85, 2.4, 11, Math.PI / 2);
   plane(signTexture(['门禁控制', '仅限授权人员'], { bg: '#b53a24', fg: '#f3ece0' }), 2.0, 1.0, -73.85, 2.4, -11, Math.PI / 2);
 
@@ -222,7 +222,7 @@ export function buildPort(progress: (msg: string) => void): Port {
   box(66.6, 2.95, 84.6, 5.2, 0.3, 4.8, 0x2b3238);
   for (const z of [82.2, 97.8]) box(66.1, 0.6, z, 7.6, 0.1, 0.1, 0xb38d2c);
   box(69.9, 0.6, 90, 0.1, 0.1, 15.6, 0xb38d2c);
-  plane(signTexture(['几猫撤离艇', '四号登船点'], { bg: '#1b2227', fg: '#ffb347' }), 3.2, 1.6, 64.25, 1.5, 84.6, -Math.PI / 2, 0.5);
+  plane(signTexture(['撤离艇', '四号登船点'], { bg: '#1b2227', fg: '#ffb347' }), 3.2, 1.6, 64.25, 1.5, 84.6, -Math.PI / 2, 0.5);
 
   // ---------------------------------------------------------------- 中继
   const relays: Relay[] = [];

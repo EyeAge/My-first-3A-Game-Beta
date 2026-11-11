@@ -19,7 +19,7 @@ export function profileOf(q: Quality): QualityProfile {
   }
 }
 
-const KEY = 'jimao-3a-settings-v1';
+const KEY = 'jizhan-settings-v1';
 export function autoQuality(): Quality {
   const mobile = /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
   const cores = navigator.hardwareConcurrency || 4;

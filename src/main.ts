@@ -8,6 +8,7 @@ import { Enemies } from './game/enemies';
 import { Mission } from './game/mission';
 import { Player } from './game/player';
 import { Weapon } from './game/weapon';
+import { Decals } from './render/decals';
 import { Effects } from './render/effects';
 import { Renderer } from './render/renderer';
 import { UI, type HudFrame, type Marker } from './ui/ui';
@@ -51,10 +52,12 @@ async function boot() {
   await step('正在加载弹道与烟雾', 0.68);
   const effects = new Effects();
   scene.add(effects.group);
+  const decals = new Decals();
+  scene.add(decals.mesh);
   const audio = new GameAudio();
   audio.setVolume(settings.volume);
 
-  await step('正在检查几猫制式步枪', 0.78);
+  await step('正在检查九式突击步枪', 0.78);
   const input = new Input(canvas);
   const player = new Player();
   const weapon = new Weapon();
@@ -62,7 +65,7 @@ async function boot() {
   weapon.view.visible = false;
 
   await step('正在启动港区主控', 0.88);
-  const enemies = new Enemies({ colliders: port.colliders, nav: port.nav, effects, audio, camera });
+  const enemies = new Enemies({ colliders: port.colliders, nav: port.nav, effects, decals, audio, camera });
   scene.add(enemies.group);
   const ui = new UI(document.getElementById('ui')!, settings, input, auto);
   const mission = new Mission(port, enemies, ui, audio, weapon, player);
@@ -91,6 +94,7 @@ async function boot() {
   const startMission = (isRetry: boolean) => {
     audio.resume();
     enemies.clear();
+    decals.clear();
     player.reset(port.playerStart);
     weapon.reset();
     mission.reset(isRetry);
@@ -156,7 +160,7 @@ async function boot() {
       }
       player.applyCamera(camera, t);
       camera.updateMatrixWorld();
-      weapon.update(dt, t, input, player, port.colliders, enemies, { colliders: port.colliders, nav: port.nav, effects, audio, camera }, mission.stats, input.ads);
+      weapon.update(dt, t, input, player, port.colliders, enemies, { colliders: port.colliders, nav: port.nav, effects, decals, audio, camera }, mission.stats, input.ads);
       enemies.update(dt, t, player);
       mission.update(dt, input);
       const fov = lerp(settings.fov, settings.fov * 0.7, weapon.ads) + (player.sprinting ? 5 : 0);
@@ -165,7 +169,7 @@ async function boot() {
       if (!player.alive) { setState('dead'); input.releaseLock(); audio.fail(); ui.show('dead', mission.result()); }
       else if (mission.won) {
         setState('won'); input.releaseLock(); audio.win();
-        ui.radio('几猫队员已登船，港区封锁解除。干得漂亮！', 8);
+        ui.radio('激战队员已登船，港区封锁解除。干得漂亮！', 8);
         ui.show('win', mission.result());
       }
     } else if (state === 'menu') {
@@ -179,6 +183,7 @@ async function boot() {
     }
 
     effects.update(dt);
+    decals.update(dt);
     port.update(t, state === 'menu' ? camera.position : player.pos);
     sea.update(t);
     sky.uniforms.uTime.value = t;
@@ -215,7 +220,7 @@ async function boot() {
   bootEl.classList.add('done');
 
   // 调试入口：在浏览器控制台里可以用 __game 直接操纵游戏状态
-  (window as unknown as { __game: unknown }).__game = { scene, camera, player, weapon, enemies, mission, port, input, ui, start: () => startMission(false), get state() { return state; },
+  (window as unknown as { __game: unknown }).__game = { scene, camera, player, weapon, enemies, mission, port, input, ui, decals, effects, start: () => startMission(false), get state() { return state; },
     /** 不渲染，直接快进若干秒 */
     sim: (sec: number) => { for (let i = 0; i < sec * 60; i++) update(1 / 60); } };
 }
@@ -223,5 +228,5 @@ async function boot() {
 boot().catch((err) => {
   console.error(err);
   bootEl.classList.add('fatal');
-  bootMsg.textContent = `几猫启动失败：${err instanceof Error ? err.message : String(err)}`;
+  bootMsg.textContent = `《激战》启动失败：${err instanceof Error ? err.message : String(err)}`;
 });

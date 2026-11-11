@@ -10,7 +10,7 @@ const HIP = new THREE.Vector3(0.19, -0.2, -0.78), ADS = new THREE.Vector3(0, -0.
 
 export interface Stats { shots: number; hits: number; kills: number }
 
-/** 几猫九式突击步枪：第一人称枪模、开火、换弹、近战。 */
+/** 九式突击步枪：第一人称枪模、开火、换弹、近战。 */
 export class Weapon {
   readonly view = new THREE.Group();   // 挂在相机上
   ammo = MAG; reserve = 120;
@@ -79,7 +79,7 @@ export class Weapon {
   get reloadProgress() { return this.reloading > 0 ? 1 - this.reloading / RELOAD : 0; }
 
   update(dt: number, t: number, input: Input, player: Player, colliders: Colliders, enemies: Enemies, world: World, stats: Stats, wantAds: boolean) {
-    const { effects, audio, camera } = world;
+    const { effects, decals, audio, camera } = world;
     this.cooldown -= dt; this.meleeT -= dt;
     this.hitMarker = Math.max(0, this.hitMarker - dt * 4);
     this.ads = damp(this.ads, wantAds && this.reloading <= 0 && !player.sprinting ? 1 : 0, 14, dt);
@@ -127,6 +127,7 @@ export class Weapon {
           enemies.damage(eh.enemy, eh.weak ? 58 : 24, eh.weak);
         } else if (wallT < 300) {
           effects.sparks(_p, this.hit.nx, this.hit.ny, this.hit.nz, 7);
+          decals.add(_p, this.hit.nx, this.hit.ny, this.hit.nz, this.hit.ny > 0.5 && _p.y < 0.05 ? 'ground' : 'metal');
           const [vol, pan] = enemies.spatial(_p);
           if (vol > 0.55) audio.impact(vol * 0.6, pan);
         }
