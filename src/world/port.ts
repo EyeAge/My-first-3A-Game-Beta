@@ -1,11 +1,13 @@
 import * as THREE from 'three';
 import { mulberry32, pick } from '../core/math';
 import { Colliders } from './colliders';
+import { buildDetails, type BoxSpec } from './details';
 import { NavGrid } from './nav';
+import { reflectionUniforms, type ReflectionUniforms } from '../render/reflection';
 import { SUN_DIR } from './atmosphere';
 import { asphaltTexture, containerEndTexture, containerSideTexture, corrugationNormal, signTexture, stencilTexture, windowsTexture } from './textures';
 
-// 北澜港 · 四号泊位。
+// 激战港区 · 四号泊位。
 // 坐标约定：+x 是东（海在东边），-z 是北。玩家从西南角进场，撤离艇在码头南端。
 
 export const QUAY_X = 62;
@@ -26,12 +28,14 @@ export interface Port {
   playerStart: THREE.Vector3;
   evacPos: THREE.Vector3;
   sun: THREE.DirectionalLight;
+  ground: THREE.Mesh;
+  reflection: ReflectionUniforms;
   setLampCount(n: number): void;
   update(t: number, focus: THREE.Vector3): void;
 }
 
 const PALETTE = [0x9a3b26, 0x1f5488, 0x1d6f6c, 0xb85a1c, 0x70787c, 0x2f6240, 0xb38d2c, 0xb5b2a8, 0x24304a, 0x7a2430];
-const BRANDS: [string, string][] = [['北澜远洋', '集装箱运输'], ['北澜北航', '北极 · 大西洋 · 支线运输'], ['北澜太平洋', '远洋 · 冷链 · 散货'], ['北澜联运', '多式联运']];
+const BRANDS: [string, string][] = [['激战远洋', '集装箱运输'], ['激战北航', '北极 · 大西洋 · 支线运输'], ['激战太平洋', '远洋 · 冷链 · 散货'], ['激战联运', '多式联运']];
 
 export function buildPort(progress: (msg: string) => void): Port {
   const rng = mulberry32(4207);
@@ -47,10 +51,12 @@ export function buildPort(progress: (msg: string) => void): Port {
   const groundMat = new THREE.MeshStandardMaterial({ map: asphalt, roughness: 0.5, metalness: 0, envMapIntensity: 1.0 });
   // 往标准材质里注入一段着色器：按世界坐标的噪声决定哪里是积水。
   // 积水处粗糙度趋近 0，于是像镜子一样反射天空，这就是"湿地面"的全部秘密。
+  const reflection = reflectionUniforms();
   groundMat.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, reflection);
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vWp;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWp = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+      .replace('#include <common>', '#include <common>\nvarying vec3 vWp;\nvarying vec4 vRefl;\nuniform mat4 uReflM;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWp = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvRefl = uReflM * vec4(vWp, 1.0);');
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', /* glsl */ `#include <common>
         varying vec3 vWp;
@@ -58,15 +64,35 @@ export function buildPort(progress: (msg: string) => void): Port {
         float pnoise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
           return mix(mix(phash(i), phash(i+vec2(1,0)), f.x), mix(phash(i+vec2(0,1)), phash(i+vec2(1,1)), f.x), f.y); }
         float pfbm(vec2 p){ float a = 0.5, s = 0.0; for(int i=0;i<4;i++){ s += a*pnoise(p); p = p*2.03 + 5.3; a *= 0.5; } return s; }
-        float gPud;`)
+        float gPud;
+        varying vec4 vRefl;
+        uniform sampler2D tRefl; uniform float uReflOn; uniform float uReflTime;
+        // 雨点打在积水上的涟漪：把水面分成格子，每格里有一圈按各自节奏不断扩散的环
+        vec2 rip(vec2 p, float t){
+          vec2 i = floor(p), f = fract(p) - 0.5;
+          float h = phash(i), tt = fract(t * 0.8 + h);
+          vec2 d = f - (vec2(phash(i + 7.3), phash(i + 3.1)) - 0.5) * 0.5;
+          float r = length(d), ring = r - tt * 0.45;
+          return d / max(r, 1e-3) * sin(ring * 42.0) * smoothstep(0.07, 0.0, abs(ring)) * (1.0 - tt);
+        }`)
       .replace('#include <map_fragment>', /* glsl */ `#include <map_fragment>
         gPud = smoothstep(0.47, 0.6, pfbm(vWp.xz * 0.085));
         diffuseColor.rgb *= mix(1.0, 0.4, gPud);`)
       .replace('#include <roughnessmap_fragment>', /* glsl */ `float roughnessFactor = roughness;
         float gWet = pfbm(vWp.xz * 0.7 + 3.0);
-        roughnessFactor = mix(mix(0.62, 0.3, gWet), 0.03, gPud);`);
+        roughnessFactor = mix(mix(0.62, 0.3, gWet), 0.03, gPud);`)
+      // 平面反射：用镜像相机拍到的画面替换掉"只有天空"的环境反射。越粗糙的地方采样越模糊的层级，占比也越低
+      .replace('#include <lights_fragment_end>', /* glsl */ `#include <lights_fragment_end>
+        if (uReflOn > 0.5) {
+          vec2 rp = (rip(vWp.xz * 1.4, uReflTime) + rip(vWp.xz * 2.3 + 7.0, uReflTime + 0.37)) * gPud;
+          vec2 rough = (vec2(pnoise(vWp.xz * 9.0), pnoise(vWp.xz * 9.0 + 31.0)) - 0.5) * (1.0 - gPud);
+          vec2 ruv = vRefl.xy / vRefl.w + rp * 0.02 + rough * 0.012;
+          vec3 refl = textureLod(tRefl, ruv, roughnessFactor * 4.5).rgb;
+          float fres = 0.04 + 0.96 * pow(1.0 - saturate(dot(normal, normalize(vViewPosition))), 5.0);
+          reflectedLight.indirectSpecular = mix(reflectedLight.indirectSpecular, refl * fres, 1.0 - smoothstep(0.4, 0.9, roughnessFactor));
+        }`);
   };
-  groundMat.customProgramCacheKey = () => 'wet-ground';
+  groundMat.customProgramCacheKey = () => 'wet-ground-refl';
   const ground = new THREE.Mesh(new THREE.PlaneGeometry(462, 600), groundMat);
   ground.rotation.x = -Math.PI / 2;
   ground.position.set(QUAY_X - 231, 0, 0);
@@ -101,9 +127,29 @@ export function buildPort(progress: (msg: string) => void): Port {
   const addContainer = (x: number, y: number, z: number, rot: number, c: number) => {
     variants[Math.floor(rng() * variants.length)].items.push({ x, y, z, rot, c });
   };
+  // 堆场里的箱子额外加上立体的角柱、上下纵梁和箱门锁杆：光靠贴图，侧光下看不出棱角
+  const yard: BoxSpec[] = [];
+  const hardware = (x: number, y: number, z: number, rot: number, c: number) => {
+    const frame = col.setHex(c).multiplyScalar(0.62).getHex();
+    const part = (lx: number, ly: number, lz: number, sx: number, sy: number, sz: number, color: number) =>
+      rot ? box(x + lz, y + ly, z - lx, sz, sy, sx, color) : box(x + lx, y + ly, z + lz, sx, sy, sz, color);
+    for (const a of [-1, 1]) {
+      for (const b of [-1, 1]) {
+        part(a * (CW / 2 - 0.05), 0, b * (CL / 2 - 0.05), 0.13, CH, 0.13, frame);
+        part(a * (CW / 2 - 0.04), b * (CH / 2 - 0.07), 0, 0.1, 0.14, CL - 0.2, frame);
+      }
+      for (const lx of [0.34, 0.84]) part(a * lx, 0, CL / 2 + 0.025, 0.04, CH - 0.36, 0.04, 0x8a8f92);
+      part(a * 0.59, -0.15, CL / 2 + 0.05, 0.36, 0.04, 0.03, 0x8a8f92); // 锁杆把手
+    }
+  };
   /** 码一摞箱子，并登记一个整摞的碰撞盒。 */
   const stack = (x: number, z: number, h: number, rot = 0, color?: number) => {
-    for (let k = 0; k < h; k++) addContainer(x, CH / 2 + k * CH, z, rot, color ?? pick(rng, PALETTE));
+    for (let k = 0; k < h; k++) {
+      const c = color ?? pick(rng, PALETTE), y = CH / 2 + k * CH;
+      addContainer(x, y, z, rot, c);
+      yard.push({ x, y, z, rot });
+      hardware(x, y, z, rot, c);
+    }
     if (h > 0) colliders.add(x, (h * CH) / 2, z, rot ? CL : CW, h * CH, rot ? CW : CL);
   };
 
@@ -202,7 +248,7 @@ export function buildPort(progress: (msg: string) => void): Port {
     group.add(m);
     return m;
   };
-  plane(signTexture(['四号泊位维修车间', '北澜港 · 港务局'], { w: 1024, h: 180, bg: '#1b2227', fg: '#e8e4da', size: 84 }), 17, 3, -73.85, 8.9, 0, Math.PI / 2, 0.25);
+  plane(signTexture(['四号泊位维修车间', '激战港区 · 港务局'], { w: 1024, h: 180, bg: '#1b2227', fg: '#e8e4da', size: 84 }), 17, 3, -73.85, 8.9, 0, Math.PI / 2, 0.25);
   plane(signTexture(['危险', '请勿靠近 · 自动作业车辆'], { stripe: true }), 2.4, 1.2, -73.85, 2.4, 11, Math.PI / 2);
   plane(signTexture(['门禁控制', '仅限授权人员'], { bg: '#b53a24', fg: '#f3ece0' }), 2.0, 1.0, -73.85, 2.4, -11, Math.PI / 2);
 
@@ -222,7 +268,7 @@ export function buildPort(progress: (msg: string) => void): Port {
   box(66.6, 2.95, 84.6, 5.2, 0.3, 4.8, 0x2b3238);
   for (const z of [82.2, 97.8]) box(66.1, 0.6, z, 7.6, 0.1, 0.1, 0xb38d2c);
   box(69.9, 0.6, 90, 0.1, 0.1, 15.6, 0xb38d2c);
-  plane(signTexture(['撤离艇', '四号登船点'], { bg: '#1b2227', fg: '#ffb347' }), 3.2, 1.6, 64.25, 1.5, 84.6, -Math.PI / 2, 0.5);
+  plane(signTexture(['激战撤离艇', '四号登船点'], { bg: '#1b2227', fg: '#ffb347' }), 3.2, 1.6, 64.25, 1.5, 84.6, -Math.PI / 2, 0.5);
 
   // ---------------------------------------------------------------- 中继
   const relays: Relay[] = [];
@@ -321,12 +367,14 @@ export function buildPort(progress: (msg: string) => void): Port {
     group.add(st);
   }
 
+  group.add(buildDetails(yard, CW, CH, CL, colliders, BOUNDS));
+
   // ---------------------------------------------------------------- 把收集到的东西变成网格
   const cGeo = new THREE.BoxGeometry(CW, CH, CL);
   for (const v of variants) {
     const mesh = new THREE.InstancedMesh(cGeo, v.mats, v.items.length);
     v.items.forEach((it, i) => {
-      mesh.setMatrixAt(i, m4.compose(v1.set(it.x, it.y, it.z), q.setFromAxisAngle(UP, it.rot), v2.set(1, 1, 1)));
+      mesh.setMatrixAt(i, m4.compose(v1.set(it.x, it.y, it.z), q.setFromAxisAngle(UP, it.rot * Math.PI / 2), v2.set(1, 1, 1)));
       mesh.setColorAt(i, col.setHex(it.c).multiplyScalar(1.5));
     });
     mesh.castShadow = mesh.receiveShadow = true;
@@ -361,7 +409,7 @@ export function buildPort(progress: (msg: string) => void): Port {
   const order = lampPos.map((_, i) => i);
   let lastSort = -1;
   return {
-    group, colliders, nav, relays, evacPos, sun,
+    group, colliders, nav, relays, evacPos, sun, ground, reflection,
     playerStart: new THREE.Vector3(-18, 0, 93),
     setLampCount(n) { lampCount = n; lastSort = -1; },
     update(t, focus) {

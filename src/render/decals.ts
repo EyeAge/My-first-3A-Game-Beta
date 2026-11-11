@@ -73,6 +73,24 @@ function atlas() {
 }
 
 /**
+ * 贴花材质：一张图集里放多种图案，每个实例用 aDecal 属性（u 偏移、v 偏移、透明度）选其中一格。
+ * polygonOffset 让贴花在深度上比墙面"靠前"一点点，避免和墙面抢像素而闪烁。
+ */
+export function decalMaterial(map: THREE.Texture, cols: number, rows: number, offset: number, roughness = 0.85) {
+  const mat = new THREE.MeshStandardMaterial({ map, transparent: true, depthWrite: false, roughness, metalness: 0.15, polygonOffset: true, polygonOffsetFactor: offset, polygonOffsetUnits: offset });
+  mat.onBeforeCompile = (sh) => {
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute vec3 aDecal;\nvarying float vFade;')
+      .replace('#include <uv_vertex>', `#include <uv_vertex>\nvMapUv = vMapUv * vec2(${(1 / cols).toFixed(6)}, ${(1 / rows).toFixed(6)}) + aDecal.xy;\nvFade = aDecal.z;`);
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying float vFade;')
+      .replace('#include <map_fragment>', '#include <map_fragment>\ndiffuseColor.a *= vFade;');
+  };
+  mat.customProgramCacheKey = () => `decal-atlas-${cols}x${rows}`;
+  return mat;
+}
+
+/**
  * 弹孔贴花。所有贴花共用一个实例化网格（一次绘制调用），循环复用：
  * 满了就覆盖最旧的；每个贴花存在一段时间后淡出。
  */
@@ -86,17 +104,7 @@ export class Decals {
     const geo = new THREE.PlaneGeometry(1, 1);
     this.attr = new THREE.InstancedBufferAttribute(new Float32Array(MAX * 3), 3).setUsage(THREE.DynamicDrawUsage);
     geo.setAttribute('aDecal', this.attr);
-    // polygonOffset 让贴花在深度上比墙面"靠前"一点点，避免和墙面抢像素而闪烁
-    const mat = new THREE.MeshStandardMaterial({ map: atlas(), transparent: true, depthWrite: false, roughness: 0.85, metalness: 0.15, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 });
-    mat.onBeforeCompile = (sh) => {
-      sh.vertexShader = sh.vertexShader
-        .replace('#include <common>', '#include <common>\nattribute vec3 aDecal;\nvarying float vFade;')
-        .replace('#include <uv_vertex>', '#include <uv_vertex>\nvMapUv = vMapUv * 0.5 + aDecal.xy;\nvFade = aDecal.z;');
-      sh.fragmentShader = sh.fragmentShader
-        .replace('#include <common>', '#include <common>\nvarying float vFade;')
-        .replace('#include <map_fragment>', '#include <map_fragment>\ndiffuseColor.a *= vFade;');
-    };
-    mat.customProgramCacheKey = () => 'decal-atlas';
+    const mat = decalMaterial(atlas(), 2, 2, -4);
     this.mesh = new THREE.InstancedMesh(geo, mat, MAX);
     this.mesh.frustumCulled = false; this.mesh.renderOrder = 2;
     this.clear();

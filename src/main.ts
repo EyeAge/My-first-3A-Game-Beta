@@ -10,6 +10,7 @@ import { Player } from './game/player';
 import { Weapon } from './game/weapon';
 import { Decals } from './render/decals';
 import { Effects } from './render/effects';
+import { PlanarReflection } from './render/reflection';
 import { Renderer } from './render/renderer';
 import { UI, type HudFrame, type Marker } from './ui/ui';
 import { bakeEnvironment, createRain, createSea, createSky, FOG_COLOR } from './world/atmosphere';
@@ -57,7 +58,7 @@ async function boot() {
   const audio = new GameAudio();
   audio.setVolume(settings.volume);
 
-  await step('正在检查九式突击步枪', 0.78);
+  await step('正在检查激战制式步枪', 0.78);
   const input = new Input(canvas);
   const player = new Player();
   const weapon = new Weapon();
@@ -71,6 +72,8 @@ async function boot() {
   const mission = new Mission(port, enemies, ui, audio, weapon, player);
   enemies.onPlayerHit = (dmg, from) => { player.takeDamage(dmg, from, mission.time); audio.hurt(); input.rumble(0.8, 0.5, 160); };
 
+  // 反射画面里不需要的东西：地面自己、雨丝、第一人称枪模、贴花
+  renderer.reflection = new PlanarReflection(renderer.gl, scene, camera, port.reflection, () => [port.ground, rain.lines, weapon.view, decals.mesh]);
   const applyQuality = () => {
     const p = profileOf(settings.quality);
     renderer.setQuality(p, port.sun);
@@ -155,9 +158,11 @@ async function boot() {
       if (input.pressed('Escape') || input.pressed('KeyP')) pause();
       player.update(dt, mission.time, input, settings, port.colliders, weapon.ads);
       if (player.stepped) audio.step(player.sprinting);
-      if (player.landed) audio.land();
+      if (player.landed) { audio.land(); effects.splash(player.pos, 0.35); }
+      else if (player.stepped && player.sprinting) effects.splash(player.pos, 0.14); // 冲刺时踩起一点积水
       if (player.inWater) {
         // 掉进海里：捞回岸上，扣一点血
+        effects.splash(tmp.set(player.pos.x, -1.7, player.pos.z), 2.2);
         player.pos.set(QUAY_X - 4, 0, clamp(player.pos.z, -94, 94)); player.vel.set(0, 0, 0);
         player.takeDamage(20, null, mission.time); audio.hurt();
         ui.hint('已从水中获救', 3);
@@ -216,7 +221,7 @@ async function boot() {
   const tick = () => {
     requestAnimationFrame(tick);
     update(Math.min(0.05, clock.getDelta()));
-    renderer.render(hurt);
+    renderer.render(hurt, t);
   };
 
   await step('正在准备首帧画面', 0.96);
@@ -227,7 +232,7 @@ async function boot() {
   bootEl.classList.add('done');
 
   // 调试入口：在浏览器控制台里可以用 __game 直接操纵游戏状态
-  (window as unknown as { __game: unknown }).__game = { scene, camera, player, weapon, enemies, mission, port, input, ui, decals, effects, start: () => startMission(false), get state() { return state; },
+  (window as unknown as { __game: unknown }).__game = { scene, camera, player, weapon, enemies, mission, port, input, ui, decals, effects, renderer, start: () => startMission(false), get state() { return state; },
     /** 不渲染，直接快进若干秒 */
     sim: (sec: number) => { for (let i = 0; i < sec * 60; i++) update(1 / 60); } };
 }

@@ -154,7 +154,10 @@ export class Enemies {
   private kill(e: Enemy, weak: boolean) {
     e.alive = false;
     const c = _a.set(e.pos.x, e.pos.y + e.spec.bodyY, e.pos.z);
-    this.world.effects.explosion(c, e.kind === 'guard' ? 1.7 : e.kind === 'hound' ? 1 : 0.8);
+    const big = e.kind === 'guard' ? 1.7 : e.kind === 'hound' ? 1 : 0.8;
+    this.world.effects.explosion(c, big);
+    this.world.effects.debris(c, big, e.kind === 'guard' ? 22 : 12);
+    this.world.effects.smoke(c, big);
     const [vol, pan] = this.spatial(c);
     this.world.audio.explode(vol, pan);
     this.group.remove(e.group);
@@ -316,6 +319,7 @@ export class Enemies {
         b.life = 0;
       } else if (p.y < 0.03 || colliders.pointInside(p.x, p.y, p.z)) {
         effects.sparks(p, -b.vel.x * 0.02, 0.5, -b.vel.z * 0.02, 5);
+        if (p.y < 0.03 && p.x > BOUNDS.maxX + 0.8) effects.splash(_d.set(p.x, -1.7, p.z), 0.8);
         // 从上一帧的位置补一条射线，求出打中的是哪个面，在那里留一块焦痕
         const sp = b.vel.length(), len = sp * dt + 0.2;
         if (colliders.raycast(_c.x, _c.y, _c.z, b.vel.x / sp || 1e-9, b.vel.y / sp || 1e-9, b.vel.z / sp || 1e-9, len, _hit) < len)

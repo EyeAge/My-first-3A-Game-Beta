@@ -5,6 +5,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import type { QualityProfile } from '../core/settings';
+import type { PlanarReflection } from './reflection';
 
 // 后处理链：场景 → 泛光（让灯和枪口焰"发光"）→ 调色与暗角 → 色调映射输出。
 // 整条链都在线性 HDR 空间里算，最后一步才压回屏幕能显示的范围。
@@ -30,6 +31,7 @@ export class Renderer {
   private composer!: EffectComposer;
   private grade!: ShaderPass;
   private profile!: QualityProfile;
+  reflection: PlanarReflection | null = null;
 
   constructor(private canvas: HTMLCanvasElement, private scene: THREE.Scene, private camera: THREE.PerspectiveCamera) {
     this.gl = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
@@ -67,11 +69,13 @@ export class Renderer {
     this.gl.setSize(w, h, false);
     this.composer.setPixelRatio(this.profile.pixelRatio);
     this.composer.setSize(w, h);
+    this.reflection?.configure(this.profile.reflect, w * this.profile.pixelRatio, h * this.profile.pixelRatio);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
   }
 
-  render(hurt: number) {
+  render(hurt: number, time = 0) {
+    this.reflection?.render(time);
     this.grade.uniforms.uHurt.value = hurt;
     this.composer.render();
   }

@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { clamp, damp } from '../core/math';
 import type { Input } from '../core/input';
 import type { Colliders, RayHit } from '../world/colliders';
+import { QUAY_X } from '../world/port';
 import type { Enemies, World } from './enemies';
 import type { Player } from './player';
 
@@ -10,7 +11,7 @@ const HIP = new THREE.Vector3(0.19, -0.2, -0.78), ADS = new THREE.Vector3(0, -0.
 
 export interface Stats { shots: number; hits: number; kills: number }
 
-/** 九式突击步枪：第一人称枪模、开火、换弹、近战。 */
+/** 激战九式突击步枪：第一人称枪模、开火、换弹、近战。 */
 export class Weapon {
   readonly view = new THREE.Group();   // 挂在相机上
   ammo = MAG; reserve = 120;
@@ -117,16 +118,26 @@ export class Weapon {
         const eh = enemies.raycast(o, d, wallT);
         const endT = eh ? eh.t : wallT;
         _p.copy(o).addScaledVector(d, endT);
+        // 打到岸壁以外的"地面"其实是海面上空：把落点沿弹道延长到海面
+        const water = !eh && wallT < 300 && this.hit.ny > 0.5 && _p.y < 0.05 && _p.x > QUAY_X + 0.8;
+        if (water) _p.copy(o).addScaledVector(d, (-1.7 - o.y) / d.y);
         this.muzzle.getWorldPosition(_m);
         effects.tracer(_m, _p);
+        // 抛壳：从机匣右侧甩出去
+        _sh.copy(o).addScaledVector(d, 0.4).addScaledVector(_r, 0.05 + 0.17 * (1 - this.ads)).addScaledVector(_u, -0.12);
+        effects.shell(_sh, player.vel.x + _r.x * (2 + Math.random()) + _u.x * 1.8 + d.x * (Math.random() - 0.5),
+          player.vel.y + _r.y * 2 + _u.y * (1.6 + Math.random()), player.vel.z + _r.z * (2 + Math.random()) + _u.z * 1.8 + d.z * (Math.random() - 0.5));
         if (eh) {
           stats.hits++;
           this.hitMarker = 1; this.hitWeak = eh.weak;
           if (eh.weak) audio.weak(); else audio.hit();
           effects.sparks(_p, -d.x, 0.3, -d.z, eh.weak ? 12 : 6);
           enemies.damage(eh.enemy, eh.weak ? 58 : 24, eh.weak);
+        } else if (water) {
+          effects.splash(_p, 0.8);
         } else if (wallT < 300) {
           effects.sparks(_p, this.hit.nx, this.hit.ny, this.hit.nz, 7);
+          effects.dust(_p, this.hit.nx, this.hit.ny, this.hit.nz);
           decals.add(_p, this.hit.nx, this.hit.ny, this.hit.nz, this.hit.ny > 0.5 && _p.y < 0.05 ? 'ground' : 'metal');
           const [vol, pan] = enemies.spatial(_p);
           if (vol > 0.55) audio.impact(vol * 0.6, pan);
@@ -163,5 +174,6 @@ export class Weapon {
     g.quaternion.slerp(_q.setFromEuler(_e), Math.min(1, dt * 18));
   }
 }
+const _sh = new THREE.Vector3();
 const _d = new THREE.Vector3(), _p = new THREE.Vector3(), _m = new THREE.Vector3(), _r = new THREE.Vector3(), _u = new THREE.Vector3();
 const _e = new THREE.Euler(), _q = new THREE.Quaternion();

@@ -8,14 +8,15 @@ export interface Settings {
 }
 export const QUALITY_LABEL: Record<Quality, string> = { low: '低', medium: '中', high: '高', ultra: '极高' };
 
-export interface QualityProfile { pixelRatio: number; shadow: number; bloom: boolean; rain: number; lamps: number }
+/** reflect 是地面反射贴图相对屏幕的分辨率比例，0 表示关闭。 */
+export interface QualityProfile { pixelRatio: number; shadow: number; bloom: boolean; rain: number; lamps: number; reflect: number }
 export function profileOf(q: Quality): QualityProfile {
   const dpr = window.devicePixelRatio || 1;
   switch (q) {
-    case 'low': return { pixelRatio: Math.min(dpr, 1) * 0.7, shadow: 0, bloom: false, rain: 500, lamps: 2 };
-    case 'medium': return { pixelRatio: Math.min(dpr, 1), shadow: 1024, bloom: true, rain: 1200, lamps: 4 };
-    case 'high': return { pixelRatio: Math.min(dpr, 1.5), shadow: 2048, bloom: true, rain: 2000, lamps: 6 };
-    case 'ultra': return { pixelRatio: Math.min(dpr, 2), shadow: 4096, bloom: true, rain: 2600, lamps: 8 };
+    case 'low': return { pixelRatio: Math.min(dpr, 1) * 0.7, shadow: 0, bloom: false, rain: 500, lamps: 2, reflect: 0 };
+    case 'medium': return { pixelRatio: Math.min(dpr, 1), shadow: 1024, bloom: true, rain: 1200, lamps: 4, reflect: 0.35 };
+    case 'high': return { pixelRatio: Math.min(dpr, 1.5), shadow: 2048, bloom: true, rain: 2000, lamps: 6, reflect: 0.5 };
+    case 'ultra': return { pixelRatio: Math.min(dpr, 2), shadow: 4096, bloom: true, rain: 2600, lamps: 8, reflect: 0.75 };
   }
 }
 
