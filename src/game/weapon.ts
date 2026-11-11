@@ -132,6 +132,7 @@ export class Weapon {
           if (vol > 0.55) audio.impact(vol * 0.6, pan);
         }
         audio.shot();
+        input.rumble(0.12, 0.45, 45);
         effects.flash(_m, 260, 0.05);
         this.flash.visible = true; this.flashT = 0.035;
         this.flash.rotation.z = Math.random() * 6.283; this.flash.scale.setScalar(0.8 + Math.random() * 0.6);

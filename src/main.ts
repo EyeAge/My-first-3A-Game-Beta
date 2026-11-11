@@ -69,7 +69,7 @@ async function boot() {
   scene.add(enemies.group);
   const ui = new UI(document.getElementById('ui')!, settings, input, auto);
   const mission = new Mission(port, enemies, ui, audio, weapon, player);
-  enemies.onPlayerHit = (dmg, from) => { player.takeDamage(dmg, from, mission.time); audio.hurt(); };
+  enemies.onPlayerHit = (dmg, from) => { player.takeDamage(dmg, from, mission.time); audio.hurt(); input.rumble(0.8, 0.5, 160); };
 
   const applyQuality = () => {
     const p = profileOf(settings.quality);
@@ -84,8 +84,9 @@ async function boot() {
 
   // ------------------------------------------------------------------ 状态切换
   let state: State = 'menu';
+  let stateAt = 0;
   const setState = (s: State) => {
-    state = s;
+    state = s; stateAt = performance.now();
     input.enabled = s === 'playing';
     weapon.view.visible = s === 'playing' || s === 'paused';
     audio.setAmbience(s === 'playing');
@@ -103,7 +104,7 @@ async function boot() {
     ui.locCard();
     setState('playing');
     input.requestLock();
-    if (!input.touchMode) setTimeout(() => { if (state === 'playing' && !input.locked) ui.hint(input.lockFailed ? '鼠标捕获不可用：按住鼠标拖动调整视角，方向键也可转向' : '点击游戏画面以捕获鼠标', 5); }, 900);
+    if (!input.touchMode && !input.padActive) setTimeout(() => { if (state === 'playing' && !input.locked) ui.hint(input.lockFailed ? '鼠标捕获不可用：按住鼠标拖动调整视角，方向键也可转向' : '点击游戏画面以捕获鼠标', 5); }, 900);
   };
   const pause = () => { if (state !== 'playing') return; setState('paused'); ui.show('pause'); input.releaseLock(); };
   const resume = () => { if (state !== 'paused') return; ui.closePanel(); ui.show(null); setState('playing'); input.requestLock(); };
@@ -120,6 +121,7 @@ async function boot() {
   };
   // 鼠标捕获被 Esc 解除时，浏览器不会把 Esc 按键交给页面，所以靠"捕获丢失"来触发暂停
   input.onLockChange = (locked) => { if (!locked && state === 'playing' && !input.lockFailed) pause(); };
+  window.addEventListener('gamepadconnected', () => ui.hint('手柄已连接 · 按 A 开始 / 继续', 4));
   document.addEventListener('visibilitychange', () => { if (document.hidden) pause(); });
 
   // ------------------------------------------------------------------ 主循环
@@ -146,6 +148,8 @@ async function boot() {
   /** 推进一帧游戏逻辑（不含渲染）。拆出来是为了能脱离画面做快进测试。 */
   const update = (dt: number) => {
     t += dt;
+    input.pollGamepad();
+    const padA = input.pressed('PadA');
 
     if (state === 'playing') {
       if (input.pressed('Escape') || input.pressed('KeyP')) pause();
@@ -176,10 +180,13 @@ async function boot() {
       // 主菜单背后的镜头：站在入口处缓慢扫视港区
       camera.position.set(-18 + Math.sin(t * 0.07) * 2.5, 2.3 + Math.sin(t * 0.11) * 0.25, 95);
       camera.rotation.set(0.07 + Math.sin(t * 0.09) * 0.02, Math.sin(t * 0.05) * 0.22, 0);
-      if (ui.panelOpen && input.pressed('Escape')) ui.closePanel();
+      if (ui.panelOpen && (input.pressed('Escape') || input.pressed('PadB'))) ui.closePanel();
+      else if (padA && !ui.panelOpen) startMission(false);
     } else if (state === 'paused') {
-      if (input.pressed('Escape') && !ui.panelOpen) resume();
-      else if (input.pressed('Escape')) ui.closePanel();
+      if ((input.pressed('Escape') || padA) && !ui.panelOpen) resume();
+      else if (input.pressed('Escape') || input.pressed('PadB')) ui.closePanel();
+    } else if (padA && performance.now() - stateAt > 900) { // 留一点间隔，免得阵亡瞬间按着 A 就直接重开
+      startMission(state === 'dead'); // 结算画面按 A 再来一局
     }
 
     effects.update(dt);

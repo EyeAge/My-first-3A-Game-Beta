@@ -96,6 +96,8 @@ export class UI {
         <h4>键盘 · 鼠标</h4>
         <ul class="keys"><li><kbd>WASD</kbd>移动</li><li><kbd>鼠标</kbd>视角</li><li><kbd>左键</kbd>开火</li><li><kbd>右键</kbd>瞄准</li><li><kbd>R</kbd>换弹</li><li><kbd>E</kbd>按住切断中继</li><li><kbd>空格</kbd>跳跃</li><li><kbd>Shift</kbd>冲刺</li><li><kbd>C</kbd>蹲伏</li><li><kbd>V</kbd>近战</li><li><kbd>Esc</kbd>暂停</li></ul>
         <p class="note">若浏览器无法捕获鼠标，按住鼠标按钮并拖动以调整视角（左键同时开火，右键同时瞄准）。方向键也可以转向。</p>
+        <h4>手柄</h4>
+        <ul class="keys"><li><kbd>左摇杆</kbd>移动</li><li><kbd>右摇杆</kbd>视角</li><li><kbd>RT</kbd>开火</li><li><kbd>LT</kbd>瞄准</li><li><kbd>X</kbd>换弹</li><li><kbd>Y</kbd>按住切断中继</li><li><kbd>A</kbd>跳跃 / 确认</li><li><kbd>L3</kbd>冲刺</li><li><kbd>B</kbd>蹲伏</li><li><kbd>RB</kbd>近战</li><li><kbd>Start</kbd>暂停</li></ul>
         <h4>触屏操作</h4>
         <p class="note">左手拇指在左侧任意位置滑动来移动，右手在屏幕右侧拖动转动视角。屏幕按钮：开火 · 瞄准 · 换弹 · 跳跃 · 交互。</p>
       </div>
