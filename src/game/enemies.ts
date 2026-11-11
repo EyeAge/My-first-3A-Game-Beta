@@ -55,7 +55,7 @@ function wornMetal() {
   const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(2, 2);
   return t;
 }
-const WORN = wornMetal();
+export const WORN = wornMetal();
 const BODY = new THREE.MeshStandardMaterial({ color: 0x343a40, roughness: 0.62, metalness: 0.75, roughnessMap: WORN, bumpMap: WORN, bumpScale: 0.6 });
 const ACCENT = new THREE.MeshStandardMaterial({ color: 0xb85a1c, roughness: 0.7, metalness: 0.4, roughnessMap: WORN });
 const DARK = new THREE.MeshStandardMaterial({ color: 0x121416, roughness: 0.5, metalness: 0.6 });

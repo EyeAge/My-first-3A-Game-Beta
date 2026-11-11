@@ -3,11 +3,12 @@ import { clamp, damp } from '../core/math';
 import type { Input } from '../core/input';
 import type { Colliders, RayHit } from '../world/colliders';
 import { QUAY_X } from '../world/port';
-import type { Enemies, World } from './enemies';
+import { WORN, type Enemies, type World } from './enemies';
+import { buildGun, SIGHT_Y } from './gunmodel';
 import type { Player } from './player';
 
 const MAG = 30, RPM = 660, RELOAD = 2.0;
-const HIP = new THREE.Vector3(0.19, -0.2, -0.78), ADS = new THREE.Vector3(0, -0.1215, -0.5);
+const HIP = new THREE.Vector3(0.165, -0.185, -0.66), ADS = new THREE.Vector3(0, -SIGHT_Y, -0.6);
 
 export interface Stats { shots: number; hits: number; kills: number }
 
@@ -24,44 +25,22 @@ export class Weapon {
   private swayX = 0; private swayY = 0;
   private flash: THREE.Mesh; private flashT = 0;
   private muzzle = new THREE.Object3D();
-  private mag: THREE.Mesh;
-  private gun = new THREE.Group();
+  private mag: THREE.Object3D; private bolt: THREE.Object3D; private handle: THREE.Object3D; private left: THREE.Object3D;
+  private boltK = 0;
+  private gun: THREE.Group;
   private hit: RayHit = { t: 0, nx: 0, ny: 0, nz: 0 };
 
   constructor() {
-    const poly = new THREE.MeshStandardMaterial({ color: 0x2b2f33, roughness: 0.6, metalness: 0.25 });
-    const steel = new THREE.MeshStandardMaterial({ color: 0x4c5258, roughness: 0.38, metalness: 0.7 });
-    const tan = new THREE.MeshStandardMaterial({ color: 0x4a4436, roughness: 0.7, metalness: 0.1 });
-    const g = this.gun;
-    const B = new THREE.BoxGeometry(1, 1, 1), C = new THREE.CylinderGeometry(1, 1, 1, 12);
-    const box = (m: THREE.Material, sx: number, sy: number, sz: number, x: number, y: number, z: number, rx = 0) => {
-      const mesh = new THREE.Mesh(B, m); mesh.scale.set(sx, sy, sz); mesh.position.set(x, y, z); mesh.rotation.x = rx; g.add(mesh); return mesh;
-    };
-    const cyl = (m: THREE.Material, r: number, len: number, x: number, y: number, z: number) => {
-      const mesh = new THREE.Mesh(C, m); mesh.scale.set(r, len, r); mesh.rotation.x = Math.PI / 2; mesh.position.set(x, y, z); g.add(mesh); return mesh;
-    };
-    box(steel, 0.05, 0.078, 0.34, 0, 0, 0);                 // 机匣
-    box(poly, 0.052, 0.06, 0.27, 0, 0.004, -0.3);           // 护木
-    box(tan, 0.056, 0.03, 0.2, 0, -0.022, -0.3);
-    box(steel, 0.03, 0.014, 0.52, 0, 0.046, -0.16);         // 导轨
-    cyl(steel, 0.0105, 0.22, 0, 0.008, -0.52);              // 枪管
-    cyl(steel, 0.016, 0.07, 0, 0.008, -0.65);               // 制退器
-    this.mag = box(poly, 0.034, 0.17, 0.062, 0, -0.115, -0.07, 0.2);
-    box(poly, 0.036, 0.1, 0.046, 0, -0.082, 0.11, -0.32);   // 握把
-    box(steel, 0.008, 0.03, 0.05, 0, -0.045, 0.04);         // 扳机护圈
-    box(poly, 0.042, 0.062, 0.2, 0, -0.008, 0.27);          // 枪托
-    box(poly, 0.046, 0.11, 0.03, 0, -0.03, 0.38);
-    box(steel, 0.012, 0.03, 0.012, 0, 0.066, -0.4);         // 准星座
-    // HX-2 反射瞄具：一个框 + 一个红点
-    box(steel, 0.04, 0.012, 0.06, 0, 0.058, -0.02);
-    for (const s of [-1, 1]) box(steel, 0.004, 0.05, 0.035, s * 0.02, 0.088, -0.03);
-    box(steel, 0.044, 0.004, 0.035, 0, 0.114, -0.03);
-    const lens = new THREE.Mesh(new THREE.PlaneGeometry(0.036, 0.048), new THREE.MeshBasicMaterial({ color: 0x224455, transparent: true, opacity: 0.16, depthWrite: false }));
-    lens.position.set(0, 0.088, -0.03); g.add(lens);
+    const built = buildGun(WORN);
+    const g = this.gun = built.gun;
+    this.mag = built.mag; this.bolt = built.bolt; this.handle = built.handle; this.left = built.left;
+    // 红点瞄具的镜片和光点
+    const lens = new THREE.Mesh(new THREE.PlaneGeometry(0.036, 0.05), new THREE.MeshBasicMaterial({ color: 0x224455, transparent: true, opacity: 0.16, depthWrite: false }));
+    lens.position.set(0, 0.092, -0.03); g.add(lens);
     const dot = new THREE.Mesh(new THREE.CircleGeometry(0.0013, 12), new THREE.MeshBasicMaterial({ color: new THREE.Color(9, 0.6, 0.3), depthTest: false, fog: false }));
-    dot.position.set(0, 0.1215, -0.031); dot.renderOrder = 20; g.add(dot);
+    dot.position.set(0, SIGHT_Y, -0.031); dot.renderOrder = 20; g.add(dot);
 
-    this.muzzle.position.set(0, 0.008, -0.7); g.add(this.muzzle);
+    this.muzzle.position.set(0, 0.008, -0.69); g.add(this.muzzle);
     // 枪口焰：两片交叉的发光面片，只显示一两帧
     const flashMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(9, 5, 1.6), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false });
     this.flash = new THREE.Mesh(new THREE.PlaneGeometry(0.16, 0.16), flashMat);
@@ -149,7 +128,7 @@ export class Weapon {
         this.flash.rotation.z = Math.random() * 6.283; this.flash.scale.setScalar(0.8 + Math.random() * 0.6);
         const k = 1 - this.ads * 0.45;
         player.kick((0.011 + Math.random() * 0.006) * k, (Math.random() - 0.5) * 0.012 * k);
-        this.kickZ += 0.028; this.kickR += 0.035; this.bloom = Math.min(3, this.bloom + 0.55);
+        this.kickZ += 0.028; this.kickR += 0.035; this.boltK = 1; this.bloom = Math.min(3, this.bloom + 0.55);
       } else if (input.pressed('MouseFire') || this.cooldown < -0.25) { this.cooldown = 0.25; audio.empty(); }
     }
     if (this.flashT > 0) { this.flashT -= dt; if (this.flashT <= 0) this.flash.visible = false; }
@@ -166,8 +145,17 @@ export class Weapon {
     if (this.reloading > 0) {
       const p = 1 - this.reloading / RELOAD, k = Math.sin(Math.min(1, p * 4) * Math.PI / 2) * (p > 0.8 ? (1 - p) / 0.2 : 1);
       rx -= 0.5 * k; rz += 0.5 * k; g.position.y -= 0.07 * k;
-      this.mag.position.y = -0.115 - (p > 0.15 && p < 0.6 ? Math.sin(((p - 0.15) / 0.45) * Math.PI) * 0.22 : 0);
-    } else this.mag.position.y = -0.115;
+      // 换弹分三段：左手离开护木去抓弹匣 → 弹匣拔出再插回 → 左手拉一下拉机柄后回到护木
+      const out = p > 0.15 && p < 0.6 ? Math.sin(((p - 0.15) / 0.45) * Math.PI) : 0;
+      this.mag.position.y = -0.115 - out * 0.22;
+      const toMag = clamp(p / 0.14, 0, 1) * (1 - clamp((p - 0.62) / 0.1, 0, 1)), toHandle = clamp((p - 0.66) / 0.08, 0, 1) * (1 - clamp((p - 0.9) / 0.1, 0, 1));
+      const pull = p > 0.76 && p < 0.9 ? Math.sin(((p - 0.76) / 0.14) * Math.PI) : 0;
+      this.left.position.set(toHandle * 0.02, -toMag * (0.1 + out * 0.2) + toHandle * 0.085, toMag * 0.215 + toHandle * (0.43 + pull * 0.045));
+      this.left.rotation.z = toHandle * 0.5;
+      this.handle.position.z = pull * 0.045;
+    } else { this.mag.position.y = -0.115; this.left.position.set(0, 0, 0); this.left.rotation.z = 0; this.handle.position.z = 0; }
+    this.boltK = Math.max(0, this.boltK - dt * 22);
+    this.bolt.position.z = this.boltK * 0.035;
     if (player.sprinting) { rx -= 0.35; ry += 0.55; g.position.x -= 0.05; g.position.y -= 0.03; }
     if (this.meleeT > 0) { const k = Math.sin((this.meleeT / 0.55) * Math.PI); g.position.z -= 0.22 * k; rz += 0.9 * k; rx += 0.2 * k; }
     _e.set(rx, ry, rz);
