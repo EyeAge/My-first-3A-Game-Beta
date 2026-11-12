@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { mergeGeometries, toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { mulberry32 } from '../core/math';
+import { clayMesh, type Cone } from './clay';
 import { buildLeftHand, buildRightHand } from './hands';
 
 // 第一人称枪模：M4A1 卡宾枪（平顶机匣 + 四面导轨护木 + 筒式红点），加上握枪的双手。
@@ -142,6 +143,12 @@ export class Parts {
       g.applyMatrix4(new THREE.Matrix4().compose(w[i].clone().addScaledVector(v, 0.5), new THREE.Quaternion().setFromUnitVectors(up, v.normalize()), new THREE.Vector3(1, 1, 1)));
       this.add(mat, g, null, 0.9);
     }
+  }
+
+  /** 把一组圆头锥融合成一整块连续的表面（见 clay.ts）。手用它。 */
+  clay(mat: MatKey, cones: [V3, V3, number, number][], blend = 4.5, cell = 2.2) {
+    const w = ([x, y, u]: V3) => new THREE.Vector3(x, y, U0 - u);
+    this.add(mat, clayMesh(cones.map(([a, b, r1, r2]) => [w(a), w(b), r1, r2] as Cone), blend, cell), null);
   }
 
   /** 任意朝向的圆角板：along 是长边方向，normal 是厚度方向。护指节、腕带搭扣这类贴在手上的小件用它。 */

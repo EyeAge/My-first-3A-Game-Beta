@@ -45,6 +45,7 @@ pnpm build      # 打包：生成 dist/index.html，单文件，双击即可打�
 | `src/world/colliders.ts` `nav.ts` | 碰撞盒与射线检测；A* 寻路网格 |
 | `src/game/player.ts` | 第一人称移动与碰撞 |
 | `src/game/gunmodel.ts` | 第一人称 M4A1 枪模和双手：用侧面轮廓挤出、横截面挤出、车削三种方式造型 |
+| `src/game/clay.ts` | “捏泥巴”式建模：把一堆圆头锥融合成一整块连续表面（距离场 + 表面网），手用它 |
 | `src/game/hands.ts` | 握枪的双手：分指节的黑色皮手套、腕带、手表、迷彩袖子 |
 | `src/game/weapon.ts` | 步枪：开火、后坐力、换弹，以及枪模的动作 |
 | `src/game/rig.ts` | 骨骼蒙皮模型：搭建工具，以及飞鸥、猎犬、守卫三副骨架和外形 |
