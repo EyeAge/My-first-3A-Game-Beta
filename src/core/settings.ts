@@ -19,10 +19,10 @@ export interface QualityProfile { tier: 0 | 1 | 2 | 3; pixelRatio: number; shado
 export function profileOf(q: Quality): QualityProfile {
   const dpr = window.devicePixelRatio || 1;
   switch (q) {
-    case 'low': return { tier: 0, pixelRatio: Math.min(dpr, 1) * 0.7, shadow: 1024, msaa: 0, ao: 0, volSteps: 8, bloom: true, rain: 500, lamps: 2, reflect: 0 };
-    case 'medium': return { tier: 1, pixelRatio: Math.min(dpr, 1), shadow: 2048, msaa: 2, ao: 8, volSteps: 12, bloom: true, rain: 1200, lamps: 4, reflect: 0.35 };
-    case 'high': return { tier: 2, pixelRatio: Math.min(dpr, 1.5), shadow: 2048, msaa: 4, ao: 12, volSteps: 16, bloom: true, rain: 2000, lamps: 6, reflect: 0.5 };
-    case 'ultra': return { tier: 3, pixelRatio: Math.min(dpr, 2), shadow: 4096, msaa: 4, ao: 16, volSteps: 24, bloom: true, rain: 2600, lamps: 8, reflect: 0.75 };
+    case 'low': return { tier: 0, pixelRatio: Math.min(dpr, 1) * 0.7, shadow: 1024, msaa: 0, ao: 0, volSteps: 8, bloom: true, rain: 3000, lamps: 2, reflect: 0 };
+    case 'medium': return { tier: 1, pixelRatio: Math.min(dpr, 1), shadow: 2048, msaa: 2, ao: 8, volSteps: 12, bloom: true, rain: 5500, lamps: 4, reflect: 0.35 };
+    case 'high': return { tier: 2, pixelRatio: Math.min(dpr, 1.5), shadow: 2048, msaa: 4, ao: 12, volSteps: 16, bloom: true, rain: 8000, lamps: 6, reflect: 0.5 };
+    case 'ultra': return { tier: 3, pixelRatio: Math.min(dpr, 2), shadow: 4096, msaa: 4, ao: 16, volSteps: 24, bloom: true, rain: 9000, lamps: 8, reflect: 0.75 };
   }
 }
 

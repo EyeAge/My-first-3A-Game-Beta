@@ -13,7 +13,8 @@ import { Effects } from './render/effects';
 import { PlanarReflection } from './render/reflection';
 import { Renderer } from './render/renderer';
 import { UI, type HudFrame, type Marker } from './ui/ui';
-import { bakeEnvironment, createRain, createSea, createSky } from './world/atmosphere';
+import { bakeEnvironment, createSea, createSky } from './world/atmosphere';
+import { createRain } from './world/rain';
 import { buildPort, QUAY_X } from './world/port';
 
 type State = 'menu' | 'playing' | 'paused' | 'dead' | 'won';
@@ -45,8 +46,8 @@ async function boot() {
   await step('正在架设起重机', 0.56);
   const sea = createSea(QUAY_X);
   scene.add(sea.mesh);
-  let rain = createRain(profileOf(settings.quality).rain);
-  scene.add(rain.lines);
+  let rain = createRain(profileOf(settings.quality).rain, QUAY_X);
+  scene.add(rain.group);
 
   await step('正在加载弹道与烟雾', 0.68);
   const effects = new Effects();
@@ -71,13 +72,13 @@ async function boot() {
   enemies.onPlayerHit = (dmg, from) => { player.takeDamage(dmg, from, mission.time); audio.hurt(); input.rumble(0.8, 0.5, 160); };
 
   // 反射画面里不需要的东西：地面自己、雨丝、第一人称枪模、贴花
-  renderer.reflection = new PlanarReflection(renderer.gl, scene, camera, port.reflection, () => [port.ground, rain.lines, weapon.view, decals.mesh]);
+  renderer.reflection = new PlanarReflection(renderer.gl, scene, camera, port.reflection, () => [port.ground, rain.group, weapon.view, decals.mesh]);
   const applyQuality = () => {
     const p = profileOf(settings.quality);
     renderer.setQuality(p, port.sun);
     port.setLampCount(p.lamps);
-    scene.remove(rain.lines); rain.lines.geometry.dispose();
-    rain = createRain(p.rain); scene.add(rain.lines);
+    scene.remove(rain.group); rain.dispose();
+    rain = createRain(p.rain, QUAY_X); scene.add(rain.group);
     effects.setScale(canvas.clientHeight * p.pixelRatio, camera.fov);
   };
   applyQuality();
@@ -128,7 +129,7 @@ async function boot() {
   // ------------------------------------------------------------------ 主循环
   const clock = new THREE.Clock();
   let t = 0, hurt = 0;
-  const fwd = new THREE.Vector3(), tmp = new THREE.Vector3();
+  const fwd = new THREE.Vector3(), tmp = new THREE.Vector3(), bufSize = new THREE.Vector2();
   const markers: Marker[] = Array.from({ length: 4 }, () => ({ label: '', x: 0, y: 0, dist: 0, on: false, edge: false }));
   const frame: HudFrame = { heading: 0, hp: 100, ammo: 30, reserve: 120, reloadP: 0, spread: 0, ads: 0, hitMarker: 0, hitWeak: false, objective: '', cut: 0, prompt: null, damageAngle: 0, damageFlash: 0, markers, sprinting: false };
 
@@ -197,8 +198,7 @@ async function boot() {
     port.update(t, state === 'menu' ? camera.position : player.pos);
     sea.update(t);
     sky.uniforms.uTime.value = t;
-    rain.uniforms.uTime.value = t;
-    rain.uniforms.uCam.value.copy(camera.position);
+    rain.update(t, camera, renderer.gl.getDrawingBufferSize(bufSize).y);
 
     if (state === 'playing' || state === 'paused') {
       camera.getWorldDirection(fwd);
@@ -219,7 +219,7 @@ async function boot() {
   const tick = () => {
     requestAnimationFrame(tick);
     update(Math.min(0.05, clock.getDelta()));
-    renderer.render(hurt, t);
+    renderer.render(hurt, t, { ads: state === 'playing' ? weapon.ads : 0, damage: state === 'playing' ? player.damageFlash * 0.6 : 0 });
   };
 
   await step('正在准备首帧画面', 0.96);

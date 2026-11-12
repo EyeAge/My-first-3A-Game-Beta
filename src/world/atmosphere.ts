@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { mulberry32 } from '../core/math';
 
-// 天空、雨、海：气氛三件套。
+// 天空和海。（雨在 rain.ts）
 //
 // 时间设定是日出：头顶压着一整片石板灰的雨云，只有东边海平线上方留着一道没被云盖住的缝，
 // 太阳就从那道缝里贴着海面照进来（仰角只有 13°）。于是整个港区是冷色的，
@@ -182,47 +182,6 @@ export function bakeEnvironment(renderer: THREE.WebGLRenderer) {
   mesh.geometry.dispose();
   mat.dispose();
   return rt.texture;
-}
-
-export function createRain(count: number) {
-  const BOX = new THREE.Vector3(36, 22, 36);
-  const pos = new Float32Array(count * 2 * 3);
-  const off = new Float32Array(count * 2 * 3);
-  const end = new Float32Array(count * 2);
-  const rng = mulberry32(7);
-  for (let i = 0; i < count; i++) {
-    const x = rng(), y = rng(), z = rng();
-    for (let k = 0; k < 2; k++) {
-      off.set([x, y, z], (i * 2 + k) * 3);
-      end[i * 2 + k] = k;
-    }
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  geo.setAttribute('aOff', new THREE.BufferAttribute(off, 3));
-  geo.setAttribute('aEnd', new THREE.BufferAttribute(end, 1));
-  const uniforms = { uTime: { value: 0 }, uCam: { value: new THREE.Vector3() }, uBox: { value: BOX } };
-  const mat = new THREE.ShaderMaterial({
-    uniforms, transparent: true, depthWrite: false, fog: false,
-    vertexShader: /* glsl */ `
-      attribute vec3 aOff; attribute float aEnd;
-      uniform float uTime; uniform vec3 uCam; uniform vec3 uBox;
-      varying float vA;
-      void main(){
-        vec3 fall = vec3(1.6, -19.0, 0.9);              // 雨带一点斜风
-        vec3 p = aOff * uBox + fall * uTime * (0.8 + aOff.x * 0.4);
-        p = mod(p - uCam, uBox) - uBox * 0.5 + uCam;     // 雨永远包在相机周围一个盒子里
-        p += normalize(fall) * aEnd * (0.5 + aOff.z * 0.5);
-        vec4 mv = viewMatrix * vec4(p, 1.0);
-        vA = (1.0 - aEnd * 0.8) * smoothstep(18.0, 6.0, -mv.z) * smoothstep(0.3, 1.5, -mv.z);
-        gl_Position = projectionMatrix * mv;
-      }`,
-    fragmentShader: /* glsl */ `varying float vA; void main(){ gl_FragColor = vec4(0.72, 0.76, 0.8, vA * 0.38); }`,
-  });
-  const lines = new THREE.LineSegments(geo, mat);
-  lines.frustumCulled = false;
-  lines.renderOrder = 5;
-  return { lines, uniforms };
 }
 
 /** 海面的法线贴图：用整数频率的正弦波叠出来，天然可以无缝平铺。 */
