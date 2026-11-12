@@ -286,9 +286,47 @@ export class Effects {
     tr.mesh.visible = true; tr.mesh.scale.set(0.2, 0.2, 0.01);
   }
 
+  /**
+   * 细曳光：敌人打过来的子弹用它。
+   * 上面的 tracer() 把亮条画得有 20 厘米粗，是给玩家自己的子弹用的 —— 它们总是离镜头而去，粗一点远处才看得见。
+   * 敌人的子弹反过来，是冲着镜头飞的，擦着头顶过去时离镜头只有一米，还画那么粗的话就成了一根横贯画面的光柱。
+   */
+  tracerThin(from: THREE.Vector3, to: THREE.Vector3, width = 0.05) {
+    this.tracer(from, to, true);
+    // tracer() 从池子里取了一条来用，但没告诉我们是哪条：刚启动（t 还是 0）、起点又正好是 from 的那条就是
+    for (const tr of this.tracers) if (tr.live && tr.t === 0 && tr.from.equals(from)) {
+      tr.mesh.scale.x = tr.mesh.scale.y = width;
+      tr.wake.scale.x = tr.wake.scale.y = width * 0.6;
+    }
+  }
+
   /** 敌方能量弹飞行时掉下来的一粒余光，连起来就是它的尾迹。 */
   trail(pos: THREE.Vector3) {
     this.glow.emit(pos.x, pos.y, pos.z, (Math.random() - 0.5) * 0.3, (Math.random() - 0.5) * 0.3, (Math.random() - 0.5) * 0.3, 2.4, 0.5, 0.2, 0.09, 0.16 + Math.random() * 0.1, 0);
+  }
+
+  /**
+   * 一小团"可以调"的烟：大小、寿命、颜色、往上飘多快都由调用的人给。
+   * 上面的 smoke() 是写死的一大团黑烟，只适合爆炸；敌人受伤冒的细烟、坠落拖的烟尾、残骸上的浓烟各不一样，所以另开这个口子。
+   *   size   烟团最后长到多大（米，直径）。刚冒出来时只有三成大，边飘边胀
+   *   life   活多少秒（每团会在 0.75~1.2 倍之间随机，免得一起消失）
+   *   rise   浮力：每秒给多少向上的加速度
+   *   color  十六进制颜色，比如 0x15161a 是接近纯黑的烟
+   *   count  一次冒几团
+   *   alpha  最浓时的不透明度
+   *   vx/vy/vz 初速度（比如贴地往外推的尘土）
+   *   fire   true 时改用"发光"的粒子池，颜色按火焰的规律变化（白热 → 橙 → 暗红），用来做小火苗
+   */
+  puff(pos: THREE.Vector3, o: { size?: number; life?: number; rise?: number; color?: number; count?: number; alpha?: number; vx?: number; vy?: number; vz?: number; fire?: boolean } = {}) {
+    const size = o.size ?? 1, life = o.life ?? 2.5, rise = o.rise ?? 0.6, count = o.count ?? 3;
+    const pool = o.fire ? this.glow : this.soft, R = Math.random;
+    _col.setHex(o.color ?? 0x525254);
+    for (let i = 0; i < count; i++) {
+      const l = life * (0.75 + R() * 0.45), start = size * 0.3, end = size * (1 + R() * 0.5);
+      pool.emit(pos.x + (R() - 0.5) * 0.2 * size, pos.y + (R() - 0.5) * 0.2 * size, pos.z + (R() - 0.5) * 0.2 * size,
+        (o.vx ?? 0) + (R() - 0.5) * 0.4, (o.vy ?? 0) + rise * 0.6 + R() * 0.3, (o.vz ?? 0) + (R() - 0.5) * 0.4,
+        _col.r, _col.g, _col.b, start, l, -rise, o.alpha ?? (o.fire ? 1 : 0.4), (end - start) / l, o.fire ? FIRE : FIXED);
+    }
   }
 
   update(dt: number) {
