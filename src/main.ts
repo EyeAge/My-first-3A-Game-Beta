@@ -129,6 +129,8 @@ async function boot() {
   // ------------------------------------------------------------------ 主循环
   const clock = new THREE.Clock();
   let t = 0, hurt = 0;
+  // 闪电：隔半分钟到一分钟，云层里亮一下。它不是一盏灯——只是云自己发亮，再让空气整体亮一瞬
+  const bolt = { wait: 22 + Math.random() * 25, t: 9, power: 0, value: 0 };
   const fwd = new THREE.Vector3(), tmp = new THREE.Vector3(), bufSize = new THREE.Vector2();
   const markers: Marker[] = Array.from({ length: 4 }, () => ({ label: '', x: 0, y: 0, dist: 0, on: false, edge: false }));
   const frame: HudFrame = { heading: 0, hp: 100, ammo: 30, reserve: 120, reloadP: 0, spread: 0, ads: 0, hitMarker: 0, hitWeak: false, objective: '', cut: 0, prompt: null, damageAngle: 0, damageFlash: 0, markers, sprinting: false };
@@ -198,6 +200,15 @@ async function boot() {
     port.update(t, state === 'menu' ? camera.position : player.pos);
     sea.update(t);
     sky.uniforms.uTime.value = t;
+    bolt.wait -= dt; bolt.t += dt;
+    if (bolt.wait <= 0) {
+      bolt.wait = 30 + Math.random() * 30; bolt.t = 0; bolt.power = 0.3 + 0.7 * Math.random();
+      const a = Math.PI * (0.55 + Math.random() * 0.9);
+      sky.uniforms.uFlashDir.value.set(Math.cos(a), 0.35 + Math.random() * 0.3, Math.sin(a) * (Math.random() < 0.5 ? -1 : 1)).normalize();
+    }
+    // 亮度：很快衰减，中间抖几下（两个不同频率的正弦相乘，看起来像不规则的闪烁）
+    bolt.value = bolt.t < 0.9 ? Math.max(0, bolt.power * Math.exp(-5 * bolt.t) * (0.55 + 0.45 * Math.sin(47 * bolt.t) * Math.sin(13 * bolt.t + 1)) * 0.35) : 0;
+    sky.uniforms.uFlash.value = bolt.value;
     rain.update(t, camera, renderer.gl.getDrawingBufferSize(bufSize).y);
 
     if (state === 'playing' || state === 'paused') {
@@ -219,7 +230,7 @@ async function boot() {
   const tick = () => {
     requestAnimationFrame(tick);
     update(Math.min(0.05, clock.getDelta()));
-    renderer.render(hurt, t, { ads: state === 'playing' ? weapon.ads : 0, damage: state === 'playing' ? player.damageFlash * 0.6 : 0 });
+    renderer.render(hurt, t, { ads: state === 'playing' ? weapon.ads : 0, damage: state === 'playing' ? player.damageFlash * 0.6 : 0, flash: bolt.value });
   };
 
   await step('正在准备首帧画面', 0.96);
