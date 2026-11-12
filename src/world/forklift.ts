@@ -1,8 +1,9 @@
 import * as THREE from 'three';
+import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { clamp } from '../core/math';
-import { label, type LabelOpts } from '../render/labels';
+import { DECALS, decal, label, labelMaterial, type LabelOpts, type Patch } from '../render/labels';
 import { emissive } from '../render/surfaces';
-import { Kit, noise3, type PropModel, type V3 } from './kit';
+import { Kit, noise3, type Mat, type PropModel, type Tint, type V3 } from './kit';
 
 // 内燃平衡重式叉车。
 //
@@ -18,17 +19,20 @@ import { Kit, noise3, type PropModel, type V3 } from './kit';
 // 它不会动 —— forksUp 决定的是"搭出来的时候货叉停在多高"，不是动画；车灯也只是几块很暗的发光面片，
 // 看得出是灯，但不照亮周围。
 //
-// 和参考不一样的地方（各处有注释），都是参考里明显写错的：
-//   · 两块踏板在参考里埋在前围肚子里，这里往后挪到脚能踩到的地方；
-//   · 轮胎和轮辋的深浅本来想按"离轮心多远"来分，参考里拿错了坐标，结果整只轮子一个色，这里按原意算。
-//
-// 这个文件分三步搭：先是车身（车轮、底盘、配重、机罩），再是驾驶室，最后是门架和货叉。
+// 和参考不一样的地方（各处有注释）。前三处是参考里明显写错的：
+//   1. 仪表板在参考里转错了 90°，成了竖插在斜面上的薄片，这里让它平贴在斜面上、正对司机；
+//   2. 两块踏板在参考里埋在前围肚子里，这里往后挪到脚能踩到的地方；
+//   3. 轮胎和轮辋的深浅本来想按"离轮心多远"来分，参考里拿错了坐标，结果整只轮子一个色，这里按原意算。
+// 还有一处是照原样搭出来以后，在查看器里看到悬空才改的：
+//   4. 护顶架的前立柱站在前围侧面之外，脚板悬空 —— 在脚板下面补了一块支座。
 
 const HALF_PI = Math.PI / 2;
 const PAINT = 'paint_yellow'; // 车身漆
 const STEEL = 'steel_dark';   // 结构件：底盘、门架、护顶架
 /** 车号：换一个种子就换一个号。 */
 const NUMBERS = ['04', '07', '12', '22'];
+/** 护顶架的顶面高度。 */
+const ROOF = 2.045;
 
 /** 车轮的规格。前轮是驱动轮，又大又宽（货的重量都压在它上面）；后轮是转向轮，小一圈。 */
 interface Wheel {
@@ -49,6 +53,50 @@ const REAR_WHEEL: Wheel = { x: -1.1, z: 0.46, radius: 0.27, width: 0.18, rim: 0.
 
 // ====================================================================== 局部工具
 // 下面几样是零件箱里暂时没有、叉车又用得上的东西。
+
+const _euler = new THREE.Euler(), _quat = new THREE.Quaternion(), ONE = new THREE.Vector3(1, 1, 1);
+/** "先按 rot 转、再挪到 pos"的矩阵。直接调用 kit.add() 放自己做的几何体时用。 */
+function placed(pos: V3, rot: V3 = [0, 0, 0]) {
+  return new THREE.Matrix4().compose(new THREE.Vector3(...pos), _quat.setFromEuler(_euler.set(rot[0], rot[1], rot[2])), ONE);
+}
+
+/**
+ * 软垫用的圆角盒。
+ *
+ * 做法：先要一个每面都打了格子的普通盒子，再把顶点往里收 ——
+ *   · 每个顶点先"夹"到一个比盒子小一圈（每边缩 r）的内芯上，
+ *   · 再沿着"内芯 → 顶点"的方向往外推 r。
+ * 面中间的顶点推出来还在原来的面上；棱和角上的顶点被推到一段圆弧上，棱角就圆了。
+ *
+ * 和零件箱的 rbox 的区别：rbox 的平面中间没有顶点，想把坐垫中间压出一个窝是压不出来的。
+ * 这里格子打在整个面上，deform 才有顶点可捏。捏完以后把重合的顶点并起来重算法线，整块就是光滑的。
+ *
+ * seg 是三个方向各分几格。
+ */
+function softBox(w: number, h: number, d: number, r: number, seg: V3, deform?: (v: THREE.Vector3) => void): THREE.BufferGeometry {
+  const half = [w / 2, h / 2, d / 2];
+  r = Math.min(r, half[0] * 0.95, half[1] * 0.95, half[2] * 0.95); // 圆角不能比盒子的一半还大
+  const box = new THREE.BoxGeometry(w, h, d, seg[0], seg[1], seg[2]);
+  const pos = box.getAttribute('position'), v = new THREE.Vector3(), core = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i);
+    for (let a = 0; a < 3; a++) {
+      const c = v.getComponent(a), step = (2 * half[a]) / seg[a];
+      // 面中间的格线按比例往外撑，让最靠边的一条正好落在圆角开始的地方（离边 r），格子就均匀地铺满平的那一段
+      if (seg[a] >= 3 && Math.abs(c) < half[a] - 1e-6) v.setComponent(a, (c * (half[a] - r)) / (half[a] - step));
+    }
+    core.set(clamp(v.x, r - half[0], half[0] - r), clamp(v.y, r - half[1], half[1] - r), clamp(v.z, r - half[2], half[2] - r));
+    v.sub(core);
+    if (v.lengthSq() > 1e-12) v.setLength(r); // 长度是 0 的不能归一化（会除以 0）；盒子表面上的顶点不会遇到，保险起见还是判一下
+    v.add(core);
+    deform?.(v);
+    pos.setXYZ(i, v.x, v.y, v.z);
+  }
+  box.deleteAttribute('normal'); box.deleteAttribute('uv');
+  const merged = mergeVertices(box, 1e-4);
+  merged.computeVertexNormals();
+  return merged;
+}
 
 /**
  * 轮胎：把一圈截面轮廓 [半径, 轴向位置] 绕车轴转一圈。
@@ -133,6 +181,41 @@ function applyTireUv(group: THREE.Group, uvs: Float32Array[]) {
 }
 
 /**
+ * 软管：穿过一串点的光滑弯管。
+ * 和零件箱的 hose 是同一个东西，区别只在曲线的算法（这里用和参考一样的"均匀"样条，弯得更饱满一点），
+ * 以及段数按管子的长度来定 —— 短的线束五六段就够，两米长的液压管才需要二十几段。
+ */
+function softHose(k: Kit, mat: Mat, pts: V3[], r: number, tint: Tint = 1) {
+  const curve = new THREE.CatmullRomCurve3(pts.map((p) => new THREE.Vector3(...p)), false, 'catmullrom', 0.5);
+  const steps = Math.max(2, Math.ceil(curve.getLength() / Math.max(0.08, r * 3)));
+  k.add(mat, new THREE.TubeGeometry(curve, steps, r, 5, false), { tint });
+}
+
+/**
+ * 弯的贴片：贴在圆柱面上的字或贴纸。
+ * 贴片绕 y 轴弯、正中朝 +z，沿弧线的宽度是 arc、高是 height；at 再把它转到、挪到圆柱上。
+ * 平的贴片贴在圆罐上，两头会翘在外面，所以要切成几段顺着弧面走。
+ */
+function curvedPatch(k: Kit, p: Patch, radius: number, arc: number, height: number, at: THREE.Matrix4) {
+  const steps = 4, pos: number[] = [], nor: number[] = [], uv: number[] = [];
+  const vertex = (i: number, top: number) => {
+    const t = i / steps, a = ((t - 0.5) * arc) / radius;
+    pos.push(radius * Math.sin(a), (top - 0.5) * height, radius * Math.cos(a));
+    nor.push(Math.sin(a), 0, Math.cos(a));
+    uv.push(p.uv[0] + (p.uv[2] - p.uv[0]) * t, p.uv[1] + (p.uv[3] - p.uv[1]) * top); // 贴片在图集里占的那一块
+  };
+  for (let i = 0; i < steps; i++) {
+    vertex(i, 0); vertex(i + 1, 0); vertex(i + 1, 1);
+    vertex(i, 0); vertex(i + 1, 1); vertex(i, 1);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  k.add(labelMaterial(), geo, { raw: true, cast: false }, at);
+}
+
+/**
  * 一行字。高 h，但宽度不超过 maxW —— 超了就整体等比例缩小，而不是把字压扁。
  */
 function fitLabel(k: Kit, text: string, opts: LabelOpts, maxW: number, h: number, pos: V3, rot?: V3) {
@@ -140,6 +223,73 @@ function fitLabel(k: Kit, text: string, opts: LabelOpts, maxW: number, h: number
   const w = Math.min(maxW, h * aspect);
   k.label(text, opts, w, w / aspect, pos, rot);
 }
+
+// ---- 叉车上的三张贴纸。
+// 贴纸库（labels.ts 的 DECALS）是"按名字取图案"的表。这三个名字如果库里已经有人画了，就用库里的；
+// 没有的话用下面这份（?? 的意思就是"左边没有才用右边"）。图案的坐标照参考的画法。
+const INK = { red: 'rgb(168,36,28)', white: 'rgb(226,223,213)', yellow: 'rgb(222,172,30)', black: 'rgb(24,24,26)' };
+const CJK_FONT = '"Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif';
+
+/** 易燃品：红底菱形、白框、一团白色火焰，底角写着危险品类别"3"。 */
+DECALS.hazard_flammable ??= (g, S) => {
+  g.scale(S / 256, S / 256); // 下面的坐标都按 256×256 的画布写
+  g.save();
+  g.translate(128, 128); g.rotate(Math.PI / 4);
+  g.fillStyle = INK.red; g.fillRect(-86, -86, 172, 172);
+  g.strokeStyle = INK.white; g.lineWidth = 5; g.strokeRect(-76, -76, 152, 152);
+  g.restore();
+  g.save();
+  g.translate(128, 120);
+  g.fillStyle = INK.white; // 火焰的外形
+  g.beginPath(); g.moveTo(2, -64);
+  g.bezierCurveTo(34, -28, 40, 6, 24, 28); g.bezierCurveTo(12, 44, -12, 44, -24, 28);
+  g.bezierCurveTo(-40, 6, -20, -12, -15, -34); g.bezierCurveTo(-6, -28, 0, -44, 2, -64);
+  g.fill();
+  g.fillStyle = INK.red; // 中间挖一个焰心
+  g.beginPath(); g.moveTo(1, -10);
+  g.bezierCurveTo(15, 6, 15, 24, 0, 31); g.bezierCurveTo(-15, 24, -13, 8, 1, -10);
+  g.fill();
+  g.fillStyle = INK.white; g.fillRect(-34, 50, 68, 6);
+  g.restore();
+  g.fillStyle = INK.white; g.font = '900 34px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'alphabetic';
+  g.fillText('3', 128, 230);
+};
+/** 注意：黄底黑边三角形，里面一个感叹号。 */
+DECALS.hazard_general ??= (g, S) => {
+  g.scale(S / 256, S / 256);
+  g.lineJoin = 'round';
+  g.beginPath(); g.moveTo(128, 31); g.lineTo(230, 215); g.lineTo(26, 215); g.closePath();
+  g.strokeStyle = INK.black; g.lineWidth = 28; g.stroke(); // 先描一圈粗黑边，圆角就有了
+  g.fillStyle = INK.yellow; g.fill();
+  g.lineWidth = 9; g.stroke();
+  g.fillStyle = INK.black;
+  g.beginPath(); g.moveTo(115, 87); g.lineTo(141, 87); g.lineTo(135, 159); g.lineTo(121, 159); g.closePath(); g.fill();
+  g.beginPath(); g.arc(128, 183, 11, 0, Math.PI * 2); g.fill();
+};
+/** 铭牌的宽高比。贴纸在图集里是方的，画的时候横竖各自缩放把方格填满，贴出来再按这个比例还原。 */
+const PLATE_ASPECT = 288 / 200;
+/** 金属铭牌：灰色铝板、四角铆钉、一行标题、七行小字。九厘米宽，字是看不清的，只要"像一块铭牌"。 */
+DECALS.csc_plate ??= (g, S) => {
+  const W = 288, H = 200;
+  g.scale(S / W, S / H);
+  const metal = g.createLinearGradient(0, 0, W, H);
+  metal.addColorStop(0, 'rgb(150,152,150)'); metal.addColorStop(0.5, 'rgb(176,178,176)'); metal.addColorStop(1, 'rgb(138,140,138)');
+  g.fillStyle = metal; g.beginPath(); g.roundRect(3, 3, W - 6, H - 6, 8); g.fill();
+  g.strokeStyle = 'rgba(40,42,44,0.8)'; g.lineWidth = 2; g.strokeRect(11, 11, W - 22, H - 22);
+  for (const [x, y] of [[20, 20], [W - 20, 20], [20, H - 20], [W - 20, H - 20]]) {
+    g.fillStyle = 'rgb(96,98,98)'; g.beginPath(); g.arc(x, y, 5, 0, Math.PI * 2); g.fill();
+    g.fillStyle = 'rgba(230,232,232,0.7)'; g.beginPath(); g.arc(x - 1.2, y - 1.2, 2, 0, Math.PI * 2); g.fill(); // 铆钉左上角的一点高光
+  }
+  const ink = 'rgba(28,30,32,0.92)';
+  g.fillStyle = ink; g.textBaseline = 'alphabetic'; g.textAlign = 'center'; g.font = `600 19px ${CJK_FONT}`;
+  g.fillText('安全检验铭牌', W / 2, 46, W - 60);
+  g.textAlign = 'left'; g.font = `500 11px ${CJK_FONT}`;
+  const rows = ['检验编号 SL/PA-4207/19', '制造日期 2019年03月', '设备编号 SLTU 402719 6', '最大总重 30 480 千克', '堆码载荷 192 000 千克', '横向试验 150 千牛', '下次检验 2027年09月'];
+  rows.forEach((row, i) => {
+    g.fillStyle = ink; g.fillText(row, 30, 70 + i * 16.5, W - 60);
+    g.fillStyle = 'rgba(28,30,32,0.35)'; g.fillRect(30, 73 + i * 16.5, W - 60, 1); // 每行字下面一条细线
+  });
+};
 
 // ====================================================================== 各个部分
 
@@ -234,6 +384,120 @@ function addHood(k: Kit, number: string) {
   }
 }
 
+/** 座椅：钢底座、坐垫、靠背、两根靠背支架。 */
+function addSeat(k: Kit) {
+  k.box(STEEL, 0.4, 0.05, 0.4, -0.54, 1.045, 0, { c: 0.01, tint: 0.5 });
+  // 坐垫：上表面中间坐出一个浅窝（正中最深 1.8 厘米，往四周按余弦渐渐变浅）
+  const cushion = softBox(0.46, 0.1, 0.46, 0.04, [6, 2, 6], (v) => { if (v.y > 0) v.y -= 0.018 * Math.cos(v.x * 5) * Math.cos(v.z * 5); });
+  k.add('rubber', cushion, {}, placed([-0.53, 1.115, 0]));
+  // 靠背：朝前的一面中间凹进去 2 厘米，两边鼓起来托住腰；整块上端向后仰 0.16 弧度（约 9°）
+  const back = softBox(0.1, 0.5, 0.44, 0.04, [2, 4, 6], (v) => { if (v.x > 0) v.x -= 0.02 * Math.cos(v.z * 5.5); });
+  k.add('rubber', back, {}, placed([-0.8, 1.39, 0], [0, 0, 0.16]));
+  for (const side of [1, -1]) k.bar(STEEL, [-0.78, 1.08, side * 0.24], [-0.82, 1.3, side * 0.24], 0.03, 0.012, { c: 0.004, tint: 0.5 });
+}
+
+/** 前围（仪表台）、仪表板、方向盘、三根液压操纵杆和换向手柄。 */
+function addDashboard(k: Kit) {
+  // 前围：画一个侧面轮廓 (x, y) 再拉成 0.7 米宽。朝司机的那条斜边是从 (0.30, 1.14) 到 (0.21, 1.02)
+  k.extrude(PAINT, [[0.2, 0.55], [0.54, 0.55], [0.54, 1.0], [0.46, 1.12], [0.3, 1.14], [0.21, 1.02]], 0.7, { soft: 0.5 });
+
+  // 仪表板贴在那条斜边的正中。斜边往上走的方向和水平面夹 atan2(0.12, 0.09)；
+  // 再减 90° 以后，这个局部坐标系的 −x 就是斜面的外法线（正对司机），y 顺着斜面往上，z 还是车宽方向。
+  // （参考里少减了这 90°，面板成了竖插在斜面上的一块薄片，屏幕朝着地板。）
+  const slope = Math.atan2(0.12, 0.09);
+  k.at([0.253, 1.082, 0], [0, 0, slope - HALF_PI], () => {
+    k.box(STEEL, 0.012, 0.13, 0.44, -0.006, 0, 0, { c: 0.004, tint: 0.45 });                                              // 面板
+    k.plane(emissive(0x8fe0b0, 0.3), 0.09, 0.05, [-0.0135, 0.01, 0.1], { rot: [0, -HALF_PI, 0], raw: true, cast: false }); // 液晶屏：很暗的一块绿
+    k.decal('csc_plate', 0.09, [-0.0135, 0, -0.12], [0, -HALF_PI, 0], 0.09 / PLATE_ASPECT);                               // 铭牌
+    k.cyl('plastic_red', 0.016, 0.02, -0.02, 0, 0.19, { axis: 'x', seg: 8, tint: 0.9 });                                  // 急停按钮
+    k.cyl('steel_bare', 0.009, 0.02, -0.018, -0.03, -0.01, { axis: 'x', seg: 6, tint: 0.9 });                             // 钥匙
+  });
+
+  // 转向柱从前围里斜着伸向司机，方向盘装在柱子的顶端
+  const columnFoot: V3 = [0.3, 1.1, 0.04], columnTop: V3 = [0.1, 1.31, 0.04];
+  k.tube(STEEL, columnFoot, columnTop, 0.024, { seg: 8, tint: 0.5 });
+  // 方向盘的局部坐标系：x 轴顺着转向柱（指向司机），所以盘面就是垂直于 x 的那个平面
+  k.at(columnTop, [0, 0, Math.atan2(columnTop[1] - columnFoot[1], columnTop[0] - columnFoot[0])], () => {
+    k.torus('rubber', 0.165, 0.014, 0, 0, 0, { axis: 'x', tubeSeg: 6, seg: 18 }); // 盘圈
+    for (let i = 0; i < 3; i++) { // 三根辐条，从盘毂伸到盘圈
+      const a = (i * Math.PI * 2) / 3 + 0.5;
+      k.tube(STEEL, [-0.01, 0, 0], [0, Math.cos(a) * 0.16, Math.sin(a) * 0.16], 0.009, { seg: 5, tint: 0.5 });
+    }
+    k.cyl(STEEL, 0.04, 0.03, -0.005, 0, 0, { r2: 0.035, seg: 10, rot: [0, 0, HALF_PI], tint: 0.5 });   // 盘毂
+    k.cyl('rubber', 0.014, 0.045, 0.03, 0.16, 0.02, { r2: 0.016, seg: 8, rot: [0, 0, HALF_PI] });      // 助力球：叉车司机一只手握着它打方向，另一只手管操纵杆
+  });
+
+  // 三根液压操纵杆（起升、倾斜、侧移），一根比一根靠外、矮一点，杆头是橡胶球
+  for (let i = 0; i < 3; i++) {
+    const z = -0.2 - i * 0.055;
+    const tip: V3 = [0.25 - i * 0.012, 1.3 - i * 0.01, z - 0.01];
+    k.tube('steel_bare', [0.33, 1.12, z], tip, 0.007, { seg: 5, tint: 0.8 });
+    k.sph('rubber', 0.02, ...tip, { seg: 7 });
+  }
+  // 换向手柄（前进 / 后退），在方向盘另一边，红色的把
+  const gripAt: V3 = [0.2, 1.24, 0.29];
+  k.tube('steel_bare', [0.3, 1.1, 0.27], gripAt, 0.008, { seg: 5, tint: 0.8 });
+  k.cyl('plastic_red', 0.016, 0.07, ...gripAt, { seg: 7, rot: [0, 0, 0.6], tint: 0.9 });
+}
+
+/**
+ * 护顶架（防止货物砸到司机的铁笼子）、前灯、后视镜、线束、顶上的警示灯。
+ * shade() 每调一次给出一个 0.68–0.95 之间的随机深浅：同样是黑钢，一根杆一个样，整个架子才不是一块死黑。
+ */
+function addOverheadGuard(k: Kit, shade: () => number) {
+  for (const side of [1, -1]) {
+    k.bar(STEEL, [0.47, 1.08, side * 0.4], [0.27, ROOF, side * 0.46], 0.06, 0.05, { c: 0.01, tint: shade() });  // 前立柱：上端往后倒
+    k.bar(STEEL, [-1.0, 1.0, side * 0.44], [-0.95, ROOF, side * 0.46], 0.06, 0.05, { c: 0.01, tint: shade() }); // 后立柱
+    k.bar(STEEL, [0.3, ROOF, side * 0.46], [-0.98, ROOF, side * 0.46], 0.05, 0.06, { c: 0.01, tint: shade() }); // 顶棚纵梁
+    k.box(STEEL, 0.09, 0.012, 0.08, 0.47, 1.085, side * 0.4, { c: 0.003, tint: 0.5 });  // 立柱脚板
+    k.box(STEEL, 0.09, 0.012, 0.08, -1.0, 1.024, side * 0.44, { c: 0.003, tint: 0.5 });
+    // 后立柱的脚板踩在机罩顶上；前立柱却站在前围的侧面之外（前围只有 0.7 米宽，立柱在 z=±0.40），
+    // 照参考原样搭的话脚板是悬空的。这里在脚板下面补一块焊在前围侧面上的支座，把它托住
+    k.box(STEEL, 0.08, 0.07, 0.08, 0.47, 1.044, side * 0.39, { c: 0.008, tint: 0.5 });
+
+    // 前灯：挂在前立柱上的小方灯。灯面亮度 0.7，是"没开但看得出是灯"的奶白色
+    k.rbox(STEEL, 0.085, 0.1, 0.13, 0.405, 1.66, side * 0.47, { r: 0.02, seg: 1, tint: 0.45 });
+    k.box(emissive(0xfff0d2, 0.7), 0.006, 0.075, 0.105, 0.449, 1.66, side * 0.47, { c: 0.002, raw: true });
+
+    // 后视镜：一根细支臂挑出去，镜壳向外偏 0.25 弧度，镜面是一片亮钢
+    k.tube(STEEL, [0.385, 1.5, side * 0.42], [0.42, 1.52, side * 0.57], 0.008, { seg: 5, tint: 0.5 });
+    k.box(STEEL, 0.022, 0.17, 0.1, 0.42, 1.52, side * 0.573, { c: 0.006, rot: [0, side * 0.25, 0], tint: 0.5 });
+    k.box('steel_bare', 0.002, 0.15, 0.084, 0.408, 1.52, side * 0.57, { plain: true, rot: [0, side * 0.25, 0] });
+  }
+  for (const x of [0.28, -0.96]) k.box(STEEL, 0.05, 0.06, 0.92, x, ROOF, 0, { c: 0.01, tint: shade() });                       // 顶棚前后两根横梁
+  for (let i = 0; i < 8; i++) k.box(STEEL, 0.03, 0.028, 0.9, -0.83 + i * 0.139, ROOF + 0.012, 0, { c: 0.006, tint: shade() }); // 顶棚的八根护条
+  // 前灯的线束，只有一侧有：从前立柱脚下绕出来，顺着立柱爬到灯后面
+  softHose(k, STEEL, [[0.44, 1.2, 0.44], [0.47, 1.25, 0.49], [0.41, 1.55, 0.5], [0.36, 1.6, 0.455]], 0.011, 0.5);
+  // 警示灯：顶棚后部偏一侧的一只橙色灯罩。不闪，亮度 0.9
+  k.cyl(STEEL, 0.05, 0.03, -0.86, ROOF + 0.045, 0.3, { r2: 0.045, seg: 10, tint: 0.5 });
+  k.lathe(emissive(0xff8a12, 0.9), [[0.04, 0], [0.04, 0.06], [0.03, 0.082], [0, 0.09]], -0.86, ROOF + 0.06, 0.3, { seg: 10, raw: true });
+}
+
+/** 液化气罐：横放在配重顶上（罐轴沿 z），两个托架、两道抱箍，阀门在 +z 一头，一根软管通进机罩。 */
+function addGasTank(k: Kit) {
+  const x = -1.4, y = 1.435; // 罐心：配重顶面 1.23 + 托架 0.05 + 罐半径 0.155
+  for (const z of [-0.2, 0.2]) {
+    k.box(STEEL, 0.3, 0.07, 0.04, x, 1.262, z, { c: 0.008, tint: 0.5 });                 // 托架
+    k.cyl(STEEL, 0.159, 0.035, x, y, z, { axis: 'z', seg: 16, open: true, tint: 0.35 }); // 抱箍：比罐体粗 4 毫米的一圈铁皮
+  }
+  // 罐体：两头圆鼓的钢瓶，半径 0.155、长 0.74。镀锌的表面按位置带一点深浅
+  k.lathe('steel_galv', [[0, -0.37], [0.08, -0.36], [0.132, -0.33], [0.155, -0.27], [0.155, 0.27], [0.132, 0.33], [0.08, 0.36], [0, 0.37]], x, y, 0, {
+    axis: 'z', seg: 16, tint: (px, py, pz) => 0.8 + 0.2 * noise3(px * 8, py * 8, pz * 8),
+  });
+  k.cyl('steel_galv', 0.09, 0.07, x, y, 0.39, { axis: 'z', seg: 12, open: true, tint: 0.7 }); // 阀门护圈
+  k.cyl('steel_galv', 0.02, 0.05, x, y, 0.39, { axis: 'z', seg: 8, tint: 0.9 });              // 阀门
+  // 供气软管：从阀门出来，翻过配重的肩膀，钻进机罩后上角
+  softHose(k, 'rubber', [[x, y, 0.41], [x + 0.05, y - 0.02, 0.46], [x + 0.2, y - 0.15, 0.44], [-1.07, 1.1, 0.38], [-1.0, 0.98, 0.36]], 0.012);
+  // 罐身上的两张标：易燃品菱形标和红字"液化气"。
+  // 弯贴片本来绕 y 轴弯、正中朝 +z。先绕 x 轴转 −90°，变成绕罐轴（z）弯、正中朝正上方；
+  // 外面再绕罐轴转 0.7 弧度，从正上方转到"后上方"—— 站在车后面正好看得到。
+  k.at([x, y, 0], [0, 0, 0.7], () => {
+    curvedPatch(k, decal('hazard_flammable'), 0.157, 0.12, 0.12, placed([0, 0, -0.05], [-HALF_PI, 0, 0]));
+    const text = label('液化气', { color: 'red', font: 'stencil', distress: 0.3 });
+    curvedPatch(k, text, 0.157, 0.16, 0.16 / text.aspect, placed([0, 0, 0.14], [-HALF_PI, 0, 0]));
+  });
+}
+
 // ====================================================================== 整车
 
 /**
@@ -248,6 +512,7 @@ export function buildForklift(o: { seed?: number; forksUp?: number; interior?: b
   const carriageLift = clamp(o.forksUp ?? 0, 0, 1) * 1.5;
   const mastLift = carriageLift / 2;
   const number = NUMBERS[seed % NUMBERS.length];
+  const shade = () => k.range(0.68, 0.95);
 
   const tireUvs: Float32Array[] = [];
   for (const side of [1, -1]) {
@@ -257,6 +522,10 @@ export function buildForklift(o: { seed?: number; forksUp?: number; interior?: b
   addChassis(k);
   addCounterweight(k, number);
   addHood(k, number);
+  addSeat(k);
+  addDashboard(k);
+  addOverheadGuard(k, shade);
+  addGasTank(k);
 
   // 占地 3.4 × 1.25 米；高度随货叉抬升而变：平时是护顶架和警示灯（2.2），抬高以后是挡货架或者内门架的顶
   const height = Math.max(2.2, 0.06 + carriageLift + 1.36, 2.04 + mastLift);
