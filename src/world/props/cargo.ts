@@ -402,6 +402,230 @@ export function barrel(o: BarrelOpts = {}): PropModel {
   });
 }
 
+// ====================================================================== 木箱
+
+interface CrateSpec {
+  /** 细节：木条带倒角、长侧面有斜撑、上下 8 个角都有包角。叠在上面的小箱子不需要。 */
+  detail?: boolean;
+  /** 垫木（箱底 3 根，叉车从这里叉进去）。 */
+  skids?: boolean;
+  /** 正反两面的喷字；空字符串表示不喷。 */
+  label?: string;
+  /** 侧面的编号。 */
+  code?: string;
+}
+/**
+ * 往零件箱里放一只木箱，长 L（x）× 高 H × 宽 W（z），底面在当前坐标系的 y=0。
+ * 结构：垫木 → 一个深色的"内胆"（木板缝里露出来的黑）→ 四个侧面和顶面各由一条条独立的木板拼成
+ * → 外面钉一圈 7 厘米宽的边框和斜撑 → 角上包镀锌铁皮 → 喷字。
+ */
+function addCrate(k: Kit, L: number, H: number, W: number, s: CrateSpec = {}) {
+  const detail = s.detail ?? true, skids = s.skids ?? true;
+  const T = 0.022, F = 0.07;                // 边框木条的厚度、宽度
+  const base = skids ? 0.07 : 0;            // 垫木高度：箱体从这里往上
+  const bodyH = H - base, midY = base + bodyH / 2;
+  const batten = (sx: number, sy: number, sz: number, x: number, y: number, z: number, mul: number, grain: Axis, rot?: V3) =>
+    addShifted(k, 'wood_pallet', detail ? chamferBox(sx, sy, sz, 0.004) : new THREE.BoxGeometry(sx, sy, sz), [x, y, z], rot, { tint: crateTone(k, mul), grain });
+
+  if (skids) for (const x of [-(L / 2 - 0.13), 0, L / 2 - 0.13]) k.box('wood_pallet', 0.09, base, W - 0.02, x, base / 2, 0, { c: 0.006, tint: crateTone(k, 0.6), grain: 'z' });
+  k.box('wood_pallet', L - 2 * T - 0.012, bodyH - T - 0.012, W - 2 * T - 0.012, 0, base + (bodyH - T - 0.012) / 2 + 0.002, 0, { plain: true, tint: [0.25 * DARK_WOOD[0], 0.25 * DARK_WOOD[1], 0.25 * DARK_WOOD[2]] });
+
+  // 侧面的木板：每条只是一张平面（2 个三角形），上下留 5 毫米的缝。
+  // 每条往里缩的深度随机差 0–4 毫米，板面就不是一个平整的大面，侧光下每条板的亮度都不一样。
+  const plank = (w: number, h: number, pos: V3, rot: V3) => addShifted(k, 'wood_pallet', new THREE.PlaneGeometry(w, h), pos, rot, { tint: crateTone(k) });
+  const rows = Math.max(3, Math.round(bodyH / 0.125)), rowH = bodyH / rows;
+  for (let i = 0; i < rows; i++) {
+    const y = base + rowH * (i + 0.5);
+    plank(L - 0.03, rowH - 0.005, [0, y, W / 2 - T - k.range(0, 0.004)], [0, 0, 0]);
+    plank(L - 0.03, rowH - 0.005, [0, y, -(W / 2 - T - k.range(0, 0.004))], [0, Math.PI, 0]);
+    plank(W - 0.03, rowH - 0.005, [L / 2 - T - k.range(0, 0.004), y, 0], [0, HALF_PI, 0]);
+    plank(W - 0.03, rowH - 0.005, [-(L / 2 - T - k.range(0, 0.004)), y, 0], [0, -HALF_PI, 0]);
+  }
+  const lids = Math.max(3, Math.round(W / 0.13)), lidW = (W - 0.02) / lids;
+  for (let i = 0; i < lids; i++) plank(L - 0.03, lidW - 0.005, [0, H - T - k.range(0, 0.003), -W / 2 + 0.01 + lidW * (i + 0.5)], [-HALF_PI, 0, 0]);
+
+  // 边框。长侧面（±z）：上下两条横的 + 左右两条竖的 + 一根对角斜撑；短侧面（±x）：同样一圈；顶面四周一圈
+  const braceAngle = Math.atan2(bodyH - 2 * F, L - 2 * F), braceLen = Math.hypot(L - 2 * F, bodyH - 2 * F);
+  for (const side of [1, -1]) {
+    const z = side * (W / 2 - T / 2);
+    batten(L, F, T, 0, base + F / 2, z, 0.85, 'x');
+    batten(L, F, T, 0, H - F / 2, z, 0.85, 'x');
+    for (const e of [1, -1]) batten(F, bodyH - 2 * F, T, e * (L / 2 - F / 2), midY, z, 0.85, 'y');
+    // 斜撑比边框薄一点、往里收一点；前后两面斜的方向相反（从外面看都是"左下到右上"）
+    if (detail) batten(braceLen, F * 0.85, T * 0.8, 0, midY, side * (W / 2 - T * 0.6), 0.8, 'x', [0, 0, side * braceAngle]);
+    const x = side * (L / 2 - T / 2), span = W - 2 * T;
+    for (const e of [1, -1]) batten(T, bodyH, F, x, midY, e * (span / 2 - F / 2), 0.85, 'y');
+    batten(T, F, span - 2 * F, x, base + F / 2, 0, 0.85, 'z');
+    batten(T, F, span - 2 * F, x, H - F / 2, 0, 0.85, 'z');
+    batten(L, T, F, 0, H - T / 2, side * (W / 2 - F / 2), 0.85, 'x');
+    batten(F, T, W - 2 * F, side * (L / 2 - F / 2), H - T / 2, 0, 0.85, 'z');
+  }
+  if (detail) batten(F, T, W - 2 * F, 0, H - T / 2, 0, 0.85, 'z'); // 顶面中间再压一根
+
+  // 镀锌包角：每个角两三片 8.5 厘米见方、3 毫米厚的薄铁皮，各贴在一个面上。镀锌皮旧了会发黄，所以绿、蓝两个分量压低一点
+  const P = 0.085;
+  for (const sx of [1, -1]) for (const sz of [1, -1]) for (const upper of detail ? [true, false] : [true]) {
+    const y = upper ? H - P / 2 : base + P / 2, shade = k.range(0.55, 0.9), zinc: Rgb = [shade, shade * 0.9, shade * 0.8];
+    k.box('steel_galv', P, P, 0.003, sx * (L / 2 - P / 2), y, sz * (W / 2 + 0.0015), { plain: true, tint: zinc });
+    k.box('steel_galv', 0.003, P, P, sx * (L / 2 + 0.0015), y, sz * (W / 2 - P / 2), { plain: true, tint: zinc });
+    if (upper) k.box('steel_galv', P, 0.003, P, sx * (L / 2 - P / 2), H + 0.0015, sz * (W / 2 - P / 2), { plain: true, tint: zinc });
+  }
+
+  // 喷字：贴在木板面上（比木板高出 3 毫米），在边框围出的凹槽里
+  const face = W / 2 - T + 0.003, textH = Math.min(0.11, bodyH * 0.15);
+  if (s.label) {
+    const ink: LabelOpts = { color: 'black', font: 'stencil', distress: 0.25 };
+    text(k, s.label, ink, L * 0.4, textH, [-L * 0.2, H - F - textH * 0.95, face]);
+    text(k, s.label, ink, L * 0.4, textH, [L * 0.2, H - F - textH * 0.95, -face], [0, Math.PI, 0]);
+    const arrowH = Math.min(0.14, bodyH * 0.2); // "此面向上"的箭头，在右下角
+    k.decal('arrow_up', arrowH * 0.62, [L * 0.27, base + F + bodyH * 0.16, face], undefined, arrowH);
+  }
+  if (s.code) text(k, s.code, { color: 'black', font: 'stencil', distress: 0.3 }, W * 0.5, textH * 0.9, [L / 2 - T + 0.003, midY + bodyH * 0.12, 0], [0, HALF_PI, 0]);
+  if (detail) text(k, '激战远洋', { color: 'white', font: 'sans', distress: 0.45 }, Math.min(0.2, bodyH * 0.25), 0.06, [-(L / 2 - T + 0.003), midY - bodyH * 0.05, 0], [0, -HALF_PI, 0]);
+}
+
+const CRATE_LABELS = ['易碎物品', '此面向上', '保持干燥', '机械零件'], CRATE_CODES = [117, 204, 318];
+/** 木箱，1.1 × 1.0 × 0.9 米。喷字 4 种 × 编号 3 种，一共 12 个个体。 */
+export function crateWood(o: CargoOpts = {}): PropModel {
+  const v = variantOf(o.seed, 12);
+  return cached(`crate_wood|${v}${tag(o)}`, () => {
+    const k = new Kit('crate_wood', v, { interior: o.interior });
+    addCrate(k, 1.1, 1, 0.9, { label: CRATE_LABELS[v % 4], code: `B4-${CRATE_CODES[v % 3]}` });
+    return k.finish({ size: [1.1, 1, 0.9], boxes: [{ min: [-0.55, 0, -0.45], max: [0.55, 1, 0.45] }], surface: 'wood' });
+  });
+}
+
+/** 木箱堆：大中小三只叠成塔，两条橙色捆扎带从上面勒过去。占地 1.2 × 1.9 × 1.0 米。4 个个体。 */
+export function crateStack(o: CargoOpts = {}): PropModel {
+  const v = variantOf(o.seed, 4);
+  return cached(`crate_stack|${v}${tag(o)}`, () => {
+    const k = new Kit('crate_stack', v, { interior: o.interior });
+    addCrate(k, 1.2, 0.95, 1, { label: '重物', code: `激战04${v % 2}` });
+    // 中间那只：比底下的小一圈，偏着放、转一个角度
+    const mid = { x: k.range(-0.1, 0.02), z: k.range(-0.05, 0.05), yaw: (k.rng() < 0.5 ? -1 : 1) * k.range(0.1, 0.16), L: 0.86, W: 0.72 };
+    k.at([mid.x, 0.95, mid.z], [0, mid.yaw, 0], () => addCrate(k, mid.L, 0.6, mid.W, { detail: false, skids: false, label: '易碎物品', code: 'B4-204' }));
+    const top = { x: mid.x + k.range(-0.05, 0.05), z: mid.z + k.range(-0.04, 0.04), yaw: k.range(-0.12, 0.12), L: 0.55, W: 0.45 };
+    k.at([top.x, 1.55, top.z], [0, top.yaw, 0], () => addCrate(k, top.L, 0.35, top.W, { detail: false, skids: false }));
+
+    // 捆扎带在 x 处要绕过一只转了 yaw 的箱子：算出箱子 ±z 那个侧面在这个 x 上的 z 坐标。
+    // （箱子自己坐标里侧面是 z = side × halfW 的一条直线；转过 yaw 以后，解出它和"x = 定值"的交点。）
+    const sideZ = (x: number, box: { x: number; z: number; yaw: number }, halfW: number, side: number) => {
+      const along = (x - box.x - side * halfW * Math.sin(box.yaw)) / Math.cos(box.yaw);
+      return box.z - along * Math.sin(box.yaw) + side * halfW * Math.cos(box.yaw);
+    };
+    for (const x of [-0.2, 0.17]) {
+      // 一侧的走法：贴着底箱侧面上去 → 斜拉到中箱的上沿 → 再斜拉到顶箱的上沿；另一侧倒着走回地面
+      const up = (side: number): V3[] => [
+        [x, 0.09, side * 0.506], [x, 0.956, side * 0.506],
+        [x, 1.556, sideZ(x, mid, mid.W / 2, side) + side * 0.006],
+        [x, 1.906, sideZ(x, top, top.W / 2, side) + side * 0.006],
+      ];
+      k.strip('paint_orange', [...up(1), ...up(-1).reverse()], [0.02, 0, 0], { tint: [1, 0.8, 0.5], cast: true });
+      // 棘轮扣和它的轴：用包角的那种镀锌钢（省一种材质），轴染深一点
+      k.box('steel_galv', 0.06, 0.09, 0.025, x, 0.62, 0.516, { c: 0.006, tint: 0.8 });
+      k.tube('steel_galv', [x - 0.035, 0.66, 0.53], [x + 0.035, 0.66, 0.53], 0.008, { seg: 6, cap: true, tint: 0.35 });
+    }
+    // 碰撞盒一只箱子一个：塔是上小下大的，用一个 1.9 米高的整盒的话，子弹会被顶上小箱子两边的空气挡住。
+    // 上面两只是转过角度的，盒子按"转完以后的外包"略放大一点。
+    const around = (b: { x: number; z: number; yaw: number; L: number; W: number }, y0: number, y1: number) => {
+      const c = Math.abs(Math.cos(b.yaw)), s = Math.abs(Math.sin(b.yaw)), hx = (b.L * c + b.W * s) / 2, hz = (b.L * s + b.W * c) / 2;
+      return { min: [b.x - hx, y0, b.z - hz] as V3, max: [b.x + hx, y1, b.z + hz] as V3 };
+    };
+    return k.finish({
+      size: [1.2, 1.9, 1], surface: 'wood',
+      boxes: [{ min: [-0.6, 0, -0.5], max: [0.6, 0.95, 0.5] }, around(mid, 0.95, 1.55), around(top, 1.55, 1.9)],
+    });
+  });
+}
+
+// ====================================================================== 吨桶
+
+/** 吨桶（1000 升的方形塑料桶 + 镀锌钢管笼 + 托盘底座），1.2 × 1.16 × 1.0 米。4 个个体，液位各不相同。 */
+export function ibcTote(o: CargoOpts = {}): PropModel {
+  const v = variantOf(o.seed, 4);
+  return cached(`ibc_tote|${v}${tag(o)}`, () => {
+    const k = new Kit('ibc_tote', v, { interior: o.interior });
+    const zinc = () => k.range(0.75, 1); // 每根钢管、每块垫脚的深浅都不一样
+
+    // ---- 镀锌底座：3 条滑橇、9 个垫脚、一圈边梁、一张托板
+    for (const z of [-0.44, 0, 0.44]) k.box('steel_galv', 1.2, 0.028, 0.1, 0, 0.014, z, { plain: true, tint: zinc() });
+    for (const x of [-0.54, 0, 0.54]) for (const z of [-0.44, 0, 0.44]) k.box('steel_galv', 0.12, 0.074, 0.1, x, 0.065, z, { c: 0.008, tint: zinc() * 0.85 });
+    for (const z of [-0.48, 0.48]) k.box('steel_galv', 1.2, 0.03, 0.04, 0, 0.115, z, { c: 0.006, tint: zinc() });
+    for (const x of [-0.58, 0.58]) k.box('steel_galv', 0.04, 0.03, 0.92, x, 0.115, 0, { c: 0.006, tint: zinc() });
+    k.box('steel_galv', 1.12, 0.012, 0.92, 0, 0.124, 0, { plain: true, tint: 0.6 });
+
+    // ---- 塑料内胆：1.1 × 0.95 × 0.9 的圆角盒，底面在 y=0.13
+    const BW = 1.1, BH = 0.95, BD = 0.9, bottleY = 0.13 + BH / 2;
+    const level = 0.13 + BH * k.range(0.45, 0.8); // 液位（世界高度）：桶是半透明的，从外面看得见装了多少
+    const bottle = softBox(BW, BH, BD, 0.07, 8, 6, 8);
+    {
+      // 液位线要清楚，那里就得有顶点。把侧面上离液位最近的两圈网格线挪到液位上下各 3.5 厘米处。
+      const pos = bottle.getAttribute('position'), local = level - bottleY, flat = BH / 2 - 0.07 - 1e-4;
+      const ys = [...new Set(Array.from({ length: pos.count }, (_, i) => Math.round(pos.getY(i) * 1e4) / 1e4))].filter((y) => Math.abs(y) < flat);
+      const [lo, hi] = ys.sort((a, b) => Math.abs(a - local) - Math.abs(b - local)).slice(0, 2).sort((a, b) => a - b);
+      for (let i = 0; i < pos.count; i++) {
+        const y = Math.round(pos.getY(i) * 1e4) / 1e4;
+        if (y === lo) pos.setY(i, local - 0.035); else if (y === hi) pos.setY(i, local + 0.035);
+      }
+    }
+    deform(bottle, (p) => {
+      const u = p.x / (BW / 2), t = p.y / (BH / 2), w = p.z / (BD / 2);
+      // 四个侧面被里面的液体撑得中间外鼓 16 毫米（越靠近棱越少），顶面中间微鼓、盖子周围又陷下去一点
+      if (Math.abs(u) > 0.9) p.x += Math.sign(u) * 0.016 * Math.cos(HALF_PI * t) * Math.cos(HALF_PI * w);
+      if (Math.abs(w) > 0.9) p.z += Math.sign(w) * 0.016 * Math.cos(HALF_PI * u) * Math.cos(HALF_PI * t);
+      if (t > 0.9) p.y += 0.012 * Math.cos(HALF_PI * u) * Math.cos(HALF_PI * w) - 0.01 * Math.max(0, 1 - Math.hypot(p.x, p.z) / 0.3);
+    });
+    smoothNormals(bottle);
+    const WHITE = 0xd9ddd0, plastic = recolored('plastic_grey', WHITE, o), wob = v * 1.3;
+    const red = (mul: number) => toward(0x8e1f1a, WHITE, mul), black = toward(0x17181a, WHITE);
+    k.add(plastic, bottle, {
+      tint: (x, y, z) => {
+        const above = smoothstep(level - 0.03, level + 0.03, y + 0.02 * noise3(x * 3 + wob, z * 3, 0)); // 0 = 液面以下，1 = 以上
+        const mottle = 0.9 + 0.1 * noise3(x * 6, y * 6 + wob, z * 6);
+        return [mottle * (0.52 + 0.48 * above), mottle * (0.6 + 0.4 * above), mottle * (0.66 + 0.34 * above)]; // 有液体的部分发暗、偏蓝灰
+      },
+    }, matrixOf([0, bottleY, 0]));
+    // 顶盖：盖座 + 红色旋盖 + 一圈 8 个防滑齿
+    const topY = 0.13 + BH;
+    k.cyl(plastic, 0.125, 0.03, 0, topY + 0.005, 0, { r2: 0.12, seg: 14, tint: 0.9 });
+    k.lathe(plastic, [[0.105, 0], [0.105, 0.042], [0.105, 0.042], [0.09, 0.05], [0, 0.05]], 0, topY + 0.015, 0, { seg: 14, tint: red(0.9) });
+    for (let i = 0; i < 8; i++) {
+      const a = (i * Math.PI) / 4;
+      k.box(plastic, 0.012, 0.04, 0.02, Math.cos(a) * 0.108, topY + 0.036, Math.sin(a) * 0.108, { rot: [0, -a, 0], plain: true, tint: red(0.8) });
+    }
+
+    // ---- 钢管笼。横管 4 圈 + 顶圈（粗一点），竖管前后每 18.4 厘米一根、两侧每 18 厘米一根，顶上两根横担
+    const CX = 0.575, CZ = 0.475, cageBottom = 0.13, cageTop = 1.1, R = 0.011;
+    for (const y of [0.2, 0.42, 0.64, 0.86, cageTop]) {
+      const r = y === cageTop ? 0.014 : R;
+      for (const s of [1, -1]) { // 每根两头各伸出一个半径并封口：转角处两根管子咬在一起，不会露出空心的管口
+        k.tube('steel_galv', [-CX - r, y, s * CZ], [CX + r, y, s * CZ], r, { seg: 5, cap: true, tint: zinc() });
+        k.tube('steel_galv', [s * CX, y, -CZ - r], [s * CX, y, CZ + r], r, { seg: 5, cap: true, tint: zinc() });
+      }
+    }
+    for (const s of [1, -1]) {
+      for (let x = -0.46; x <= 0.461; x += 0.184) k.tube('steel_galv', [x, cageBottom, s * (CZ - 0.012)], [x, cageTop, s * (CZ - 0.012)], R, { seg: 5, tint: zinc() });
+      for (let z = -0.36; z <= 0.361; z += 0.18) k.tube('steel_galv', [s * (CX - 0.012), cageBottom, z], [s * (CX - 0.012), cageTop, z], R, { seg: 5, tint: zinc() });
+      k.tube('steel_galv', [s * 0.28, cageTop + 0.01, -CZ], [s * 0.28, cageTop + 0.01, CZ], 0.013, { seg: 5, tint: zinc() });
+    }
+
+    // ---- 正面的铝标牌，和上面的字
+    k.box('aluminium', 0.42, 0.3, 0.004, -0.1, 0.72, CZ + 0.014, { c: 0.0015, tint: 0.85, cast: false });
+    const plateZ = CZ + 0.0175, ink: LabelOpts = { color: 'black', font: 'sans', distress: 0.2 };
+    text(k, '储液箱 1000 升', ink, 0.36, 0.06, [-0.1, 0.8, plateZ]);
+    k.decal(v % 2 ? 'warning' : 'flammable', 0.15, [-0.19, 0.67, plateZ]);
+    text(k, 'UN 31HA1/Y', ink, 0.2, 0.04, [0.02, 0.66, plateZ]);
+
+    // ---- 底部出液阀：从 +x 面伸出笼子。黑阀体 + 红盖 + 红把手
+    k.tube(plastic, [0.52, 0.2, 0], [0.575, 0.2, 0], 0.05, { seg: 10, cap: true, tint: black });
+    k.tube(plastic, [0.575, 0.2, 0], [0.598, 0.2, 0], 0.045, { seg: 10, cap: true, tint: red(0.9) });
+    k.box(plastic, 0.02, 0.022, 0.13, 0.55, 0.262, 0.02, { rot: [0, 0.4, 0], c: 0.005, tint: red(0.9) });
+    k.cyl(plastic, 0.012, 0.03, 0.55, 0.245, 0, { seg: 6, tint: black });
+
+    return k.finish({ size: [1.2, 1.16, 1], boxes: [{ min: [-0.6, 0, -0.5], max: [0.6, 1.16, 0.5] }], surface: 'metal' });
+  });
+}
+
 // ====================================================================== 轮胎堆
 
 /**
@@ -447,6 +671,82 @@ export function tireStack(o: TireStackOpts = {}): PropModel {
     }
     const h = count * 0.25;
     return k.finish({ size: [0.8, h, 0.8], boxes: [{ min: [-0.4, 0, -0.4], max: [0.4, h, 0.4] }], surface: 'rubber' });
+  });
+}
+
+// ====================================================================== 电缆盘
+
+/**
+ * 把一个圆盘切成 n 条竖着的木板（弦向的板条），画在 xy 平面里、朝 +z。
+ * 每条板的左、中、右各取一个 x，上下两端落在圆周上 —— 6 个顶点、4 个三角形，板与板之间留 6 毫米的缝。
+ */
+function chordBoards(R: number, n: number): THREE.BufferGeometry[] {
+  const out: THREE.BufferGeometry[] = [], w = (2 * R) / n;
+  const halfChord = (x: number) => Math.sqrt(Math.max(0, R * R - x * x)); // 圆在 x 处的半弦长；钳到 ≥0 再开方
+  for (let i = 0; i < n; i++) {
+    const x0 = -R + i * w + 0.003, x1 = -R + (i + 1) * w - 0.003, pos: number[] = [];
+    for (const x of [x0, (x0 + x1) / 2, x1]) pos.push(x, -halfChord(x), 0, x, halfChord(x), 0);
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(new Array(6).fill([0, 0, 1]).flat(), 3));
+    g.setIndex([0, 2, 3, 0, 3, 1, 2, 4, 5, 2, 5, 3]);
+    out.push(g);
+  }
+  return out;
+}
+
+/** 电缆盘：直径 1.3 米的木盘立着放（轴沿 z），盘芯上绕满黑电缆，一截松开的电缆头甩在地上，两侧板下垫着木楔。3 个个体。 */
+export function cableReel(o: CargoOpts = {}): PropModel {
+  const v = variantOf(o.seed, 3);
+  return cached(`cable_reel|${v}${tag(o)}`, () => {
+    const k = new Kit('cable_reel', v, { interior: o.interior });
+    const R = 0.65, HALF = 0.4, PLATE = 0.045; // 侧板半径、盘的半宽、侧板厚
+    const roll = k.range(-0.5, 0.5);           // 整只盘随机滚过一个角度：木板的缝和喷字不会每只都横平竖直
+    k.push([0, R, 0], [0, 0, roll]);
+    for (const side of [1, -1]) {
+      // 侧板外面：9 条竖板；里面：9 条横板（两层木板十字交叉钉在一起，真的电缆盘就是这么做的）
+      for (const g of chordBoards(R - 0.004, 9)) addShifted(k, 'wood_pallet', g, [0, 0, side * (HALF + k.range(0, 0.003))], [0, side > 0 ? 0 : Math.PI, 0], { tint: reelTone(k), grain: 'y' });
+      for (const g of chordBoards(R - 0.004, 9)) addShifted(k, 'wood_pallet', g, [0, 0, side * (HALF - PLATE)], [0, side > 0 ? Math.PI : 0, HALF_PI], { tint: reelTone(k, 0.8), grain: 'y' });
+      k.cyl('wood_pallet', R, PLATE, 0, 0, side * (HALF - PLATE / 2), { axis: 'z', seg: 24, open: true, tint: reelTone(k, 0.75) }); // 侧板的外缘
+      // 两层木板之间垫一块近黑的实心圆盘：木板都是单面的薄片，没有它，从板缝里会直接看穿到盘的另一边
+      k.cyl('wood_pallet', R - 0.006, PLATE - 0.005, 0, 0, side * (HALF - PLATE / 2), { axis: 'z', seg: 24, tint: 0.05 });
+      k.cyl('steel_galv', 0.105, 0.008, 0, 0, side * (HALF + 0.006), { axis: 'z', seg: 12, tint: 0.5 });   // 中心钢板
+      k.cyl('steel_galv', 0.04, 0.004, 0, 0, side * (HALF + 0.0105), { axis: 'z', seg: 10, tint: 0.06 });  // 轴孔：同一种钢染成近黑
+      for (let i = 0; i < 6; i++) {
+        const a = (i * Math.PI) / 3 + 0.3;
+        k.cyl('steel_galv', 0.017, 0.014, Math.cos(a) * 0.3, Math.sin(a) * 0.3, side * (HALF + 0.006), { axis: 'z', seg: 6, tint: k.range(0.5, 0.9) });
+      }
+      text(k, side > 0 ? 'NYY-J 4x95 mm2  500 m' : '激战港区', { color: 'white', font: 'stencil', distress: 0.45 }, 0.7, 0.085, [0, 0.4, side * (HALF + 0.006)], [0, side > 0 ? 0 : Math.PI, 0]);
+    }
+    k.decal('arrow_up', 0.11, [0.36, -0.2, HALF + 0.006], [0, 0, -1.2 - HALF_PI], 0.2); // 滚动方向的箭头
+
+    // 盘芯上的电缆：16 圈，车削轮廓一高一低地起伏，每圈就是一道凸棱。每圈的亮度用噪声错开，看得出是一圈一圈绕的
+    const TURNS = 16, inner = HALF - PLATE, pitch = (2 * inner) / TURNS, coilR = 0.47, coil: [number, number][] = [];
+    for (let i = 0; i <= TURNS; i++) {
+      coil.push([coilR - 0.017, -inner + i * pitch]);
+      if (i < TURNS) coil.push([coilR, -inner + (i + 0.5) * pitch]);
+    }
+    const wob = v * 0.7;
+    k.lathe('rubber', coil, 0, 0, 0, {
+      axis: 'z', seg: 20,
+      tint: (x, y, z) => { const a = Math.atan2(y - R, x); return 0.7 + 0.5 * noise3(Math.cos(a) * 2 + wob, Math.sin(a) * 2, z * 30); },
+    });
+    k.pop();
+
+    // 松开的电缆头：贴着盘芯从顶上绕下来，垂到地上，在盘底下拐两个弯，末端一个黄铜接头
+    const cz = 0.2, loose: V3[] = [];
+    for (let a = 1.9; a >= -0.25; a -= 0.36) loose.push([Math.cos(a) * (coilR + 0.012), R + Math.sin(a) * (coilR + 0.012), cz + (1.9 - a) * 0.02]);
+    // 贴地的几个点放在 y=0.028：曲线在两点之间会略微下探，留 8 毫米的余量才不会钻进地面
+    loose.push([0.53, 0.3, cz + 0.05], [0.56, 0.09, cz + 0.06], [0.5, 0.03, cz + 0.02], [0.3, 0.028, cz - 0.1], [0.05, 0.028, cz - 0.02], [-0.2, 0.028, cz + 0.06], [-0.38, 0.028, cz - 0.05]);
+    k.hose('rubber', loose, 0.02, { seg: 6, steps: 40, tint: 0.9 });
+    k.tube('steel_galv', [-0.38, 0.028, cz - 0.05], [-0.41, 0.028, cz - 0.07], 0.014, { seg: 6, cap: true, tint: [0.95, 0.72, 0.3] }); // 黄铜接头：镀锌钢染成铜黄，省一种材质
+
+    // 木楔：每块侧板底下前后各塞一个三角木块，盘才不会滚走
+    for (const z of [HALF - PLATE / 2, -(HALF - PLATE / 2)]) {
+      k.extrude('wood_pallet', [[0.14, 0], [0.37, 0], [0.37, 0.1]], 0.1, { pos: [0, 0, z], soft: 0, tint: reelTone(k, 0.8) });
+      k.extrude('wood_pallet', [[-0.37, 0], [-0.14, 0], [-0.37, 0.1]], 0.1, { pos: [0, 0, z], soft: 0, tint: reelTone(k, 0.8) });
+    }
+    return k.finish({ size: [1.3, 1.3, 0.8], boxes: [{ min: [-0.65, 0, -0.4], max: [0.65, 1.3, 0.4] }], surface: 'wood' });
   });
 }
 
@@ -539,5 +839,6 @@ export function trafficCone(o: TrafficConeOpts = {}): PropModel {
 
 /** 所有货物道具，按参考道具表里的名字登记。摆放的代码可以用名字取：CARGO.barrel({ color: 'red' })。 */
 export const CARGO: Record<string, (o?: any) => PropModel> = {
-  barrel, pallet, pallet_stack: palletStack, tire_stack: tireStack, jerry_can: jerryCan, traffic_cone: trafficCone,
+  barrel, pallet, pallet_stack: palletStack, crate_wood: crateWood, crate_stack: crateStack, ibc_tote: ibcTote,
+  tire_stack: tireStack, cable_reel: cableReel, jerry_can: jerryCan, traffic_cone: trafficCone,
 };
