@@ -76,7 +76,6 @@ export function drumMesh(list: { x: number; z: number; c: number; rot: number }[
   for (const y of [0.3, 0.6]) prof.push([R, y - 0.03], [R + 0.012, y - 0.012], [R + 0.012, y + 0.012], [R, y + 0.03]); // 加强箍
   prof.push([R, H - 0.03], [R + 0.006, H - 0.02], [R + 0.006, H - 0.004], [R - 0.008, H], [R - 0.014, H - 0.018], [0.11, H - 0.018], [0.1, H - 0.006], [0.06, H - 0.006], [0.05, H - 0.018], [0, H - 0.018]);
   const geo = new THREE.LatheGeometry(prof.map(([r, y]) => new THREE.Vector2(r, y)), 22);
-  geo.computeVertexNormals();
   const uv = geo.getAttribute('uv'), pos = geo.getAttribute('position');
   for (let i = 0; i < uv.count; i++) uv.setY(i, pos.getY(i) / H);
 
@@ -201,10 +200,13 @@ export function lightCones(lamps: THREE.Vector3[]) {
     fragmentShader: /* glsl */ `
       uniform vec3 uColor; varying vec3 vN; varying vec3 vV; varying float vH; varying float vD;
       void main(){
-        float facing = pow(abs(dot(normalize(vN), normalize(vV))), 2.2);     // 擦着锥面边缘看过去的地方淡出，轮廓才是软的
-        float fall = pow(1.0 - vH, 1.6) * smoothstep(0.0, 0.06, vH);          // 离灯越远越淡
+        // 注意：pow 的底数一旦是负数（插值误差就能让 1-vH 略小于 0），有的显卡会算出"非数"，
+        // 再被泛光一扩散就是满屏的黑块。所以底数都先夹到 0 以上。
+        float facing = pow(clamp(abs(dot(normalize(vN + 1e-5), normalize(vV))), 0.0, 1.0), 2.2); // 擦着锥面边缘看过去的地方淡出，轮廓才是软的
+        float h = clamp(vH, 0.0, 1.0);
+        float fall = pow(1.0 - h, 1.6) * smoothstep(0.0, 0.06, h);            // 离灯越远越淡
         float fog = exp(-vD * vD * 0.000034) * smoothstep(1.0, 5.0, vD);      // 远处融进雾里；贴到眼前也淡掉
-        gl_FragColor = vec4(uColor * facing * fall * fog * 0.15, 1.0);
+        gl_FragColor = vec4(max(uColor * facing * fall * fog * 0.15, vec3(0.0)), 1.0);
       }`,
   });
   const mesh = new THREE.InstancedMesh(geo, mat, lamps.length);

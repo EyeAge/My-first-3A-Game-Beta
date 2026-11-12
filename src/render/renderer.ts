@@ -26,6 +26,21 @@ const GRADE = {
     }`,
 };
 
+// 保险丝：泛光之前先把画面里的"非数"和负数清掉。
+// 任何一个着色器算出一个无效像素，泛光的多级模糊都会把它扩散成一大片黑块；这一步让这种错误最多只坏一个像素。
+const SANITIZE = {
+  uniforms: { tDiffuse: { value: null } },
+  vertexShader: GRADE.vertexShader,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse; varying vec2 vUv;
+    void main(){
+      vec3 c = texture2D(tDiffuse, vUv).rgb;
+      bvec3 bad = bvec3(!(c.r >= 0.0), !(c.g >= 0.0), !(c.b >= 0.0)); // 非数和任何数比较都是"假"
+      c = mix(c, vec3(0.0), vec3(bad));
+      gl_FragColor = vec4(min(c, vec3(64.0)), 1.0);
+    }`,
+};
+
 export class Renderer {
   readonly gl: THREE.WebGLRenderer;
   private composer!: EffectComposer;
@@ -56,6 +71,7 @@ export class Renderer {
     const target = new THREE.WebGLRenderTarget(w * p.pixelRatio, h * p.pixelRatio, { type: THREE.HalfFloatType, samples: p.shadow >= 2048 ? 4 : p.shadow > 0 ? 2 : 0 });
     this.composer = new EffectComposer(this.gl, target);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
+    if (p.bloom) this.composer.addPass(new ShaderPass(SANITIZE));
     if (p.bloom) this.composer.addPass(new UnrealBloomPass(new THREE.Vector2(w, h), 0.36, 0.42, 1.0));
     this.grade = new ShaderPass(GRADE);
     this.composer.addPass(this.grade);
