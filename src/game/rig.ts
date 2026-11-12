@@ -9,8 +9,8 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 // 每个顶点记下自己跟着哪根骨骼动（skinIndex / skinWeight）。
 // 运行时只要转动骨骼，显卡就会把顶点带着一起动——这就是骨骼动画。
 
-export type MatKey = 'body' | 'accent' | 'dark' | 'eye' | 'glow';
-const MAT_ORDER: MatKey[] = ['body', 'accent', 'dark', 'eye', 'glow'];
+export type MatKey = 'body' | 'accent' | 'dark' | 'steel' | 'eye' | 'glow';
+const MAT_ORDER: MatKey[] = ['body', 'accent', 'dark', 'steel', 'eye', 'glow'];
 
 interface BoneDef { name: string; parent: number; x: number; y: number; z: number }
 export interface RigDef { geometry: THREE.BufferGeometry; bones: BoneDef[]; mats: MatKey[] }
@@ -74,6 +74,32 @@ export class RigBuilder {
     _q.setFromUnitVectors(_up, _v.normalize());
     g.applyMatrix4(_m.compose(new THREE.Vector3((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2), _q, _one));
     this.push(bone, mat, g);
+  }
+
+  /** 连接 a、b 两点的一根圆管。 */
+  tube(bone: string, mat: MatKey, a: V3, b: V3, r: number, r2 = r) {
+    _v.set(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+    const g = new THREE.CylinderGeometry(r2, r, _v.length(), 8);
+    _q.setFromUnitVectors(_up, _v.normalize());
+    g.applyMatrix4(_m.compose(new THREE.Vector3((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2), _q, _one));
+    this.push(bone, mat, g);
+  }
+  /** 液压杆：粗的缸筒从 a 伸出一半，细的活塞杆一直顶到 b，两头各一个耳环。 */
+  piston(bone: string, a: V3, b: V3, r: number) {
+    const mid: V3 = [a[0] + (b[0] - a[0]) * 0.58, a[1] + (b[1] - a[1]) * 0.58, a[2] + (b[2] - a[2]) * 0.58];
+    this.tube(bone, 'dark', a, mid, r); this.tube(bone, 'steel', mid, b, r * 0.55);
+    this.sph(bone, 'dark', r * 1.25, ...a); this.sph(bone, 'dark', r * 1.1, ...b);
+  }
+  /** 线缆：沿着几个点一段一段接起来的细管，接头处垫个小球把折角盖住。 */
+  cable(bone: string, pts: V3[], r: number) {
+    for (let i = 0; i + 1 < pts.length; i++) { this.tube(bone, 'dark', pts[i], pts[i + 1], r); if (i) this.sph(bone, 'dark', r * 1.05, ...pts[i]); }
+  }
+  /** 螺栓头：一个扁的六角柱。axis 是它朝外的方向。 */
+  bolt(bone: string, x: number, y: number, z: number, axis: 'x' | 'y' | 'z', r = 0.022) {
+    const g = new THREE.CylinderGeometry(r, r, r * 0.9, 6);
+    if (axis === 'x') g.rotateZ(-Math.PI / 2); else if (axis === 'z') g.rotateX(Math.PI / 2);
+    g.translate(x, y, z);
+    this.push(bone, 'steel', g);
   }
 
   build(): RigDef {
@@ -144,6 +170,19 @@ function hound(): RigDef {
   r.box('jaw', 'dark', 0.2, 0.06, 0.36, 0, 0.79, 1.08);
   for (const s of [-1, 1]) r.box('jaw', 'body', 0.03, 0.05, 0.05, s * 0.07, 0.83, 1.22);
 
+  // 细节：背上的传感器、沿脊柱走的线缆、装甲板四角的螺栓、肩部的轴承盖、颈部的液压杆
+  r.box('chest', 'dark', 0.16, 0.07, 0.2, 0, 1.075, 0.3); r.sph('chest', 'eye', 0.028, 0, 1.1, 0.4);
+  r.cyl('chest', 'dark', 0.008, 0.26, 0.06, 1.2, 0.24); r.sph('chest', 'accent', 0.014, 0.06, 1.33, 0.24);
+  for (const s of [-1, 1]) {
+    r.cable('spine', [[s * 0.1, 0.94, -0.3], [s * 0.13, 0.9, -0.12], [s * 0.12, 0.92, 0.04], [s * 0.1, 0.99, 0.14]], 0.018);
+    r.cyl('chest', 'body', 0.13, 0.05, s * 0.3, 0.7, 0.36, 'x'); r.cyl('root', 'body', 0.12, 0.05, s * 0.27, 0.7, -0.44, 'x');
+    for (const dz of [-0.17, 0.17]) { r.bolt('chest', s * 0.16, 1.047, 0.34 + dz, 'y'); r.bolt('root', s * 0.13, 0.992, -0.44 + dz * 0.7, 'y'); }
+    for (const dy of [-0.16, 0.16]) for (const dz of [-0.2, 0.2]) r.bolt('chest', s * 0.272, 0.78 + dy, 0.36 + dz, 'x');
+    r.piston('neck', [s * 0.1, 0.72, 0.56], [s * 0.1, 0.82, 0.82], 0.022);
+    r.box('head', 'body', 0.03, 0.2, 0.3, s * 0.185, 0.93, 0.94);        // 头两侧的护板
+    r.bolt('head', s * 0.202, 0.93, 0.86, 'x'); r.bolt('head', s * 0.202, 0.93, 1.02, 'x');
+  }
+  for (let i = 0; i < 4; i++) r.box('chest', 'steel', 0.3, 0.012, 0.012, 0, 0.66 + i * 0.04, 0.712); // 进气格栅的栅条
   r.cyl('tail1', 'dark', 0.04, 0.3, 0, 0.87, -0.8, 'z', 0.03);
   r.cyl('tail2', 'dark', 0.03, 0.3, 0, 0.92, -1.08, 'z', 0.015);
   r.sph('tail2', 'accent', 0.035, 0, 0.93, -1.24);
@@ -160,6 +199,12 @@ function hound(): RigDef {
     r.sph(id + '3', 'dark', 0.055, ...X(ankle));
     r.seg(id + '3', 'body', X(ankle), X([toe[0], toe[1] + 0.05, toe[2]]), 0.08, 0.09);
     r.box(id + '3', 'dark', 0.13, 0.06, 0.2, toe[0] * s, toe[1] + 0.03, toe[2] + 0.04);
+    // 大腿外侧的护甲板、膝盖后面的液压杆、三根爪尖
+    r.box(id + '1', 'accent', 0.03, 0.2, 0.16, (hip[0] + 0.085) * s, (hip[1] + knee[1]) / 2, (hip[2] + knee[2]) / 2);
+    r.bolt(id + '1', (hip[0] + 0.105) * s, hip[1], hip[2], 'x', 0.03);
+    r.piston(id + '1', X([hip[0] - 0.06, hip[1] - 0.04, hip[2] - 0.1]), X([knee[0] - 0.06, knee[1] + 0.03, knee[2] - 0.07]), 0.02);
+    r.piston(id + '2', X([knee[0] + 0.05, knee[1] - 0.05, knee[2] - 0.06]), X([ankle[0] + 0.05, ankle[1] + 0.04, ankle[2] - 0.05]), 0.016);
+    for (const c of [-0.045, 0, 0.045]) r.tube(id + '3', 'steel', [toe[0] * s + c, toe[1] + 0.035, toe[2] + 0.12], [toe[0] * s + c, toe[1] + 0.005, toe[2] + 0.19], 0.014, 0.003);
   };
   for (const s of [-1, 1]) {
     const k = s < 0 ? 'l' : 'r';
@@ -192,7 +237,22 @@ function guard(): RigDef {
   for (const s of [-1, 1]) r.cyl('torso', 'dark', 0.06, 0.34, s * 0.26, 2.42, -0.4); // 排气管
   r.cyl('torso', 'dark', 0.2, 0.1, 0, 2.36, 0.02);
 
+  // 细节：胸甲和肩甲上的螺栓、背包到炮臂的弹链管、腰部的液压杆、背上的线缆、胸口的格栅和吊环
+  for (const sx of [-1, 1]) {
+    for (const sy of [-1, 1]) { r.bolt('torso', sx * 0.47, 1.94 + sy * 0.32, 0.332, 'z', 0.03); r.bolt('torso', sx * 0.23, 1.96 + sy * 0.17, 0.392, 'z', 0.02); }
+    r.piston('root', [sx * 0.2, 1.34, -0.2], [sx * 0.3, 1.62, -0.26], 0.035);
+    r.piston('root', [sx * 0.24, 1.36, 0.18], [sx * 0.36, 1.6, 0.26], 0.03);
+    r.cable('torso', [[sx * 0.3, 2.2, -0.5], [sx * 0.44, 2.3, -0.36], [sx * 0.56, 2.26, -0.16], [sx * 0.62, 2.14, -0.04]], 0.028);
+    r.box('torso', 'dark', 0.05, 0.62, 0.5, sx * 0.565, 1.94, 0);                 // 侧面的散热槽
+    for (let i = 0; i < 5; i++) r.box('torso', 'steel', 0.012, 0.03, 0.42, sx * 0.594, 1.72 + i * 0.11, 0);
+    r.tube('torso', 'steel', [sx * 0.3, 2.34, 0.2], [sx * 0.3, 2.4, 0.12], 0.014); r.tube('torso', 'steel', [sx * 0.3, 2.4, 0.12], [sx * 0.3, 2.34, 0.04], 0.014); // 吊环
+  }
+  r.cable('torso', [[0.3, 1.76, -0.5], [0.52, 1.66, -0.4], [0.7, 1.6, -0.16], [0.76, 1.56, 0.1]], 0.05);  // 弹链管
+  for (let i = 0; i < 5; i++) r.box('torso', 'steel', 0.3, 0.014, 0.012, 0, 1.72 + i * 0.035, 0.345); // 胸口下方的进气栅
+  r.box('torso', 'accent', 0.2, 0.12, 0.012, 0.24, 2.2, 0.334); r.box('torso', 'dark', 0.74, 0.1, 0.26, 0, 2.3, -0.42);
   r.box('head', 'body', 0.4, 0.3, 0.42, 0, 2.5, 0.04);
+  for (const sx of [-1, 1]) { r.box('head', 'dark', 0.05, 0.2, 0.26, sx * 0.21, 2.5, 0.02); r.bolt('head', sx * 0.24, 2.5, 0.02, 'x', 0.035); r.sph('head', 'eye', 0.016, sx * 0.13, 2.6, 0.252); }
+  r.box('head', 'dark', 0.18, 0.12, 0.16, 0, 2.5, -0.22);
   r.box('head', 'eye', 0.3, 0.065, 0.04, 0, 2.52, 0.255);
   r.box('head', 'dark', 0.3, 0.1, 0.1, 0, 2.4, 0.22);
   r.box('head', 'accent', 0.12, 0.04, 0.4, 0, 2.665, 0.04);
@@ -203,7 +263,14 @@ function guard(): RigDef {
     const a = s < 0 ? 'armL1' : 'armR1';
     r.box(a, 'body', 0.4, 0.38, 0.48, s * 0.76, 2.04, 0);
     r.box(a, 'accent', 0.41, 0.07, 0.3, s * 0.76, 2.12, 0);
+    for (const dz of [-0.18, 0.18]) { r.bolt(a, s * 0.76 - 0.13, 2.235, dz, 'y', 0.03); r.bolt(a, s * 0.76 + 0.13, 2.235, dz, 'y', 0.03); }
+    r.cyl(a, 'dark', 0.15, 0.06, s * 0.975, 2.02, 0, 'x'); r.bolt(a, s * 1.01, 2.02, 0, 'x', 0.05);
   }
+  // 护盾：四周一圈加强边、背面的握架、正面的铆钉和警示条
+  for (const sy of [-1, 1]) r.box('armL2', 'dark', 0.62, 0.05, 0.09, -0.82, 1.42 + sy * 0.5, 0.44);
+  for (const sx of [-1, 1]) { r.box('armL2', 'dark', 0.05, 1.04, 0.09, -0.82 + sx * 0.29, 1.42, 0.44); for (let i = 0; i < 5; i++) r.bolt('armL2', -0.82 + sx * 0.29, 0.98 + i * 0.22, 0.49, 'z', 0.022); }
+  for (let i = 0; i < 4; i++) r.box('armL2', 'dark', 0.07, 0.1, 0.006, -1.0 + i * 0.12, 1.7, 0.484, [0, 0, 0.5]);
+  r.piston('armL1', [-0.78, 1.96, -0.14], [-0.8, 1.56, -0.08], 0.03);
   // 左臂挂护盾
   r.seg('armL1', 'dark', [-0.78, 1.9, 0], [-0.8, 1.52, 0.04], 0.2);
   r.sph('armL2', 'dark', 0.12, -0.8, 1.52, 0.04);
@@ -220,6 +287,9 @@ function guard(): RigDef {
   for (let i = 0; i < 3; i++) r.cyl('gun', 'dark', 0.09, 0.04, 0.76, 1.62, 0.84 + i * 0.1, 'z'); // 散热环
   r.cyl('gun', 'dark', 0.095, 0.1, 0.76, 1.62, 1.2, 'z');
   r.sph('gun', 'glow', 0.065, 0.76, 1.62, 1.24, 1, 1, 0.5);
+  r.box('gun', 'dark', 0.06, 0.07, 0.3, 0.76, 1.87, 0.36); r.sph('gun', 'eye', 0.02, 0.76, 1.87, 0.52);  // 炮上的瞄具
+  r.tube('gun', 'steel', [0.9, 1.56, 0.5], [0.9, 1.56, 1.1], 0.018); r.tube('gun', 'steel', [0.62, 1.56, 0.5], [0.62, 1.56, 1.1], 0.018); // 炮管两侧的导杆
+  for (const dz of [0.14, 0.42, 0.7]) { r.bolt('gun', 0.895, 1.66, dz, 'x', 0.026); r.bolt('gun', 0.625, 1.66, dz, 'x', 0.026); }
 
   for (const s of [-1, 1]) {
     const k = s < 0 ? 'legL' : 'legR';
@@ -236,6 +306,12 @@ function guard(): RigDef {
     r.sph(k + '3', 'dark', 0.11, ...ankle);
     r.box(k + '3', 'body', 0.34, 0.14, 0.58, s * 0.33, 0.07, 0.1);
     r.box(k + '3', 'dark', 0.3, 0.1, 0.16, s * 0.33, 0.05, -0.22);
+    r.piston(k + '1', [s * 0.33, 1.14, -0.2], [s * 0.34, 0.74, -0.14], 0.04);
+    r.piston(k + '2', [s * 0.33 + s * 0.13, 0.6, 0.02], [s * 0.33 + s * 0.13, 0.2, -0.02], 0.028);
+    r.cyl(k + '2', 'body', 0.17, 0.05, s * 0.33 + s * 0.14, 0.68, 0.07, 'x'); r.bolt(k + '2', s * 0.33 + s * 0.172, 0.68, 0.07, 'x', 0.05);
+    for (const dy of [-0.1, 0.1]) for (const dx of [-0.08, 0.08]) r.bolt(k + '2', s * 0.33 + dx, 0.4 + dy, 0.202, 'z');
+    for (const c of [-0.1, 0, 0.1]) r.box(k + '3', 'steel', 0.07, 0.06, 0.12, s * 0.33 + c, 0.04, 0.42);  // 脚趾
+    r.cable(k + '1', [[s * 0.2, 1.2, 0.16], [s * 0.2, 0.96, 0.22], [s * 0.24, 0.76, 0.2]], 0.02);
   }
   return r.build();
 }
@@ -253,6 +329,12 @@ function gull(): RigDef {
   r.sph('root', 'eye', 0.07, 0, 0, -0.6, 1, 1, 0.5);
   for (const s of [-1, 1]) r.box('root', 'dark', 0.08, 0.1, 0.3, s * 0.2, 0.02, 0.1); // 进气道
 
+  // 细节：机背的检修盖螺栓、机腹的传感器球、天线、尾喷口的调节片
+  for (const s of [-1, 1]) for (const dz of [-0.24, 0.14]) r.bolt('root', s * 0.1, 0.203, -0.05 + dz, 'y', 0.016);
+  r.sph('root', 'dark', 0.07, 0, -0.2, -0.16); r.sph('root', 'eye', 0.03, 0, -0.255, -0.14);
+  r.tube('root', 'dark', [0, 0.18, -0.24], [0, 0.4, -0.34], 0.008); r.sph('root', 'accent', 0.014, 0, 0.4, -0.34);
+  for (let i = 0; i < 6; i++) { const a = (i / 6) * 6.283; r.box('root', 'steel', 0.05, 0.012, 0.1, Math.cos(a) * 0.1, Math.sin(a) * 0.1, -0.67, [0, 0, a + 1.57]); }
+  for (const s of [-1, 1]) { r.tube('root', 'steel', [s * 0.07, -0.2, 0.1], [s * 0.07, -0.2, 0.5], 0.012); for (let i = 0; i < 3; i++) r.box('root', 'steel', 0.012, 0.07, 0.012, s * 0.243, 0.02, 0.02 + i * 0.07); }
   r.box('head', 'body', 0.26, 0.22, 0.32, 0, 0.05, 0.62);
   r.cyl('head', 'accent', 0.085, 0.3, 0, 0.01, 0.92, 'z', 0.012);     // 喙
   for (const s of [-1, 1]) r.sph('head', 'eye', 0.045, s * 0.115, 0.09, 0.72, 0.6, 1, 1);
@@ -271,6 +353,10 @@ function gull(): RigDef {
     r.cyl(k + '1', 'dark', 0.035, 0.1, s * 0.98, 0.1, 0, 'z');        // 翼中段的折叠铰链
     r.box(k + '2', 'body', 0.72, 0.035, 0.36, s * 1.34, 0.1, -0.03, [0, s * 0.12, 0], 0.015);
     r.box(k + '2', 'accent', 0.14, 0.04, 0.3, s * 1.72, 0.1, -0.1, [0, s * 0.12, 0]);
+    for (let i = 0; i < 4; i++) r.box(k + '1', 'dark', 0.014, 0.052, 0.4, s * (0.34 + i * 0.17), 0.1, 0);   // 翼肋
+    r.piston(k + '1', [s * 0.2, 0.02, -0.12], [s * 0.56, 0.07, -0.14], 0.016);                             // 扇翅用的作动筒
+    r.cyl(k + '1', 'dark', 0.05, 0.16, s * 0.62, 0.05, 0.04, 'z'); r.sph(k + '1', 'eye', 0.02, s * 0.62, 0.05, 0.13); // 翼下的小发动机
+    r.sph(k + '2', 'eye', 0.014, s * 1.78, 0.125, -0.1);
     for (let i = 0; i < 3; i++) r.box(k + '2', 'dark', 0.18, 0.018, 0.2, s * (1.14 + i * 0.2), 0.1, -0.27 - i * 0.02, [0, s * 0.2, 0], 0.008); // 翼羽
   }
   return r.build();

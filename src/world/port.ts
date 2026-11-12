@@ -3,9 +3,12 @@ import { mulberry32, pick } from '../core/math';
 import { Colliders } from './colliders';
 import { buildDetails, type BoxSpec } from './details';
 import { NavGrid } from './nav';
+import { weathered } from '../render/weathered';
+import { barrierMesh, coneMesh, crateMesh, drumMesh, lightCones } from './props';
 import { reflectionUniforms, type ReflectionUniforms } from '../render/reflection';
 import { SUN_DIR } from './atmosphere';
-import { asphaltTexture, containerEndTexture, containerSideTexture, corrugationNormal, signTexture, stencilTexture, windowsTexture } from './textures';
+import { containerGeometry, doorTextures, frameTextures, RIBS, sideTextures, tintByAlpha, type Brand } from './container';
+import { asphaltTexture, corrugationNormal, signTexture, stencilTexture, windowsTexture } from './textures';
 
 // 激战港区 · 四号泊位。
 // 坐标约定：+x 是东（海在东边），-z 是北。玩家从西南角进场，撤离艇在码头南端。
@@ -35,7 +38,7 @@ export interface Port {
 }
 
 const PALETTE = [0x9a3b26, 0x1f5488, 0x1d6f6c, 0xb85a1c, 0x70787c, 0x2f6240, 0xb38d2c, 0xb5b2a8, 0x24304a, 0x7a2430];
-const BRANDS: [string, string][] = [['激战远洋', '集装箱运输'], ['激战北航', '北极 · 大西洋 · 支线运输'], ['激战太平洋', '远洋 · 冷链 · 散货'], ['激战联运', '多式联运']];
+const BRANDS: (Brand | null)[] = [{ name: '激战远洋', sub: '集装箱运输', mark: 0 }, { name: '激战北航', sub: '北极 · 大西洋 · 支线运输', mark: 1 }, { name: '激战太平洋', sub: '远洋 · 冷链 · 散货', mark: 2 }, { name: '激战联运', sub: '多式联运', mark: 3 }, null];
 
 export function buildPort(progress: (msg: string) => void): Port {
   const rng = mulberry32(4207);
@@ -117,29 +120,35 @@ export function buildPort(progress: (msg: string) => void): Port {
 
   // ---------------------------------------------------------------- 集装箱
   progress('正在生成涂装、锈迹与雨水');
-  const corr = corrugationNormal();
-  const topMat = new THREE.MeshStandardMaterial({ color: 0x8c8c8c, roughness: 0.35, metalness: 0.3 });
-  const variants = BRANDS.map(([brand, sub], i) => {
-    const side = new THREE.MeshStandardMaterial({ map: containerSideTexture(brand, sub, i + 1), normalMap: corr, roughness: 0.48, metalness: 0.3 });
-    const end = new THREE.MeshStandardMaterial({ map: containerEndTexture(i + 1), roughness: 0.5, metalness: 0.3 });
-    return { mats: [side, side, topMat, topMat, end, end], items: [] as { x: number; y: number; z: number; rot: number; c: number }[] };
+  // 每家船公司一套贴图。堆场里的箱子用立体的波纹板；船上和吊具上的离得远，用方盒子加法线贴图就够了
+  const corr = corrugationNormal(RIBS);
+  const topMat = new THREE.MeshStandardMaterial({ color: 0xb4b4b4, roughness: 0.4, metalness: 0.15, normalMap: corr });
+  const frameTex = frameTextures();
+  frameTex.map.repeat.set(1, 1);
+  const frameMat = tintByAlpha(new THREE.MeshStandardMaterial({ map: frameTex.map, roughnessMap: frameTex.rough, roughness: 1, metalness: 0.15 }));
+  type Item = { x: number; y: number; z: number; rot: number; c: number };
+  const variants = BRANDS.map((brand, i) => {
+    const st = sideTextures(brand, i + 1, CL), dt = doorTextures(i + 1);
+    const side = tintByAlpha(new THREE.MeshStandardMaterial({ map: st.map, roughnessMap: st.rough, roughness: 1, metalness: 0.15 }));
+    const sideFar = tintByAlpha(new THREE.MeshStandardMaterial({ map: st.map, roughnessMap: st.rough, roughness: 1, metalness: 0.15, normalMap: corr }));
+    const door = tintByAlpha(new THREE.MeshStandardMaterial({ map: dt.map, roughnessMap: dt.rough, roughness: 1, metalness: 0.15 }));
+    return { near: [side, frameMat, topMat, door], far: [sideFar, sideFar, topMat, topMat, door, door], items: [] as Item[], farItems: [] as Item[] };
   });
-  const addContainer = (x: number, y: number, z: number, rot: number, c: number) => {
-    variants[Math.floor(rng() * variants.length)].items.push({ x, y, z, rot, c });
+  const addContainer = (x: number, y: number, z: number, rot: number, c: number, far = false) => {
+    const v = variants[Math.floor(rng() * variants.length)];
+    (far ? v.farItems : v.items).push({ x, y, z, rot, c });
   };
-  // 堆场里的箱子额外加上立体的角柱、上下纵梁和箱门锁杆：光靠贴图，侧光下看不出棱角
+  // 箱门上的四根锁杆是镀锌的，不跟着箱体颜色走，所以单独用灰色的小方条来做
   const yard: BoxSpec[] = [];
-  const hardware = (x: number, y: number, z: number, rot: number, c: number) => {
-    const frame = col.setHex(c).multiplyScalar(0.62).getHex();
+  const ROD = 0x8d9296;
+  const hardware = (x: number, y: number, z: number, rot: number) => {
     const part = (lx: number, ly: number, lz: number, sx: number, sy: number, sz: number, color: number) =>
       rot ? box(x + lz, y + ly, z - lx, sz, sy, sx, color) : box(x + lx, y + ly, z + lz, sx, sy, sz, color);
-    for (const a of [-1, 1]) {
-      for (const b of [-1, 1]) {
-        part(a * (CW / 2 - 0.05), 0, b * (CL / 2 - 0.05), 0.13, CH, 0.13, frame);
-        part(a * (CW / 2 - 0.04), b * (CH / 2 - 0.07), 0, 0.1, 0.14, CL - 0.2, frame);
-      }
-      for (const lx of [0.34, 0.84]) part(a * lx, 0, CL / 2 + 0.025, 0.04, CH - 0.36, 0.04, 0x8a8f92);
-      part(a * 0.59, -0.15, CL / 2 + 0.05, 0.36, 0.04, 0.03, 0x8a8f92); // 锁杆把手
+    for (const a of [-1, 1]) for (const lx of [0.3, 0.86]) {
+      part(a * lx, 0, CL / 2 - 0.005, 0.034, CH - 0.2, 0.034, ROD);
+      for (const ly of [-1, 1]) part(a * lx, ly * (CH / 2 - 0.13), CL / 2 - 0.002, 0.1, 0.07, 0.05, 0x5d6266);      // 锁杆两头的锁座
+      part(a * lx + a * 0.13, -0.18, CL / 2 + 0.018, 0.3, 0.035, 0.016, ROD);                                       // 把手
+      part(a * lx + a * 0.26, -0.18, CL / 2 + 0.012, 0.05, 0.09, 0.03, 0x5d6266);                                   // 把手扣
     }
   };
   /** 码一摞箱子，并登记一个整摞的碰撞盒。 */
@@ -148,7 +157,7 @@ export function buildPort(progress: (msg: string) => void): Port {
       const c = color ?? pick(rng, PALETTE), y = CH / 2 + k * CH;
       addContainer(x, y, z, rot, c);
       yard.push({ x, y, z, rot });
-      hardware(x, y, z, rot, c);
+      hardware(x, y, z, rot);
     }
     if (h > 0) colliders.add(x, (h * CH) / 2, z, rot ? CL : CW, h * CH, rot ? CW : CL);
   };
@@ -171,43 +180,99 @@ export function buildPort(progress: (msg: string) => void): Port {
 
   // ---------------------------------------------------------------- 起重机
   progress('正在架设起重机');
-  const CRANE = 0x8a4a1c, CRANE_D = 0x2a2d30;
+  const CRANE = 0x8a4a1c, CRANE_D = 0x2a2d30, RAIL = 0xb38d2c;
   const craneLights: THREE.Vector3[] = [];
+  // 发光的小方块（灯具的透光罩、亮着灯的窗户）：不受光照影响，亮度超过 1 的部分会被泛光晕开
+  const glows: { x: number; y: number; z: number; sx: number; sy: number; sz: number; r: number; g: number; b: number }[] = [];
+  const glow = (x: number, y: number, z: number, sx: number, sy: number, sz: number, r: number, g: number, b: number) => glows.push({ x, y, z, sx, sy, sz, r, g, b });
+  /** 一段带立柱的栏杆，从 a 到 b（两端高度可以不同，用在楼梯上）。 */
+  const railing = (ax: number, ay: number, az: number, bx: number, by: number, bz: number, posts: number) => {
+    for (const h of [0.55, 1.1]) beam(ax, ay + h, az, bx, by + h, bz, 0.05, RAIL);
+    for (let i = 0; i <= posts; i++) { const k = i / posts, x = ax + (bx - ax) * k, y = ay + (by - ay) * k, z = az + (bz - az) * k; beam(x, y, z, x, y + 1.1, z, 0.05, RAIL); }
+  };
+  /** 岸桥（岸边集装箱起重机）。cz 是它在码头上的位置，trolleyX 是小车停在大梁上的位置。 */
   const crane = (cz: number, trolleyX: number) => {
-    const X1 = 34, X2 = 58, Z = 8, TOP = 42;
+    const X1 = 34, X2 = 58, Z = 8, TOP = 42, G0 = 21, G1 = 105, GB = TOP + 1.6, GT = TOP + 4.6; // 大梁的起止位置、下弦和上弦的高度
+    // 四条门腿，脚下是行走台车：一根平衡梁压着四组车轮
     for (const x of [X1, X2]) for (const s of [-1, 1]) {
-      box(x, TOP / 2, cz + s * Z, 1.5, TOP, 1.5, CRANE, true);
-      box(x, 0.5, cz + s * Z, 2.6, 1, 4.2, CRANE_D, true); // 行走台车
+      box(x, TOP / 2 + 1, cz + s * Z, 1.3, TOP - 2, 1.1, CRANE, true);
+      box(x, 1.55, cz + s * Z, 1.5, 0.9, 5.4, CRANE_D, true);
+      for (const k of [-2, -0.7, 0.7, 2]) { box(x, 0.55, cz + s * Z + k, 1.0, 1.1, 1.05, 0x1c1e20); box(x, 0.4, cz + s * Z + k, 1.16, 0.5, 0.5, 0x3d4144); }
+      box(x, 2.5, cz + s * Z, 1.9, 0.5, 1.7, CRANE);
     }
+    // 门框：海陆两侧的横梁、沿轨道方向的联系梁，再加斜撑
+    for (const x of [X1, X2]) box(x, 3.2, cz, 0.9, 1.1, Z * 2, CRANE);
     for (const y of [14, TOP]) {
-      for (const x of [X1, X2]) box(x, y, cz, 1.2, 1.4, Z * 2, CRANE);
-      for (const s of [-1, 1]) box((X1 + X2) / 2, y, cz + s * Z, X2 - X1, 1.4, 1.2, CRANE);
+      for (const x of [X1, X2]) box(x, y, cz, 1.0, 1.3, Z * 2, CRANE);
+      for (const s of [-1, 1]) box((X1 + X2) / 2, y, cz + s * Z, X2 - X1, 1.3, 1.0, CRANE);
     }
     for (const s of [-1, 1]) {
-      beam(X1, 14, cz + s * Z, X2, TOP, cz + s * Z, 0.7, CRANE);
-      beam(X2, 14, cz + s * Z, X1, TOP, cz + s * Z, 0.7, CRANE);
+      beam(X1, 14, cz + s * Z, X2, TOP, cz + s * Z, 0.55, CRANE);
+      beam(X2, 14, cz + s * Z, X1, TOP, cz + s * Z, 0.55, CRANE);
     }
-    for (const x of [X1, X2]) { beam(x, 14, cz - Z, x, 28, cz + Z, 0.6, CRANE); beam(x, 14, cz + Z, x, 28, cz - Z, 0.6, CRANE); }
-    // 大梁和伸向海面的前臂
-    for (const s of [-1, 1]) box(63, TOP + 2, cz + s * 3, 84, 2.4, 1.4, CRANE);
-    for (let x = 24; x <= 104; x += 8) box(x, TOP + 2, cz, 0.6, 0.8, 6, CRANE);
+    for (const x of [X1, X2]) { beam(x, 14, cz - Z, x, 28, cz + Z, 0.5, CRANE); beam(x, 14, cz + Z, x, 28, cz - Z, 0.5, CRANE); beam(x, 28, cz - Z, x, TOP, cz + Z, 0.4, CRANE); beam(x, 28, cz + Z, x, TOP, cz - Z, 0.4, CRANE); box(x, 28, cz, 0.6, 0.7, Z * 2, CRANE); }
+    // 大梁：两榀桁架（上弦、下弦、竖杆、斜杆），中间用横撑和交叉撑连起来
+    for (const s of [-1, 1]) {
+      const z = cz + s * 3;
+      box((G0 + G1) / 2, GT, z, G1 - G0, 0.5, 0.6, CRANE);
+      box((G0 + G1) / 2, GB, z, G1 - G0, 0.7, 0.9, CRANE);
+      for (let x = G0, i = 0; x <= G1; x += 4, i++) {
+        beam(x, GB, z, x, GT, z, 0.28, CRANE);
+        if (x < G1) i % 2 ? beam(x, GT, z, x + 4, GB, z, 0.24, CRANE) : beam(x, GB, z, x + 4, GT, z, 0.24, CRANE);
+      }
+    }
+    for (let x = G0, i = 0; x <= G1; x += 8, i++) {
+      box(x, GT, cz, 0.3, 0.3, 6, CRANE);
+      if (x < G1) i % 2 ? beam(x, GT, cz - 3, x + 8, GT, cz + 3, 0.2, CRANE) : beam(x, GT, cz + 3, x + 8, GT, cz - 3, 0.2, CRANE);
+    }
+    // 大梁外侧的检修走道和栏杆
+    box((G0 + G1) / 2, GB - 0.3, cz + 4.1, G1 - G0, 0.08, 1.1, CRANE_D);
+    railing(G0, GB - 0.26, cz + 4.6, G1, GB - 0.26, cz + 4.6, 21);
     // A 字架和拉索
     for (const s of [-1, 1]) {
-      beam(42, TOP + 3, cz + s * 3, 54, 62, cz + s * 1.2, 1.0, CRANE);
-      beam(64, TOP + 3, cz + s * 3, 54, 62, cz + s * 1.2, 1.0, CRANE);
-      beam(54, 62, cz + s * 1.2, 102, TOP + 3.4, cz + s * 3, 0.32, CRANE_D);
-      beam(54, 62, cz + s * 1.2, 82, TOP + 3.4, cz + s * 3, 0.28, CRANE_D);
-      beam(54, 62, cz + s * 1.2, 23, TOP + 3.4, cz + s * 3, 0.32, CRANE_D);
+      beam(42, GT, cz + s * 3, 54, 62, cz + s * 1.2, 0.8, CRANE);
+      beam(64, GT, cz + s * 3, 54, 62, cz + s * 1.2, 0.8, CRANE);
+      beam(54, 62, cz + s * 1.2, 102, GT + 0.3, cz + s * 3, 0.3, CRANE_D);
+      beam(54, 62, cz + s * 1.2, 82, GT + 0.3, cz + s * 3, 0.26, CRANE_D);
+      beam(54, 62, cz + s * 1.2, 23, GT + 0.3, cz + s * 3, 0.3, CRANE_D);
     }
+    for (const y of [50, 56]) { const k = (y - GT) / (62 - GT), w = 3 - 1.8 * k; box(42 + 12 * k, y, cz, 0.4, 0.4, w * 2, CRANE); box(64 - 10 * k, y, cz, 0.4, 0.4, w * 2, CRANE); }
     box(54, 62, cz, 1.4, 1.2, 4, CRANE);
-    box(38, TOP + 6, cz, 11, 5.5, 8.5, 0x3a4046); // 机房
+    // 机房：屋顶挑檐、百叶窗、门、亮着灯的窗
+    const MY = GT + 0.25 + 2.5;
+    box(38, MY, cz, 11, 5, 8.5, 0x3a4046);
+    box(38, MY + 2.62, cz, 11.6, 0.24, 9.1, 0x24282c);
+    for (const dx of [-3.4, 0, 3.4]) for (const s of [-1, 1]) box(38 + dx, MY + 0.9, cz + s * 4.27, 2, 1.3, 0.06, 0x1d2124);
+    box(43.52, MY - 0.9, cz - 2, 0.06, 2.1, 1, 0x23282c);
+    glow(43.53, MY + 0.6, cz + 1.6, 0.05, 0.9, 2.2, 0.13, 0.12, 0.1);
+    railing(32.6, MY + 2.74, cz - 4.5, 43.4, MY + 2.74, cz - 4.5, 6); railing(32.6, MY + 2.74, cz + 4.5, 43.4, MY + 2.74, cz + 4.5, 6);
     // 小车、司机室、吊具
-    box(trolleyX, TOP + 0.4, cz, 5, 1.2, 7, CRANE_D);
-    box(trolleyX + 2, TOP - 2, cz + 2.4, 2.8, 2.8, 2.8, 0x4a5258);
-    for (const s of [-1, 1]) for (const e of [-1, 1]) beam(trolleyX + e * 1, TOP, cz + s * 2, trolleyX + e * 1, 26.6, cz + s * 4, 0.1, CRANE_D);
-    box(trolleyX, 26.3, cz, 2.6, 0.5, 12.4, 0xb38d2c);
-    addContainer(trolleyX, 26 - CH / 2, cz, 0, pick(rng, PALETTE));
-    craneLights.push(new THREE.Vector3(54, 62.9, cz), new THREE.Vector3(104.5, TOP + 3.6, cz), new THREE.Vector3(21.5, TOP + 3.6, cz));
+    box(trolleyX, GB - 1.0, cz, 5, 1.0, 7.4, CRANE_D);
+    for (const s of [-1, 1]) for (const e of [-1, 1]) box(trolleyX + e * 1.8, GB - 0.42, cz + s * 3, 0.9, 0.5, 0.5, 0x1c1e20);
+    box(trolleyX + 3.6, GB - 3.1, cz + 2.2, 2.6, 2.6, 2.8, 0x4a5258);
+    box(trolleyX + 3.6, GB - 1.74, cz + 2.2, 3.0, 0.14, 3.2, 0x24282c);
+    glow(trolleyX + 4.92, GB - 3.3, cz + 2.2, 0.04, 1.5, 2.3, 0.16, 0.18, 0.2);   // 司机室的落地玻璃
+    glow(trolleyX + 3.6, GB - 3.9, cz + 3.62, 1.9, 0.9, 0.04, 0.16, 0.18, 0.2);
+    for (const s of [-1, 1]) for (const e of [-1, 1]) beam(trolleyX + e * 1, GB - 1.5, cz + s * 2, trolleyX + e * 1, 27.4, cz + s * 4, 0.07, CRANE_D);
+    box(trolleyX, 27.2, cz, 2.0, 0.7, 9, CRANE_D);                                 // 吊具上架
+    box(trolleyX, 26.3, cz, 2.5, 0.45, 12.4, RAIL);                               // 吊具
+    for (const s of [-1, 1]) box(trolleyX, 26.3, cz + s * 6.1, 2.6, 0.7, 0.3, CRANE_D);
+    addContainer(trolleyX, 26 - CH / 2, cz, 0, pick(rng, PALETTE), true);
+    // 楼梯塔：贴着陆侧门腿，一段一段折返上到大梁
+    const SZ = cz - Z - 1.5;
+    for (const dx of [-2.2, 2.2]) for (const dz of [-0.7, 0.7]) beam(X1 + dx, 0, SZ + dz, X1 + dx, TOP + 1.2, SZ + dz, 0.14, CRANE);
+    for (let y = 0, i = 0; y < TOP - 1; y += 3.5, i++) {
+      const dir = i % 2 ? -1 : 1, xa = X1 - dir * 1.6, xb = X1 + dir * 1.6, z = SZ + (i % 2 ? 0.35 : -0.35);
+      for (const dz of [-0.3, 0.3]) beam(xa, y, z + dz, xb, y + 3.5, z + dz, 0.09, CRANE_D);
+      for (let k = 0; k < 12; k++) { const t = (k + 0.5) / 12; box(xa + (xb - xa) * t, y + 3.5 * t, z, 0.25, 0.03, 0.6, CRANE_D); }
+      railing(xa, y, z + (i % 2 ? 0.34 : -0.34), xb, y + 3.5, z + (i % 2 ? 0.34 : -0.34), 3);
+      box(xb + dir * 0.3, y + 3.5, SZ, 0.9, 0.06, 1.5, CRANE_D);                   // 休息平台
+      box(X1, y + 3.5, SZ + 0.75, 4.4, 0.1, 0.1, CRANE); box(X1, y + 3.5, SZ - 0.75, 4.4, 0.1, 0.1, CRANE);
+    }
+    box(X1, TOP + 1.2, SZ + 2.4, 1.2, 0.08, 6.4, CRANE_D);                          // 通到大梁走道的栈桥
+    // 作业照明：挂在大梁下面的一排投光灯
+    for (const x of [28, 46, 70, 92]) for (const s of [-1, 1]) { box(x, GB - 0.5, cz + s * 3.9, 0.7, 0.3, 0.5, 0x1c1e20); glow(x, GB - 0.68, cz + s * 3.9, 0.56, 0.06, 0.36, 0.55, 0.5, 0.42); }
+    craneLights.push(new THREE.Vector3(54, 62.9, cz), new THREE.Vector3(104.5, GT + 0.8, cz), new THREE.Vector3(21.5, GT + 0.8, cz));
   };
   crane(-42, 78);
   crane(20, 86);
@@ -219,10 +284,10 @@ export function buildPort(progress: (msg: string) => void): Port {
   box(84, 9.3, -30, 36.6, 0.9, 130.6, 0x1a2630);
   for (let r = 0; r < 12; r++) for (let b = 0; b < 7; b++) {
     const h = 1 + Math.floor(rng() * 4);
-    for (let k = 0; k < h; k++) addContainer(69.6 + r * 2.62, 9.75 + CH / 2 + k * CH, -86 + b * 12.6, 0, pick(rng, PALETTE));
+    for (let k = 0; k < h; k++) addContainer(69.6 + r * 2.62, 9.75 + CH / 2 + k * CH, -86 + b * 12.6, 0, pick(rng, PALETTE), true);
   }
-  box(84, 20, 20, 30, 21, 18, 0xa9aaa4); // 船楼
-  box(84, 31.5, 20, 34, 2.4, 14, 0x9c9d98);
+  box(84, 20, 20, 30, 21, 18, 0x80827e); // 船楼
+  box(84, 31.5, 20, 34, 2.4, 14, 0x757772);
   box(84, 36, 26, 5, 8, 6, 0x2a3138); // 烟囱
   box(84, 37.5, 26, 5.2, 1.4, 6.2, 0xb85a1c);
   const winTex = windowsTexture(18, 5, 11, 0.3);
@@ -303,38 +368,43 @@ export function buildPort(progress: (msg: string) => void): Port {
   // ---------------------------------------------------------------- 路灯
   const lampPos: THREE.Vector3[] = [];
   const pole = (x: number, z: number, dir: number) => {
-    box(x, 5, z, 0.26, 10, 0.26, 0x3a3f42, true);
-    box(x + dir * 1.1, 9.9, z, 2.4, 0.16, 0.16, 0x3a3f42);
-    lampPos.push(new THREE.Vector3(x + dir * 2.1, 9.7, z));
+    box(x, 0.2, z, 0.5, 0.4, 0.5, 0x2c3033, true);                              // 水泥基座
+    box(x, 5, z, 0.2, 10, 0.2, 0x3a3f42, true);
+    beam(x, 9.2, z, x + dir * 1.9, 9.95, z, 0.12, 0x3a3f42);                    // 斜挑出去的灯臂
+    box(x + dir * 2.2, 9.98, z, 0.95, 0.14, 0.4, 0x23272a);                     // 灯壳
+    glow(x + dir * 2.2, 9.9, z, 0.72, 0.03, 0.26, 1, 1, 1);                     // 透光罩
+    lampPos.push(new THREE.Vector3(x + dir * 2.2, 9.86, z));
   };
   for (const z of [-79, -47.55, -15.85, 15.85, 47.55, 82]) { pole(-26.6, z, 1); pole(-9.4, z, -1); }
   for (const z of [-90, -62, -18, 2, 44, 72]) pole(28.6, z, 1);
   for (const z of [-48, 0, 48]) pole(-63.4, z, -1);
   pole(60.4, 78, -1); pole(60.4, -80, -1);
-  const lampGeo = new THREE.BoxGeometry(0.9, 0.14, 0.36);
-  const lampHeads = new THREE.InstancedMesh(lampGeo, new THREE.MeshBasicMaterial({ color: new THREE.Color(7, 3.8, 1.5) }), lampPos.length + craneLights.length);
-  lampPos.forEach((p, i) => lampHeads.setMatrixAt(i, m4.makeTranslation(p.x, p.y, p.z)));
-  craneLights.forEach((p, i) => { lampHeads.setMatrixAt(lampPos.length + i, m4.compose(p, q.identity(), v2.set(0.5, 3, 1.2))); lampHeads.setColorAt(lampPos.length + i, col.setRGB(1, 0.06, 0.05)); });
-  lampPos.forEach((_, i) => lampHeads.setColorAt(i, col.setRGB(1, 1, 1)));
-  group.add(lampHeads);
-  // 真正发光的点光源只有几盏，哪几盏路灯离玩家最近就"借"给谁
-  const lightPool: THREE.PointLight[] = [];
+  craneLights.forEach((p) => glow(p.x, p.y, p.z, 0.45, 0.45, 0.45, 1.6, 0.1, 0.08)); // 航空障碍灯
+  const glowMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ color: new THREE.Color(4.2, 2.5, 1.1) }), glows.length);
+  glows.forEach((gl, i) => { glowMesh.setMatrixAt(i, m4.compose(v1.set(gl.x, gl.y, gl.z), q.identity(), v2.set(gl.sx, gl.sy, gl.sz))); glowMesh.setColorAt(i, col.setRGB(gl.r, gl.g, gl.b)); });
+  group.add(glowMesh);
+  // 路灯是往下照的：用聚光灯在地上打出一圈一圈的光斑，而不是朝四面八方发光的灯泡。
+  // 真正发光的灯只有几盏，哪几盏路灯离玩家最近就"借"给谁
+  const lightPool: THREE.SpotLight[] = [];
   for (let i = 0; i < 8; i++) {
-    const l = new THREE.PointLight(0xffa858, 0, 46, 1.6);
-    lightPool.push(l); group.add(l);
+    const l = new THREE.SpotLight(0xffa858, 0, 40, 1.08, 0.85, 1.5);
+    lightPool.push(l); group.add(l, l.target);
   }
+  group.add(lightCones(lampPos));
   let lampCount = 6;
 
   // ---------------------------------------------------------------- 杂物：护栏、油桶、木箱、路锥
-  const drums: { x: number; z: number; c: number }[] = [];
-  const cones: { x: number; z: number }[] = [];
-  const barrier = (x: number, z: number, alongX: boolean) => box(x, 0.45, z, alongX ? 2.4 : 0.6, 0.9, alongX ? 0.6 : 2.4, 0x8d8f8c, true);
+  const drums: { x: number; z: number; c: number; rot: number }[] = [];
+  const cones: { x: number; z: number; rot: number; tilt: number }[] = [];
+  const barriers: { x: number; z: number; alongX: boolean }[] = [];
+  const crateList: { x: number; y: number; z: number; s: number; h: number; c: number; rot: number }[] = [];
+  const barrier = (x: number, z: number, alongX: boolean) => { barriers.push({ x, z, alongX }); colliders.add(x, 0.45, z, alongX ? 2.4 : 0.6, 0.9, alongX ? 0.6 : 2.4); };
   const crates = (x: number, z: number, n: number) => {
-    for (let i = 0; i < n; i++) { const s = 1.1 + rng() * 0.2; box(x + (i % 2) * 1.3, 0.55 + Math.floor(i / 2) * 1.12, z + (rng() - 0.5) * 0.2, s, 1.1, s, pick(rng, [0x6b5236, 0x5a4a34, 0x4b5a3c])); }
+    for (let i = 0; i < n; i++) { const s = 1.1 + rng() * 0.2; crateList.push({ x: x + (i % 2) * 1.3, y: 0.55 + Math.floor(i / 2) * 1.12, z: z + (rng() - 0.5) * 0.2, s, h: 1.1, c: pick(rng, [0xffffff, 0xd8d0c0, 0xb9c4a8]), rot: (rng() - 0.5) * 0.16 }); }
     colliders.add(x + 0.65, Math.ceil(n / 2) * 0.56, z, 2.6, Math.ceil(n / 2) * 1.12, 1.4);
   };
   const drumCluster = (x: number, z: number, n: number) => {
-    for (let i = 0; i < n; i++) drums.push({ x: x + (i % 3) * 0.66, z: z + Math.floor(i / 3) * 0.66, c: pick(rng, [0x1f5488, 0x9a3b26, 0x2f6240, 0x70787c]) });
+    for (let i = 0; i < n; i++) drums.push({ x: x + (i % 3) * 0.66, z: z + Math.floor(i / 3) * 0.66, c: pick(rng, [0x1f5488, 0x9a3b26, 0x2f6240, 0x70787c]), rot: rng() * 6.283 });
     colliders.add(x + 0.66, 0.46, z + (Math.ceil(n / 3) - 1) * 0.33, 2.0, 0.92, Math.ceil(n / 3) * 0.66 + 0.1);
   };
   for (const z of [70, 22, -24, -70]) { barrier(-21.5, z, true); barrier(-14.5, z - 9, true); }
@@ -342,8 +412,8 @@ export function buildPort(progress: (msg: string) => void): Port {
   barrier(-66, 20, false); barrier(-70, -26, false); barrier(8, -8.5, true); barrier(8, 8.5, true);
   crates(-16.6, 54, 4); crates(-20.6, -48, 3); crates(42, 40, 4); crates(52, -52, 3); crates(-68, -8, 4); crates(38, -14, 2); crates(50, 76, 4);
   drumCluster(-24.4, 8, 6); drumCluster(-12.6, -40, 5); drumCluster(30, 30, 6); drumCluster(54, 4, 4); drumCluster(-64.5, 30, 6); drumCluster(44, -86, 5);
-  for (let i = 0; i < 26; i++) cones.push({ x: -25 + rng() * 14, z: -95 + rng() * 190 });
-  for (let i = 0; i < 16; i++) cones.push({ x: 30 + rng() * 28, z: -95 + rng() * 190 });
+  for (let i = 0; i < 26; i++) cones.push({ x: -25 + rng() * 14, z: -95 + rng() * 190, rot: rng() * 6.283, tilt: rng() < 0.12 ? 1 : 0 });
+  for (let i = 0; i < 16; i++) cones.push({ x: 30 + rng() * 28, z: -95 + rng() * 190, rot: rng() * 6.283, tilt: rng() < 0.12 ? 1 : 0 });
 
   // ---------------------------------------------------------------- 地面标线
   progress('正在刷地面标线');
@@ -370,35 +440,29 @@ export function buildPort(progress: (msg: string) => void): Port {
   group.add(buildDetails(yard, CW, CH, CL, colliders, BOUNDS));
 
   // ---------------------------------------------------------------- 把收集到的东西变成网格
-  const cGeo = new THREE.BoxGeometry(CW, CH, CL);
-  for (const v of variants) {
-    const mesh = new THREE.InstancedMesh(cGeo, v.mats, v.items.length);
-    v.items.forEach((it, i) => {
+  const cGeo = containerGeometry(CW, CH, CL), cFar = new THREE.BoxGeometry(CW, CH, CL);
+  const place = (geo: THREE.BufferGeometry, mats: THREE.Material[], items: Item[]) => {
+    if (!items.length) return;
+    const mesh = new THREE.InstancedMesh(geo, mats, items.length);
+    items.forEach((it, i) => {
       mesh.setMatrixAt(i, m4.compose(v1.set(it.x, it.y, it.z), q.setFromAxisAngle(UP, it.rot * Math.PI / 2), v2.set(1, 1, 1)));
-      mesh.setColorAt(i, col.setHex(it.c).multiplyScalar(1.5));
+      mesh.setColorAt(i, col.setHex(it.c));
     });
     mesh.castShadow = mesh.receiveShadow = true;
     group.add(mesh);
-  }
-  const beamMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial({ roughness: 0.55, metalness: 0.25 }), beamList.length);
+  };
+  for (const v of variants) { place(cGeo, v.near, v.items); place(cFar, v.far, v.farItems); }
+  const beamMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), weathered(new THREE.MeshStandardMaterial({ roughness: 0.55, metalness: 0.25 })), beamList.length);
   beamList.forEach((b, i) => { beamMesh.setMatrixAt(i, b.m); beamMesh.setColorAt(i, col.setHex(b.c)); });
   beamMesh.castShadow = beamMesh.receiveShadow = true;
   group.add(beamMesh);
-  const drumMesh = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.3, 0.3, 0.92, 14), new THREE.MeshStandardMaterial({ roughness: 0.4, metalness: 0.5 }), drums.length);
-  drums.forEach((d, i) => { drumMesh.setMatrixAt(i, m4.makeTranslation(d.x, 0.46, d.z)); drumMesh.setColorAt(i, col.setHex(d.c)); });
-  drumMesh.castShadow = drumMesh.receiveShadow = true;
-  group.add(drumMesh);
-  const coneMesh = new THREE.InstancedMesh(new THREE.ConeGeometry(0.2, 0.62, 10), new THREE.MeshStandardMaterial({ color: 0xd2622a, roughness: 0.5 }), cones.length);
-  let nc = 0;
-  cones.forEach((c) => { if (!colliders.pointInside(c.x, 0.3, c.z)) coneMesh.setMatrixAt(nc++, m4.makeTranslation(c.x, 0.31, c.z)); });
-  coneMesh.count = nc;
-  coneMesh.castShadow = true;
-  group.add(coneMesh);
+  group.add(drumMesh(drums), barrierMesh(barriers), crateMesh(crateList));
+  group.add(coneMesh(cones.filter((c) => !colliders.pointInside(c.x, 0.3, c.z))));
 
   // ---------------------------------------------------------------- 光照
-  const hemi = new THREE.HemisphereLight(0x8fa6c0, 0x26241f, 0.5);
+  const hemi = new THREE.HemisphereLight(0x8fa6c0, 0x26241f, 0.4);
   group.add(hemi);
-  const sun = new THREE.DirectionalLight(0xffb888, 1.25);
+  const sun = new THREE.DirectionalLight(0xffb07a, 2.0);
   sun.shadow.camera.left = -70; sun.shadow.camera.right = 70; sun.shadow.camera.top = 70; sun.shadow.camera.bottom = -70;
   sun.shadow.camera.near = 1; sun.shadow.camera.far = 420;
   sun.shadow.bias = -0.0006; sun.shadow.normalBias = 0.06;
@@ -422,7 +486,7 @@ export function buildPort(progress: (msg: string) => void): Port {
         order.sort((a, b) => lampPos[a].distanceToSquared(focus) - lampPos[b].distanceToSquared(focus));
         lightPool.forEach((l, i) => {
           l.visible = i < lampCount && i < order.length;
-          if (l.visible) { l.position.copy(lampPos[order[i]]); l.position.y -= 0.3; l.intensity = 75; }
+          if (l.visible) { l.position.copy(lampPos[order[i]]); l.target.position.set(l.position.x, 0, l.position.z); l.intensity = 150; }
         });
       }
     },

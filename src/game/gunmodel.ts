@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { mergeGeometries, toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { mulberry32 } from '../core/math';
-import { clayMesh, type Cone } from './clay';
+import { clayMesh, type Cone, type Groove } from './clay';
 import { buildLeftHand, buildRightHand } from './hands';
 
 // 第一人称枪模：M4A1 卡宾枪（平顶机匣 + 四面导轨护木 + 筒式红点），加上握枪的双手。
@@ -146,9 +146,9 @@ export class Parts {
   }
 
   /** 把一组圆头锥融合成一整块连续的表面（见 clay.ts）。手用它。 */
-  clay(mat: MatKey, cones: [V3, V3, number, number][], blend = 4.5, cell = 2.2) {
-    const w = ([x, y, u]: V3) => new THREE.Vector3(x, y, U0 - u);
-    this.add(mat, clayMesh(cones.map(([a, b, r1, r2]) => [w(a), w(b), r1, r2] as Cone), blend, cell), null);
+  clay(mat: MatKey, cones: [V3, V3, number, number, number?][], grooves: [V3, V3, number, number][] = [], cell = 2) {
+    const w = ([x, y, u]: V3) => new THREE.Vector3(x, y, U0 - u), dir = ([x, y, u]: V3) => new THREE.Vector3(x, y, -u).normalize();
+    this.add(mat, clayMesh(cones.map(([a, b, r1, r2, k]) => [w(a), w(b), r1, r2, k] as Cone), grooves.map(([at, d, reach, depth]) => [w(at), dir(d), reach, depth] as Groove), 4.5, cell), null);
   }
 
   /** 任意朝向的圆角板：along 是长边方向，normal 是厚度方向。护指节、腕带搭扣这类贴在手上的小件用它。 */
@@ -190,10 +190,11 @@ export class Parts {
  * metal —— 阳极氧化铝：很细的颗粒 + 零星划痕（划痕处更光滑）+ 大块的手摸出来的油光。
  * poly  —— 工程塑料：密密的小凸点，像握把和护木盖板上的防滑纹。
  * weave —— 织物：斜纹布的经纬线。
+ * leather —— 皮革：一小块一小块不规则的粒面，块与块之间是细细的纹沟。
  * drops —— 雨水：大小不一的水珠，只用它的法线图，叠在金属外面的那层"水膜"上。
  */
-function surface(kind: 'metal' | 'poly' | 'weave' | 'drops') {
-  const S = 256, r = mulberry32({ metal: 311, poly: 733, weave: 97, drops: 1543 }[kind]);
+function surface(kind: 'metal' | 'poly' | 'weave' | 'drops' | 'leather') {
+  const S = 256, r = mulberry32({ metal: 311, poly: 733, weave: 97, drops: 1543, leather: 409 }[kind]);
   const h = new Float32Array(S * S), rough = new Float32Array(S * S);
   // 低频斑块：8×8 的随机格子做双线性插值
   const G = 8, grid = new Float32Array(G * G).map(() => r());
@@ -202,9 +203,21 @@ function surface(kind: 'metal' | 'poly' | 'weave' | 'drops') {
     const at = (i: number, j: number) => grid[(j % G) * G + (i % G)];
     return (at(x0, y0) * (1 - tx) + at(x0 + 1, y0) * tx) * (1 - ty) + (at(x0, y0 + 1) * (1 - tx) + at(x0 + 1, y0 + 1) * tx) * ty;
   };
+  // 皮革的粒面：每个小格子里撒一个点，像素离最近的两个点差不多远的地方就是纹沟
+  const GC = 40, cell = S / GC, seeds = kind === 'leather' ? new Float32Array(GC * GC * 2).map(() => r()) : null;
+  const grainAt = (x: number, y: number) => {
+    const cx = Math.floor(x / cell), cy = Math.floor(y / cell); let f1 = 1e9, f2 = 1e9;
+    for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) {
+      const gx = cx + ox, gy = cy + oy, k = (((gy % GC) + GC) % GC * GC + ((gx % GC) + GC) % GC) * 2;
+      const d = Math.hypot((gx + seeds![k]) * cell - x, (gy + seeds![k + 1]) * cell - y);
+      if (d < f1) { f2 = f1; f1 = d; } else if (d < f2) f2 = d;
+    }
+    return Math.min(1, (f2 - f1) / 2.2);
+  };
   for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
     const i = y * S + x, l = low(x, y);
-    if (kind === 'metal') { h[i] = r() * 0.5; rough[i] = 0.78 + r() * 0.12 - Math.max(0, l - 0.55) * 0.55; }
+    if (kind === 'leather') { const g = grainAt(x, y); h[i] = g * 0.8 + r() * 0.08; rough[i] = 0.74 - g * 0.12 + r() * 0.06 - Math.max(0, l - 0.5) * 0.4; }
+    else if (kind === 'metal') { h[i] = r() * 0.5; rough[i] = 0.78 + r() * 0.12 - Math.max(0, l - 0.55) * 0.55; }
     else if (kind === 'poly') { h[i] = r() * 0.15; rough[i] = 0.86 + r() * 0.1 - Math.max(0, l - 0.6) * 0.3; }
     else if (kind === 'weave') { h[i] = 0.45 * Math.sin((x + y) * Math.PI / 2) + 0.35 * Math.sin((x - y) * Math.PI / 4) + r() * 0.25; rough[i] = 0.9 + r() * 0.1; }
     else rough[i] = 1;
@@ -290,7 +303,7 @@ function engraving(tex: THREE.Texture, w: number, h: number, x: number, y: numbe
 }
 
 export function buildGun() {
-  const metal = surface('metal'), grain = surface('poly'), weave = surface('weave').normalMap, drops = surface('drops').normalMap;
+  const metal = surface('metal'), grain = surface('poly'), hide = surface('leather'), weave = surface('weave').normalMap, drops = surface('drops').normalMap;
   weave.repeat.set(2.5, 2.5); drops.repeat.set(1.5, 1.5);
   const ns = (k: number) => new THREE.Vector2(k, k);
   // 下着雨：枪身外面裹一层清漆层当"水膜"，水膜上用水珠法线图鼓出一颗颗雨滴，路灯照上去会有零星的亮点
@@ -307,7 +320,7 @@ export function buildGun() {
     dark: new THREE.MeshStandardMaterial({ color: 0x050506, roughness: 0.95, metalness: 0 }),
     void: new THREE.MeshBasicMaterial({ color: 0x020203, fog: false }), // 孔洞内部：不受任何灯光影响的纯黑
     // 手套：黑色皮革。细密的皮纹 + 中等粗糙度，路灯下会有一条柔和的高光；外面同样裹一层带水珠的水膜
-    fabric: new THREE.MeshPhysicalMaterial({ color: 0x141415, roughness: 0.5, metalness: 0, normalMap: grain.normalMap, normalScale: ns(0.2), envMapIntensity: 1.5, ...wet, clearcoat: 0.35 }),
+    fabric: new THREE.MeshPhysicalMaterial({ color: 0x161617, roughness: 0.9, roughnessMap: hide.roughnessMap, metalness: 0, normalMap: hide.normalMap, normalScale: ns(0.55), envMapIntensity: 1.5, ...wet, clearcoat: 0.3 }),
     // 虎口和掌根的加厚补强：同样是黑皮，更哑一些
     leather: new THREE.MeshStandardMaterial({ color: 0x0e0e0f, roughness: 0.72, metalness: 0, normalMap: grain.normalMap, normalScale: ns(0.3), envMapIntensity: 1.1 }),
     guard: new THREE.MeshStandardMaterial({ color: 0x111113, roughness: 0.42, metalness: 0.05, envMapIntensity: 1.3 }),

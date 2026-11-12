@@ -7,6 +7,7 @@ import type { NavGrid } from '../world/nav';
 import type { Decals } from '../render/decals';
 import { BOUNDS } from '../world/port';
 import type { Player } from './player';
+import { plating } from './plating';
 import { instantiate, rigDef } from './rig';
 
 export type Kind = 'gull' | 'hound' | 'guard';
@@ -41,24 +42,12 @@ export interface World { colliders: Colliders; nav: NavGrid; effects: Effects; d
 
 const SPH = new THREE.SphereGeometry(1, 12, 8);
 
-/** 机体表面的磨损贴图：划痕和斑驳，同时用作粗糙度和凹凸。 */
-function wornMetal() {
-  const c = document.createElement('canvas'); c.width = c.height = 256;
-  const g = c.getContext('2d')!;
-  g.fillStyle = '#b4b4b4'; g.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 2600; i++) { const v = 120 + Math.random() * 120; g.fillStyle = `rgba(${v},${v},${v},0.22)`; g.fillRect(Math.random() * 256, Math.random() * 256, 1 + Math.random() * 3, 1 + Math.random() * 3); }
-  for (let i = 0; i < 90; i++) {
-    const x = Math.random() * 256, y = Math.random() * 256, a = Math.random() * 6.28, l = 6 + Math.random() * 40, v = Math.random() < 0.6 ? 70 : 235;
-    g.strokeStyle = `rgba(${v},${v},${v},${0.25 + Math.random() * 0.4})`; g.lineWidth = 0.6 + Math.random();
-    g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke();
-  }
-  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(2, 2);
-  return t;
-}
-export const WORN = wornMetal();
-const BODY = new THREE.MeshStandardMaterial({ color: 0x343a40, roughness: 0.62, metalness: 0.75, roughnessMap: WORN, bumpMap: WORN, bumpScale: 0.6 });
-const ACCENT = new THREE.MeshStandardMaterial({ color: 0xb85a1c, roughness: 0.7, metalness: 0.4, roughnessMap: WORN });
-const DARK = new THREE.MeshStandardMaterial({ color: 0x121416, roughness: 0.5, metalness: 0.6 });
+// 机体材质：三种都用同一套装甲板贴图（板缝、铆钉、掉漆），只是底色和金属感不同
+const PLATE = plating();
+const BODY = new THREE.MeshStandardMaterial({ color: 0x5a6168, map: PLATE.map, roughness: 1, metalness: 1, roughnessMap: PLATE.roughnessMap, metalnessMap: PLATE.roughnessMap, normalMap: PLATE.normalMap, normalScale: new THREE.Vector2(1.1, 1.1) });
+const ACCENT = new THREE.MeshStandardMaterial({ color: 0xa8501c, map: PLATE.map, roughness: 1.1, metalness: 0.75, roughnessMap: PLATE.roughnessMap, metalnessMap: PLATE.roughnessMap, normalMap: PLATE.normalMap });
+const DARK = new THREE.MeshStandardMaterial({ color: 0x24282c, map: PLATE.map, roughness: 0.9, metalness: 0.9, roughnessMap: PLATE.roughnessMap, metalnessMap: PLATE.roughnessMap, normalMap: PLATE.normalMap, normalScale: new THREE.Vector2(0.7, 0.7) });
+const STEEL = new THREE.MeshStandardMaterial({ color: 0xb9bec2, roughness: 0.22, metalness: 1 }); // 液压杆的活塞杆：磨得发亮的镀铬钢
 const EYE = new THREE.MeshBasicMaterial({ color: new THREE.Color(3.2, 0.25, 0.12) });
 const BOLT = new THREE.MeshBasicMaterial({ color: new THREE.Color(9, 1.6, 0.5) });
 
@@ -91,7 +80,7 @@ export class Enemies {
   spawn(kind: Kind, x: number, z: number) {
     const bodyMat = BODY.clone();
     const glow = kind === 'guard' ? new THREE.MeshBasicMaterial({ color: new THREE.Color(0.4, 0.08, 0.03) }) : null;
-    const rig = instantiate(rigDef(kind), { body: bodyMat, accent: ACCENT, dark: DARK, eye: EYE, glow: glow ?? EYE });
+    const rig = instantiate(rigDef(kind), { body: bodyMat, accent: ACCENT, dark: DARK, steel: STEEL, eye: EYE, glow: glow ?? EYE });
     const spec = SPEC[kind];
     const group = new THREE.Group();
     group.add(rig.mesh);

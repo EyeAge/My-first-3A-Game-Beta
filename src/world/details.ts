@@ -148,34 +148,14 @@ export function buildDetails(containers: BoxSpec[], W: number, H: number, L: num
   // ---- 集装箱
   for (const c of containers) {
     const ax = c.rot ? 1 : 0, az = c.rot ? 0 : 1; // 箱子长轴方向
-    for (const s of [-1, 1]) {
-      // 长侧面
-      const nx = az * s, nz = ax * s;
-      const fx = c.x + nx * W / 2, fz = c.z + nz * W / 2;
-      if (!colliders.pointInside(fx + nx * 0.4, c.y, fz + nz * 0.4)) { // 被隔壁箱子挡住的面就不贴了
-        const along = (d: number): [number, number] => [fx + ax * d, fz + az * d];
-        let [x, z] = along(s * (L / 2 - 1.3) * (ax ? -1 : 1));
-        wall('code', x, c.y + 0.72, z, nx, nz, 1.25, 1.25);
-        if (rng() < 0.3) { [x, z] = along(-s * (L / 2 - 1.2) * (ax ? -1 : 1)); wall('tall', x, c.y + 0.95, z, nx, nz, 0.75, 0.75); }
-        if (rng() < 0.12) { [x, z] = along((rng() - 0.5) * 3 + L / 2 - 3.2); wall('hazard', x, c.y - 0.2, z, nx, nz, 0.5, 0.5); }
-        for (let k = 0, n = Math.floor(rng() * 3); k < n; k++) {
-          const h = 1.0 + rng() * 1.4, w = 0.7 + rng() * 1.1;
-          [x, z] = along((rng() - 0.5) * (L - 1.4));
-          wall(rng() < 0.6 ? 'rust' : 'grime', x, c.y + H / 2 - h / 2 - 0.02, z, nx, nz, w, h);
-        }
-      }
-      // 端面：+端是箱门
-      const ex = c.x + ax * s * L / 2, ez = c.z + az * s * L / 2, enx = ax * s, enz = az * s;
-      if (!colliders.pointInside(ex + enx * 0.4, c.y, ez + enz * 0.4)) {
-        const side = (d: number): [number, number] => [ex + az * d, ez + ax * d];
-        if (s > 0) {
-          let [x, z] = side(0.62 * (ax ? -1 : 1)); wall('plate', x, c.y - 0.35, z, enx, enz, 0.42, 0.42);
-          [x, z] = side(-0.6 * (ax ? -1 : 1)); wall('data', x, c.y - 0.1, z, enx, enz, 0.8, 0.8);
-          if (rng() < 0.45) { [x, z] = side(0.6 * (ax ? -1 : 1)); wall('check', x, c.y + 0.5, z, enx, enz, 0.36, 0.36); }
-        }
-        if (rng() < 0.5) { const h = 1 + rng() * 1.2; const [x, z] = side((rng() - 0.5) * 1.2); wall(rng() < 0.6 ? 'rust' : 'grime', x, c.y + H / 2 - h / 2 - 0.02, z, enx, enz, 0.8 + rng() * 0.8, h); }
-      }
-    }
+    // 侧板上的喷字和锈迹已经画在箱体贴图里了（波纹板上贴不了平的贴花），这里只管箱门：门板基本是平的
+    const ex = c.x + ax * (L / 2 - 0.03), ez = c.z + az * (L / 2 - 0.03);
+    if (colliders.pointInside(ex + ax * 0.5, c.y, ez + az * 0.5)) continue; // 门被别的箱子挡住就不贴了
+    const side = (d: number): [number, number] => [ex + az * d, ez + ax * d];
+    let [x, z] = side(0.6 * (ax ? -1 : 1)); wall('plate', x, c.y - 0.42, z, ax, az, 0.4, 0.4);
+    [x, z] = side(-0.58 * (ax ? -1 : 1)); wall('data', x, c.y - 0.1, z, ax, az, 0.74, 0.74);
+    if (rng() < 0.45) { [x, z] = side(0.58 * (ax ? -1 : 1)); wall('check', x, c.y + 0.42, z, ax, az, 0.34, 0.34); }
+    if (rng() < 0.2) { [x, z] = side(-0.58 * (ax ? -1 : 1)); wall('hazard', x, c.y + 0.62, z, ax, az, 0.44, 0.44); }
   }
 
   // ---- 围墙和仓库外墙上的水渍

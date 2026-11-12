@@ -10,7 +10,9 @@ import * as THREE from 'three';
 //   2. 表面网（surface nets）：把空间切成小格子，凡是有的角在里面、有的角在外面的格子，表面一定穿过它，
 //      在里面放一个顶点；相邻的这种格子连成四边形，就得到了表面。
 
-export type Cone = [THREE.Vector3, THREE.Vector3, number, number]; // 两个端点和各自的半径
+export type Cone = [THREE.Vector3, THREE.Vector3, number, number, number?]; // 两个端点和各自的半径；第五项是这一段自己的"粘度"
+/** 一道褶子：在 at 这个位置、垂直于 dir 方向，往里压一条细沟（指关节弯曲处的皱褶）。只影响 at 周围 reach 以内。 */
+export type Groove = [at: THREE.Vector3, dir: THREE.Vector3, reach: number, depth: number];
 
 /** 点到圆头锥表面的距离（Inigo Quilez 的 sdRoundCone）。 */
 function coneDist(px: number, py: number, pz: number, c: Cone) {
@@ -29,14 +31,27 @@ function coneDist(px: number, py: number, pz: number, c: Cone) {
 
 /**
  * 把一组圆头锥融合成一个网格。
- * blend 是融合的"粘度"（毫米）：越大，相邻的锥体之间长出来的过渡越宽。cell 是格子的边长，越小越精细也越慢。
+ * blend 是融合的"粘度"（毫米）：越大，相邻的锥体之间长出来的过渡越宽。每一段也可以自带粘度 ——
+ * 手掌要粘得宽（指根之间才有蹼），手指要粘得窄（不然并拢的四根手指会糊成一整块）。
+ * cell 是格子的边长，越小越精细也越慢。
  */
-export function clayMesh(cones: Cone[], blend = 4.5, cell = 2.2) {
+export function clayMesh(cones: Cone[], grooves: Groove[] = [], blend = 4.5, cell = 2.2) {
+  const W = 1.5; // 褶子的半宽
+  // 每段锥体先算一个包围球：离它很远的采样点根本不用算这一段，建模时间能省掉一大半
+  const bound = cones.map(([a, b, r1, r2]) => { const R = a.distanceTo(b) / 2 + Math.max(r1, r2) + 9; return [(a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2, R * R]; });
   const field = (x: number, y: number, z: number) => {
-    let d = 1e9;
-    for (const c of cones) {
-      const e = coneDist(x, y, z, c), h = Math.max(blend - Math.abs(d - e), 0) / blend;
-      d = Math.min(d, e) - h * h * blend * 0.25; // 平滑取最小值：两个距离接近时再往里收一点，接缝处就鼓出一段过渡
+    let d = 9;
+    for (let i = 0; i < cones.length; i++) {
+      const bd = bound[i], bx = x - bd[0], by = y - bd[1], bz = z - bd[2];
+      if (bx * bx + by * by + bz * bz > bd[3]) continue;
+      const c = cones[i], k = c[4] ?? blend, e = coneDist(x, y, z, c), h = Math.max(k - Math.abs(d - e), 0) / k;
+      d = Math.min(d, e) - h * h * k * 0.25; // 平滑取最小值：两个距离接近时再往里收一点，接缝处就鼓出一段过渡
+    }
+    if (d < 4 && d > -4) for (const [at, dir, reach, depth] of grooves) {
+      const px = x - at.x, py = y - at.y, pz = z - at.z, r2 = px * px + py * py + pz * pz;
+      if (r2 > reach * reach) continue;
+      const t = (px * dir.x + py * dir.y + pz * dir.z) / W, fade = 1 - Math.sqrt(r2) / reach;
+      d += depth * Math.exp(-t * t) * Math.min(1, fade * 3); // 距离变大 = 表面往里退，于是压出一条沟
     }
     return d;
   };

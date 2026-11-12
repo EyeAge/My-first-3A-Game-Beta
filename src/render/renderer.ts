@@ -56,7 +56,7 @@ export class Renderer {
     const target = new THREE.WebGLRenderTarget(w * p.pixelRatio, h * p.pixelRatio, { type: THREE.HalfFloatType, samples: p.shadow >= 2048 ? 4 : p.shadow > 0 ? 2 : 0 });
     this.composer = new EffectComposer(this.gl, target);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
-    if (p.bloom) this.composer.addPass(new UnrealBloomPass(new THREE.Vector2(w, h), 0.5, 0.55, 1.0));
+    if (p.bloom) this.composer.addPass(new UnrealBloomPass(new THREE.Vector2(w, h), 0.36, 0.42, 1.0));
     this.grade = new ShaderPass(GRADE);
     this.composer.addPass(this.grade);
     this.composer.addPass(new OutputPass());

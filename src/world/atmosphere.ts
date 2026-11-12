@@ -26,7 +26,7 @@ void main(){
   // 太阳方向的暖色天光
   float az = max(dot(normalize(d.xz), normalize(uSun.xz)), 0.0);
   float glow = pow(az, 3.0) * exp(-h * 5.0);
-  col += vec3(1.25, 0.62, 0.22) * glow * 0.9;
+  col += vec3(1.25, 0.62, 0.22) * glow * 0.72;
   col += vec3(1.6, 0.9, 0.4) * pow(max(dot(d, uSun), 0.0), 60.0) * 0.6;
   // 云层：把视线方向投到一个平面上取噪声
   vec2 uv = d.xz / (d.y + 0.22) * 1.3 + vec2(uTime * 0.006, 0.0);
