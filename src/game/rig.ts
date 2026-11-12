@@ -187,7 +187,7 @@ function hound(): RigDef {
   r.box('root', 'dark', 0.44, 0.04, 0.3, 0, 0.9, -0.46, undefined, 0.01);
   for (let i = 0; i < 10; i++) r.box('root', 'steel', 0.01, 0.07, 0.27, -0.171 + i * 0.038, 0.945, -0.46, undefined, 0.003); // 散热片
   for (const z of [-0.33, -0.59]) r.box('root', 'dark', 0.42, 0.016, 0.026, 0, 0.985, z, undefined, 0.004);
-  r.box('root', 'body', 0.42, 0.22, 0.07, 0, 0.77, -0.69, undefined, 0.02);                                  // 尾板
+  r.box('root', 'body', 0.42, 0.22, 0.08, 0, 0.77, -0.69, undefined, 0.036);                                  // 尾板
   r.box('root', 'dark', 0.24, 0.07, 0.02, 0, 0.8, -0.726, undefined, 0.006);
   r.box('root', 'eye', 0.18, 0.016, 0.006, 0, 0.8, -0.738);                                                  // 尾灯
   r.cyl('root', 'steel', 0.03, 0.03, 0.12, 0.71, -0.73, 'z'); r.cyl('root', 'dark', 0.034, 0.012, -0.1, 0.69, -0.73, 'z');
@@ -195,22 +195,27 @@ function hound(): RigDef {
   r.cyl('root', 'dark', 0.03, 0.07, 0.15, 0.955, -0.6); r.sph('root', 'eye', 0.028, 0.15, 1.0, -0.6);         // 警示灯
   // ---- 中段：底盘、顶壳、电池仓
   r.box('spine', 'dark', 0.36, 0.24, 0.34, 0, 0.76, -0.07, undefined, 0.03);
-  r.box('spine', 'body', 0.48, 0.07, 0.36, 0, 0.9, -0.05, undefined, 0.02);
+  r.box('spine', 'body', 0.48, 0.08, 0.36, 0, 0.9, -0.05, undefined, 0.036);
   r.box('spine', 'accent', 0.13, 0.074, 0.36, 0, 0.9, -0.05, undefined, 0.014);
   r.box('spine', 'dark', 0.33, 0.13, 0.76, 0, 0.59, -0.04, undefined, 0.03);                                  // 肚子下面的电池仓
   for (const z of [-0.2, 0.12]) r.box('spine', 'accent', 0.338, 0.04, 0.12, 0, 0.6, z, undefined, 0.008);
   // ---- 前段：底盘、顶壳、前保险杠和两只前灯
   r.box('chest', 'dark', 0.38, 0.25, 0.5, 0, 0.76, 0.37, undefined, 0.03);
-  r.box('chest', 'body', 0.48, 0.07, 0.4, 0, 0.9, 0.37, undefined, 0.02);
-  r.box('chest', 'accent', 0.42, 0.21, 0.1, 0, 0.765, 0.66, undefined, 0.025);
+  r.box('chest', 'body', 0.48, 0.08, 0.4, 0, 0.9, 0.37, undefined, 0.036);
+  r.box('chest', 'dark', 0.3, 0.012, 0.24, 0, 0.943, 0.38, undefined, 0.004);                                 // 顶壳上嵌的一块防滑垫
+  for (let i = 0; i < 5; i++) r.box('chest', 'steel', 0.26, 0.006, 0.01, 0, 0.951, 0.29 + i * 0.045);
+  r.box('chest', 'accent', 0.42, 0.21, 0.1, 0, 0.765, 0.66, undefined, 0.045);
+  r.box('chest', 'dark', 0.36, 0.035, 0.05, 0, 0.635, 0.69, undefined, 0.015);                                // 保险杠下面的橡胶防撞条
   r.box('chest', 'dark', 0.28, 0.1, 0.03, 0, 0.785, 0.708, undefined, 0.008);
   for (let i = 0; i < 6; i++) r.box('chest', i % 2 ? 'dark' : 'body', 0.07, 0.046, 0.02, -0.175 + i * 0.07, 0.63, 0.706, undefined, 0.004); // 保险杠下沿的警示块
   for (const s of [-1, 1]) { r.cyl('chest', 'steel', 0.03, 0.02, s * 0.16, 0.785, 0.716, 'z'); r.cyl('chest', 'eye', 0.021, 0.006, s * 0.16, 0.785, 0.729, 'z'); }
   for (const s of [-1, 1]) {
     // 两侧的外壳板、橙色腰线、侧面的检修窗、沿着背脊的提手杆
-    r.box('root', 'body', 0.045, 0.2, 0.42, s * 0.212, 0.79, -0.44, undefined, 0.016);
-    r.box('spine', 'body', 0.045, 0.2, 0.2, s * 0.212, 0.79, -0.1, undefined, 0.016);
-    r.box('chest', 'body', 0.045, 0.2, 0.44, s * 0.212, 0.79, 0.36, undefined, 0.016);
+    r.box('root', 'body', 0.05, 0.2, 0.42, s * 0.212, 0.79, -0.44, undefined, 0.022);
+    r.box('spine', 'body', 0.05, 0.2, 0.2, s * 0.212, 0.79, -0.1, undefined, 0.022);
+    r.box('chest', 'body', 0.05, 0.2, 0.44, s * 0.212, 0.79, 0.36, undefined, 0.022);
+    r.box('root', 'dark', 0.02, 0.1, 0.2, s * 0.232, 0.8, -0.46, undefined, 0.006);                             // 侧壳上凹进去的把手槽
+    r.tube('root', 'steel', [s * 0.243, 0.8, -0.54], [s * 0.243, 0.8, -0.38], 0.008);
     r.box('root', 'accent', 0.048, 0.05, 0.42, s * 0.213, 0.655, -0.44, undefined, 0.01);
     r.box('chest', 'accent', 0.048, 0.05, 0.44, s * 0.213, 0.655, 0.36, undefined, 0.01);
     r.box('chest', 'dark', 0.04, 0.13, 0.15, s * 0.222, 0.79, 0.44, undefined, 0.01);
@@ -238,8 +243,10 @@ function hound(): RigDef {
   for (let i = 0; i < 3; i++) { const k = 0.22 + i * 0.26, y = 0.83 + 0.1 * k, z = 0.54 + 0.26 * k; r.tube('neck', 'body', [0, y - 0.006, z - 0.015], [0, y + 0.006, z + 0.015], 0.074); }
   r.box('neck', 'body', 0.18, 0.07, 0.14, 0, 0.845, 0.59, undefined, 0.016);
   r.cable('neck', [[0.07, 0.83, 0.56], [0.095, 0.9, 0.66], [0.085, 0.96, 0.76], [0.065, 0.97, 0.82]], 0.011);
-  r.box('head', 'body', 0.28, 0.175, 0.37, 0, 0.95, 0.975, undefined, 0.045);
-  r.box('head', 'dark', 0.25, 0.11, 0.045, 0, 0.945, 1.15, undefined, 0.016);
+  r.box('head', 'body', 0.28, 0.175, 0.3, 0, 0.95, 0.94, undefined, 0.06);
+  r.box('head', 'body', 0.25, 0.15, 0.14, 0, 0.945, 1.09, undefined, 0.05);                                   // 往前收窄的吻部
+  for (const s of [-1, 1]) r.box('head', 'accent', 0.012, 0.05, 0.16, s * 0.141, 0.985, 0.98, undefined, 0.004);
+  r.box('head', 'dark', 0.225, 0.105, 0.045, 0, 0.945, 1.15, undefined, 0.02);
   r.box('head', 'eye', 0.19, 0.036, 0.01, 0, 0.955, 1.176);                                                   // 目镜
   for (const s of [-1, 1]) { r.cyl('head', 'dark', 0.022, 0.018, s * 0.083, 0.912, 1.172, 'z'); r.cyl('head', 'steel', 0.013, 0.006, s * 0.083, 0.912, 1.183, 'z'); }
   r.box('head', 'accent', 0.09, 0.012, 0.3, 0, 1.04, 0.97, undefined, 0.004);
@@ -265,6 +272,8 @@ function hound(): RigDef {
     r.cyl(parent, 'steel', 0.04, 0.26, hx - s * 0.075, hip[1], hip[2], 'z');
     r.cyl(id + '1', 'body', 0.112, 0.085, hx + s * 0.035, hip[1], hip[2], 'x');                                // 髋关节的大圆盘
     r.cyl(id + '1', 'accent', 0.117, 0.02, hx + s * 0.06, hip[1], hip[2], 'x');
+    r.cyl(id + '1', 'body', 0.1, 0.02, hx + s * 0.082, hip[1], hip[2], 'x', 0.085);                            // 圆盘外沿收一道斜边
+    r.cyl(id + '1', 'steel', 0.03, 0.012, hx + s * 0.094, hip[1], hip[2], 'x');
     r.cyl(id + '1', 'dark', 0.066, 0.105, hx + s * 0.035, hip[1], hip[2], 'x');
     for (let i = 0; i < 5; i++) r.bolt(id + '1', hx + s * 0.08, hip[1] + Math.cos(i * 1.2566) * 0.088, hip[2] + Math.sin(i * 1.2566) * 0.088, 'x', 0.011);
     const T = (p: V3, dx: number, dz: number): V3 => [p[0] * s + s * dx, p[1], p[2] + dz];
