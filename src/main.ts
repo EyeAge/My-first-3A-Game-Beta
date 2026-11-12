@@ -13,7 +13,7 @@ import { Effects } from './render/effects';
 import { PlanarReflection } from './render/reflection';
 import { Renderer } from './render/renderer';
 import { UI, type HudFrame, type Marker } from './ui/ui';
-import { bakeEnvironment, createRain, createSea, createSky, FOG_COLOR } from './world/atmosphere';
+import { bakeEnvironment, createRain, createSea, createSky } from './world/atmosphere';
 import { buildPort, QUAY_X } from './world/port';
 
 type State = 'menu' | 'playing' | 'paused' | 'dead' | 'won';
@@ -32,14 +32,12 @@ async function boot() {
   camera.rotation.order = 'YXZ';
   scene.add(camera);
   const renderer = new Renderer(canvas, scene, camera);
-  scene.fog = new THREE.FogExp2(FOG_COLOR, 0.0058);
-  scene.background = FOG_COLOR;
 
   await step('正在生成涂装、锈迹与雨水', 0.2);
   const sky = createSky();
   scene.add(sky.mesh);
   scene.environment = bakeEnvironment(renderer.gl);
-  scene.environmentIntensity = 0.9;
+  scene.environmentIntensity = 2; // 没有单独的"环境光"：阴影里的亮度全部来自这张天空贴图
 
   await step('正在布置集装箱', 0.38);
   const port = buildPort(() => {});

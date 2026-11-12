@@ -7,7 +7,7 @@ import { weathered } from '../render/weathered';
 import { barrierMesh, coneMesh, crateMesh, drumMesh, flares, lightCones } from './props';
 import type { ReflectionUniforms } from '../render/reflection';
 import { buildGround } from './ground';
-import { SUN_DIR } from './atmosphere';
+import { SUN_COLOR, SUN_INTENSITY } from './atmosphere';
 import { containerGeometry, doorTextures, frameTextures, RIBS, sideTextures, tintByAlpha, type Brand } from './container';
 import { corrugationNormal, signTexture, windowsTexture } from './textures';
 
@@ -351,7 +351,7 @@ export function buildPort(progress: (msg: string) => void): Port {
   for (const z of [-48, 0, 48]) pole(-63.4, z, -1);
   pole(60.4, 78, -1); pole(60.4, -80, -1);
   craneLights.forEach((p) => { glow(p.x, p.y, p.z, 0.3, 0.3, 0.3, 1.2, 0.08, 0.06); flareList.push({ x: p.x, y: p.y, z: p.z, r: 2.2, g: 0.14, b: 0.1, size: 2.2, blink: 2.2 }); }); // 航空障碍灯：慢慢地一明一灭
-  const glowMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ color: new THREE.Color(1.9, 1.2, 0.6) }), glows.length); // 灯具本身不用太亮，"发光"的感觉交给下面的光晕
+  const glowMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ color: new THREE.Color(8, 6.1, 4.1) }), glows.length); // 灯罩的亮度是白纸的好几倍：泛光会把超出的部分晕开，湿地面里也会映出它
   glows.forEach((gl, i) => { glowMesh.setMatrixAt(i, m4.compose(v1.set(gl.x, gl.y, gl.z), q.identity(), v2.set(gl.sx, gl.sy, gl.sz))); glowMesh.setColorAt(i, col.setRGB(gl.r, gl.g, gl.b)); });
   group.add(glowMesh);
   const flare = flares(flareList);
@@ -411,12 +411,9 @@ export function buildPort(progress: (msg: string) => void): Port {
   group.add(coneMesh(cones.filter((c) => !colliders.pointInside(c.x, 0.3, c.z))));
 
   // ---------------------------------------------------------------- 光照
-  const hemi = new THREE.HemisphereLight(0x8fa6c0, 0x26241f, 0.4);
-  group.add(hemi);
-  const sun = new THREE.DirectionalLight(0xffb07a, 2.0);
-  sun.shadow.camera.left = -70; sun.shadow.camera.right = 70; sun.shadow.camera.top = 70; sun.shadow.camera.bottom = -70;
-  sun.shadow.camera.near = 1; sun.shadow.camera.far = 420;
-  sun.shadow.bias = -0.0006; sun.shadow.normalBias = 0.06;
+  // 全场只有这一盏"真灯"：贴着海面照过来的太阳。没有环境光灯 —— 阴影里的亮度来自天空的环境贴图（main.ts）。
+  // 阴影相机的范围和跟随玩家的逻辑在 render/shadows.ts
+  const sun = new THREE.DirectionalLight(SUN_COLOR, SUN_INTENSITY);
   group.add(sun, sun.target);
 
   const nav = new NavGrid(BOUNDS.minX, BOUNDS.minZ, BOUNDS.maxX, BOUNDS.maxZ, colliders);
@@ -429,10 +426,6 @@ export function buildPort(progress: (msg: string) => void): Port {
     setLampCount(n) { lampCount = n; lastSort = -1; },
     update(t, focus) {
       flare.uniforms.uTime.value = t;
-      // 阴影相机跟着玩家走，并按整米对齐，避免阴影边缘抖动
-      const fx = Math.round(focus.x / 4) * 4, fz = Math.round(focus.z / 4) * 4;
-      sun.target.position.set(fx, 0, fz);
-      sun.position.set(fx, 0, fz).addScaledVector(SUN_DIR, 200);
       if (t - lastSort > 0.4) {
         lastSort = t;
         order.sort((a, b) => lampPos[a].distanceToSquared(focus) - lampPos[b].distanceToSquared(focus));
