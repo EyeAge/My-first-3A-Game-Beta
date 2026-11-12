@@ -53,6 +53,11 @@ const roofY = (z: number) => EAVE + RISE * (1 - Math.abs(z - RIDGE_Z) / HALF_SPA
 
 /** 开间线：6 榀刚架把 28 米的长边分成 5 个开间。 */
 const BAYS = [-16, -11.1, -6.2, -0.8, 5.6, 12];
+/** 刚架实际立在哪：两头的两榀要让开山墙，往里缩到墙的内侧。 */
+const FRAME_X = BAYS.map((x, i) => (i === 0 ? X0 + WALL_T + 0.12 : i === BAYS.length - 1 ? X1 - WALL_T - 0.12 : x));
+/** 南、北两列柱子的 z：离墙的内表面 24 厘米。 */
+const COLUMN_Z = [Z1 - WALL_T - 0.24, Z0 + WALL_T + 0.24];
+
 const SOUTH_DOOR = { x0: -6, x1: -1, h: 5 };          // 南卷帘门洞：开在 z = −11 的墙上
 const EAST_DOOR = { z0: -22, z1: -17, h: 4.5 };       // 东推拉门洞：开在 x = 12 的墙上
 const BREACH = { z0: -15.55, z1: -13.35, y0: 3.3, y1: 5.4 };  // 东墙掉了一块板的破口
@@ -121,6 +126,24 @@ function slab(k: Kit, mat: Mat, x0: number, y0: number, z0: number, x1: number, 
 }
 
 /**
+ * 立在地上的长杆件用的盒子：在离底 0.35 米的地方多切一圈顶点。
+ * 零件箱"烤脏"的时候，会把贴地 20 厘米以内的顶点压暗。一根 7 米高的柱子如果只有上下两圈顶点，
+ * 这层暗色就会从柱脚一路渐变到柱顶，半根柱子都发乌。多切这一圈，脏就只留在柱脚。
+ */
+function footedBox(sx: number, sy: number, sz: number) {
+  if (sy < 0.8) return new THREE.BoxGeometry(sx, sy, sz);
+  const g = new THREE.BoxGeometry(sx, sy, sz, 1, 2, 1), p = g.getAttribute('position');
+  for (let i = 0; i < p.count; i++) if (Math.abs(p.getY(i)) < 1e-6) p.setY(i, -sy / 2 + 0.35);
+  return g;
+}
+/** 按两个对角点放一根落地的立柱（见 footedBox）。 */
+function post(k: Kit, mat: Mat, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, tint?: Tint) {
+  const g = footedBox(Math.abs(x1 - x0), y1 - y0, Math.abs(z1 - z0));
+  g.translate((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2);
+  k.add(mat, g, { tint });
+}
+
+/**
  * 贴在坡屋面上的一块东西（屋面板、檩条）。
  *   xa、xb  沿屋脊方向从哪到哪；
  *   sy      厚度；sz 顺着坡的长度；
@@ -134,6 +157,31 @@ function onSlope(k: Kit, mat: Mat, xa: number, xb: number, sy: number, sz: numbe
   g.rotateX(side * PITCH);
   g.translate(0, EAVE + RISE * t + COS * lift, RIDGE_Z + side * (HALF_SPAN * (1 - t) + SIN * lift));
   k.add(mat, g, { tint: o.tint });
+}
+
+/**
+ * 工字钢：两片翼缘夹一片腹板，截面像"工"字。
+ *   axis       杆件的走向；
+ *   depthAxis  截面的"高"朝哪个轴（两片翼缘就在这个方向的两头）；
+ *   depth      截面高；width 翼缘宽；
+ *   footed     立在地上的柱子（见 footedBox）。
+ */
+function ibeam(k: Kit, mat: Mat, axis: Axis, len: number, cx: number, cy: number, cz: number, o: { depth: number; width: number; depthAxis: Axis; rot?: V3; tint?: Tint; footed?: boolean }) {
+  const FLANGE = 0.02, WEB = 0.012;   // 翼缘厚 2 厘米，腹板厚 1.2 厘米
+  const wideAxis = (['x', 'y', 'z'] as const).find((a) => a !== axis && a !== o.depthAxis)!;
+  const rot = o.rot ?? [0, 0, 0];
+  const xf = new THREE.Matrix4().compose(new THREE.Vector3(cx, cy, cz), new THREE.Quaternion().setFromEuler(new THREE.Euler(rot[0], rot[1], rot[2])), new THREE.Vector3(1, 1, 1));
+  const plate = (deep: number, wide: number, offset: number) => {
+    const s = { x: 0, y: 0, z: 0 }, at = { x: 0, y: 0, z: 0 };
+    s[axis] = len; s[o.depthAxis] = deep; s[wideAxis] = wide;
+    at[o.depthAxis] = offset;
+    const g = o.footed ? footedBox(s.x, s.y, s.z) : new THREE.BoxGeometry(s.x, s.y, s.z);
+    g.translate(at.x, at.y, at.z);
+    k.add(mat, g, { tint: o.tint }, xf);
+  };
+  plate(FLANGE, o.width, o.depth / 2 - FLANGE / 2);
+  plate(FLANGE, o.width, -(o.depth / 2 - FLANGE / 2));
+  plate(o.depth - 2 * FLANGE, WEB, 0);
 }
 
 /**
@@ -418,6 +466,104 @@ function buildRoof(c: Ctx): Workshop['roofHoles'] {
   return roofHoles;
 }
 
+// ------------------------------------------------------------------ 钢结构（全部在屋里）
+function buildFrame(c: Ctx) {
+  const { inn, boxes } = c;
+  FRAME_X.forEach((x, i) => {
+    const tint = 0.94 + 0.08 * hash(i + 3);   // 每榀刚架的漆深浅差一点
+    for (const z of COLUMN_Z) {
+      const h = EAVE - 0.35;
+      ibeam(inn, 'paint_grey', 'y', h, x, FLOOR + h / 2, z, { depth: 0.46, width: 0.22, depthAxis: 'z', footed: true, tint });
+      inn.box('steel_dark', 0.36, 0.03, 0.62, x, FLOOR + 0.015, z, { c: 0.004 });   // 柱脚板
+      for (const dx of [-0.14, 0.14]) for (const dz of [-0.27, 0.27]) inn.cyl('steel_dark', 0.016, 0.035, x + dx, FLOOR + 0.045, z + dz, { seg: 6, tint: 1.6 });   // 地脚螺栓
+      boxes.push({ min: [x - 0.12, 0, z - 0.24], max: [x + 0.12, EAVE, z + 0.24], surface: 'metal' });
+    }
+    for (const side of [1, -1]) {
+      // 斜梁：顺着坡从柱顶到屋脊
+      ibeam(inn, 'paint_grey', 'z', SLOPE_LEN - 0.5, x, EAVE + RISE / 2 - 0.42, RIDGE_Z + side * (HALF_SPAN / 2 - 0.14), { depth: 0.4, width: 0.2, depthAxis: 'y', rot: [side * PITCH, 0, 0], tint });
+      // 加腋：梁柱相接的地方受力最大，梁在这里加高成一个三角形（一片腹板 + 一片斜的下翼缘）
+      inn.box('paint_grey', 0.014, 0.5, 1.5, x, EAVE - 0.55, RIDGE_Z + side * (HALF_SPAN - WALL_T - 0.9), { rot: [side * (PITCH + 0.22), 0, 0], plain: true, tint });
+      inn.box('paint_grey', 0.2, 0.02, 1.55, x, EAVE - 0.82, RIDGE_Z + side * (HALF_SPAN - WALL_T - 0.95), { rot: [side * (PITCH + 0.42), 0, 0], plain: true, tint });
+    }
+    inn.box('paint_grey', 0.22, 0.5, 0.03, x, RIDGE - 0.55, RIDGE_Z, { plain: true, tint });   // 屋脊节点板：两根斜梁在这里对接
+  });
+
+  // 山墙抗风柱：山墙太宽，中间再立两根柱子顶住风
+  for (const x of [FRAME_X[0], FRAME_X[FRAME_X.length - 1]]) for (const z of [-22.3, -16.7]) {
+    const h = roofY(z) - 0.55;
+    ibeam(inn, 'paint_grey', 'y', h, x, FLOOR + h / 2, z, { depth: 0.3, width: 0.18, depthAxis: 'x', footed: true });
+    inn.box('steel_dark', 0.44, 0.03, 0.3, x, FLOOR + 0.015, z, { c: 0.004 });
+    boxes.push({ min: [x - 0.16, 0, z - 0.1], max: [x + 0.16, h, z + 0.1], surface: 'metal' });
+  }
+
+  // 墙梁：贴在内衬上的三道横条，墙板就钉在它上面。遇到门洞断开；东墙上面两道会横穿破口，从洞里能看见
+  for (const y of [2.3, 3.7, 5.15]) {
+    slab(inn, 'steel_galv', X0 + 0.3, y - 0.08, Z1 - 0.2, SOUTH_DOOR.x0 - 0.2, y + 0.08, Z1 - 0.14, { tint: 0.9 });
+    slab(inn, 'steel_galv', SOUTH_DOOR.x1 + 0.2, y - 0.08, Z1 - 0.2, X1 - 0.3, y + 0.08, Z1 - 0.14, { tint: 0.9 });
+    slab(inn, 'steel_galv', X0 + 0.3, y - 0.08, Z0 + 0.14, X1 - 0.3, y + 0.08, Z0 + 0.2, { tint: 0.9 });
+    slab(inn, 'steel_galv', X0 + 0.14, y - 0.08, Z0 + 0.3, X0 + 0.2, y + 0.08, Z1 - 0.3, { tint: 0.9 });
+    slab(inn, 'steel_galv', X1 - 0.2, y - 0.08, Z0 + 0.3, X1 - 0.14, y + 0.08, EAST_DOOR.z0 - 0.2, { tint: 0.9 });
+    slab(inn, 'steel_galv', X1 - 0.2, y - 0.08, EAST_DOOR.z1 + 0.2, X1 - 0.14, y + 0.08, Z1 - 0.3, { tint: 0.9 });
+  }
+  // 檐口系杆：把一排柱顶连起来
+  for (const z of COLUMN_Z) inn.box('paint_grey', X1 - X0 - 0.6, 0.14, 0.14, (X0 + X1) / 2, EAVE - 0.25, z, { plain: true });
+
+  // 交叉拉杆：只在两头的开间里。细圆钢拉成 X 形，防止整排刚架像多米诺骨牌一样顺着屋脊方向倒
+  for (const [a, b] of [[BAYS[0] + 0.4, BAYS[1]], [BAYS[4], BAYS[5] - 0.4]]) {
+    for (const z of COLUMN_Z) {   // 墙面上的
+      inn.tube('steel_galv', [a, 1.35, z], [b, 5.3, z], 0.016, { seg: 5 });
+      inn.tube('steel_galv', [b, 1.35, z + 0.04], [a, 5.3, z + 0.04], 0.016, { seg: 5 });   // 两根错开 4 厘米，不然会在交叉点穿过彼此
+    }
+    for (const side of [1, -1]) { // 屋面下的
+      const zEave = RIDGE_Z + side * (HALF_SPAN - 0.6), zRidge = RIDGE_Z + side * 0.3;
+      inn.tube('steel_galv', [a, EAVE - 0.2, zEave], [b, RIDGE - 0.4, zRidge], 0.014, { seg: 5 });
+      inn.tube('steel_galv', [b, EAVE - 0.2, zEave], [a, RIDGE - 0.4, zRidge], 0.014, { seg: 5 });
+    }
+  }
+}
+
+// ------------------------------------------------------------------ 南卷帘门（卷起来的状态）
+function buildSouthDoor(c: Ctx) {
+  const { out, inn } = c, { x0, x1, h } = SOUTH_DOOR, mid = (x0 + x1) / 2;
+  const inner = Z1 - WALL_T;   // 墙的内表面
+  for (const x of [x0 - 0.07, x1 + 0.07]) {
+    post(inn, 'steel_dark', x - 0.07, FLOOR, inner - 0.16, x + 0.07, h + 0.75, Z1 + 0.07);                   // 门框立柱（也是门帘的导轨）
+    slab(out, 'hazard_stripes', x - 0.11, FLOOR, inner - 0.2, x + 0.11, 1.3, Z1 + 0.1, { c: 0.01 });         // 防撞护角
+  }
+  slab(inn, 'steel_dark', x0 - 0.2, h, inner - 0.1, x1 + 0.2, h + 0.14, Z1 + 0.08);                          // 门楣
+  // 卷帘罩：门洞上方屋里一侧的铁皮罩子（顶板、前板、两块端板）
+  slab(inn, 'steel_galv', x0 - 0.25, h + 0.78, inner - 0.72, x1 + 0.25, h + 0.81, inner, { tint: 0.85 });
+  slab(inn, 'steel_galv', x0 - 0.25, h + 0.3, inner - 0.72, x1 + 0.25, h + 0.81, inner - 0.69, { tint: 0.85 });
+  for (const x of [x0 - 0.24, x1 + 0.24]) slab(inn, 'steel_galv', x - 0.012, h + 0.05, inner - 0.72, x + 0.012, h + 0.81, inner, { tint: 0.85 });
+  // 卷起来的门帘和中间的卷轴。门帘的条纹应该是横的（顺着卷轴）：
+  // 零件箱是在"转到位之前"铺贴图的，所以这里让圆柱先竖着建好（波纹绕着圆周走），再用 rot 放倒；下面那截垂着的门帘同理。
+  inn.cyl('corrugated_roof', 0.3, x1 - x0 + 0.3, mid, h + 0.44, inner - 0.36, { rot: [0, 0, Math.PI / 2], seg: 18, tint: 0.9 });
+  inn.cyl('steel_dark', 0.05, x1 - x0 + 0.46, mid, h + 0.44, inner - 0.36, { axis: 'x', seg: 8 });
+  inn.box('corrugated_roof', 0.84, x1 - x0 - 0.04, 0.03, mid, h, inner - 0.075, { rot: [0, 0, Math.PI / 2], plain: true, tint: 0.9 });   // 垂下来的一截门帘
+  slab(out, 'hazard_stripes', x0 + 0.02, h - 0.52, inner - 0.12, x1 - 0.02, h - 0.42, inner - 0.03);         // 门帘的底梁，离地 4.48 米
+  slab(inn, 'steel_dark', x1 + 0.28, h + 0.2, inner - 0.6, x1 + 0.7, h + 0.7, inner - 0.15, { c: 0.02 });    // 电机盒
+  inn.tube('steel_dark', [x1 + 0.5, h + 0.2, inner - 0.3], [x1 + 0.5, 1.2, inner - 0.3], 0.008, { seg: 5 }); // 停电时用的手拉链
+}
+
+// ------------------------------------------------------------------ 东推拉门（推开的状态，门扇停在门洞北侧）
+function buildEastDoor(c: Ctx) {
+  const { out, inn, boxes } = c, { z0, z1, h } = EAST_DOOR;
+  const leafX = X1 + 0.12;                       // 门扇挂在墙外 12 厘米
+  const leafZ1 = z0 - 0.25, leafZ0 = leafZ1 - 5.1, leafMid = (leafZ0 + leafZ1) / 2;
+  slab(out, 'corrugated_roof', leafX, 0.12, leafZ0, leafX + 0.05, h + 0.1, leafZ1, { tint: 0.86 });          // 门扇面板
+  for (const z of [leafZ0, leafZ1, leafMid]) slab(out, 'steel_galv', leafX - 0.02, 0.1, z - 0.05, leafX + 0.09, h + 0.12, z + 0.05, { tint: 0.8 });   // 竖框
+  for (const y of [0.14, h + 0.08, h * 0.5]) slab(out, 'steel_galv', leafX - 0.02, y - 0.05, leafZ0, leafX + 0.09, y + 0.05, leafZ1, { tint: 0.8 }); // 横框
+  // 人字斜撑。参考里它正好埋在面板的厚度里，看不见；这里挪到面板朝外的一面
+  for (const z of [leafZ0 + 0.1, leafZ1 - 0.1]) out.tube('steel_galv', [leafX + 0.07, 0.2, z], [leafX + 0.07, h, leafMid], 0.02, { seg: 6, tint: 0.8 });
+  slab(inn, 'steel_dark', leafX - 0.04, h + 0.16, leafZ0 - 0.2, leafX + 0.12, h + 0.3, z1 + 0.3);            // 上导轨：从门扇停的地方一直到门洞另一头
+  for (const z of [leafZ0 + 0.95, leafZ1 - 0.95]) slab(inn, 'steel_dark', leafX - 0.01, h + 0.1, z - 0.08, leafX + 0.08, h + 0.17, z + 0.08);   // 吊轮架：把门扇挂在导轨上
+  post(inn, 'steel_dark', X1 - WALL_T - 0.02, FLOOR, z0 - 0.12, X1 + 0.08, h + 0.1, z0);                     // 门框立柱
+  post(inn, 'steel_dark', X1 - WALL_T - 0.02, FLOOR, z1, X1 + 0.08, h + 0.1, z1 + 0.12);
+  slab(inn, 'steel_dark', X1 - WALL_T - 0.02, h, z0 - 0.12, X1 + 0.08, h + 0.12, z1 + 0.12);                 // 门框横梁
+  for (const z of [z0 - 0.06, z1 + 0.06]) slab(out, 'hazard_stripes', X1 - WALL_T - 0.05, FLOOR, z - 0.1, X1 + 0.1, 1.3, z + 0.1, { c: 0.01 });
+  boxes.push({ min: [leafX - 0.05, 0, leafZ0], max: [leafX + 0.12, h + 0.3, leafZ1], surface: 'metal' });
+}
+
 // ------------------------------------------------------------------ 墙的碰撞盒
 /**
  * 碰撞盒和看得见的网格是两套东西，各管各的。墙在碰撞上就是几块薄板：
@@ -461,6 +607,9 @@ export function buildWorkshop(): Workshop {
   wallColliders(boxes);
   buildWalls(c);
   const roofHoles = buildRoof(c);
+  buildFrame(c);
+  buildSouthDoor(c);
+  buildEastDoor(c);
 
   // 三只零件箱各自把同材质的零件合并成一个网格，再一起收进同一个 group
   const group = new THREE.Group();
