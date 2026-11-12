@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>模型查看器</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #111316; color: #cfd3d6; font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #info { position: fixed; left: 10px; top: 8px; white-space: pre; text-shadow: 0 1px 2px #000; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <canvas id="view"></canvas>
+  <div id="info">正在加载…</div>
+  <script type="module" src="/src/dev/viewer.ts"></script>
+</body>
+</html>
