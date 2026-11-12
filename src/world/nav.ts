@@ -15,7 +15,7 @@ export class NavGrid {
     this.g = new Float32Array(n); this.from = new Int32Array(n); this.state = new Uint8Array(n);
     const pad = 0.55;
     for (const b of col.boxes) {
-      if (b.minY > 1.9 || b.maxY < 0.5) continue;
+      if (b.noNav || b.minY > 1.9 || b.maxY < 0.5) continue;
       const x0 = Math.max(0, Math.floor((b.minX - pad - minX) / this.cell));
       const x1 = Math.min(this.w - 1, Math.floor((b.maxX + pad - minX) / this.cell));
       const z0 = Math.max(0, Math.floor((b.minZ - pad - minZ) / this.cell));
