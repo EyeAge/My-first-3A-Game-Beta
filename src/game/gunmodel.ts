@@ -299,9 +299,10 @@ export function buildGun() {
     mag: new THREE.MeshPhysicalMaterial({ color: 0x64676a, roughness: 0.55, metalness: 0.8, vertexColors: true, ...metal, normalScale: ns(0.1), envMapIntensity: 1.5, ...wet }),
     dark: new THREE.MeshStandardMaterial({ color: 0x050506, roughness: 0.95, metalness: 0 }),
     void: new THREE.MeshBasicMaterial({ color: 0x020203, fog: false }), // 孔洞内部：不受任何灯光影响的纯黑
-    // 手套：手背和手指是橄榄色织物，虎口和掌根是黑色合成革，护指节是硬橡胶
-    fabric: new THREE.MeshStandardMaterial({ color: 0x4d4a3c, roughness: 0.94, metalness: 0, normalMap: weave, normalScale: ns(0.55) }),
-    leather: new THREE.MeshStandardMaterial({ color: 0x1a1a1c, roughness: 0.6, metalness: 0, normalMap: grain.normalMap, normalScale: ns(0.08), envMapIntensity: 1.2 }),
+    // 手套：黑色皮革。细密的皮纹 + 中等粗糙度，路灯下会有一条柔和的高光；外面同样裹一层带水珠的水膜
+    fabric: new THREE.MeshPhysicalMaterial({ color: 0x141415, roughness: 0.5, metalness: 0, normalMap: grain.normalMap, normalScale: ns(0.2), envMapIntensity: 1.5, ...wet, clearcoat: 0.35 }),
+    // 虎口和掌根的加厚补强：同样是黑皮，更哑一些
+    leather: new THREE.MeshStandardMaterial({ color: 0x0e0e0f, roughness: 0.72, metalness: 0, normalMap: grain.normalMap, normalScale: ns(0.3), envMapIntensity: 1.1 }),
     guard: new THREE.MeshStandardMaterial({ color: 0x111113, roughness: 0.42, metalness: 0.05, envMapIntensity: 1.3 }),
     strap: new THREE.MeshStandardMaterial({ color: 0x1d1e1d, roughness: 0.92, metalness: 0, normalMap: weave, normalScale: ns(0.7) }),
     sleeve: new THREE.MeshStandardMaterial({ map: camo(), roughness: 0.95, metalness: 0, normalMap: weave, normalScale: ns(0.5) }),
