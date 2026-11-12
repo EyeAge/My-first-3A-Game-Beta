@@ -3,7 +3,7 @@ import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { clamp } from '../core/math';
 import { DECALS, decal, label, labelMaterial, type LabelOpts, type Patch } from '../render/labels';
 import { emissive } from '../render/surfaces';
-import { Kit, noise3, type Mat, type PropModel, type Tint, type V3 } from './kit';
+import { Kit, noise3, type LocalBox, type Mat, type PropModel, type Tint, type V3 } from './kit';
 
 // 内燃平衡重式叉车。
 //
@@ -23,8 +23,11 @@ import { Kit, noise3, type Mat, type PropModel, type Tint, type V3 } from './kit
 //   1. 仪表板在参考里转错了 90°，成了竖插在斜面上的薄片，这里让它平贴在斜面上、正对司机；
 //   2. 两块踏板在参考里埋在前围肚子里，这里往后挪到脚能踩到的地方；
 //   3. 轮胎和轮辋的深浅本来想按"离轮心多远"来分，参考里拿错了坐标，结果整只轮子一个色，这里按原意算。
-// 还有一处是照原样搭出来以后，在查看器里看到悬空才改的：
-//   4. 护顶架的前立柱站在前围侧面之外，脚板悬空 —— 在脚板下面补了一块支座。
+// 后四处是照原样搭出来以后，在查看器里看到悬空、看不见或者穿帮才改的：
+//   4. 护顶架的前立柱站在前围侧面之外，脚板悬空 —— 在脚板下面补了一块支座；
+//   5. "最大载重"那行字喷在门架下横梁的背面，紧贴着底盘前脸，哪个角度都看不见 —— 改喷到上横梁的背面；
+//   6. 两根液压软管的下端悬在半空 —— 补了一个埋在前围里的起点；
+//   7. 倾斜油缸的缸筒从前围侧面冒出 1 毫米 —— 往里收了 5 毫米。
 
 const HALF_PI = Math.PI / 2;
 const PAINT = 'paint_yellow'; // 车身漆
@@ -498,6 +501,99 @@ function addGasTank(k: Kit) {
   });
 }
 
+/**
+ * 一条起升链条（板式链）：一节一节的小方块，一宽一窄交替。
+ * 路线：从货叉架往上 → 绕过内门架顶上的链轮 → 从后面垂下来。
+ */
+function addChain(k: Kit, z: number, carriageLift: number, mastLift: number) {
+  const top = 1.9 + mastLift, wheelRadius = 0.055; // 链轮中心的高度、链条绕链轮的半径
+  const route: [number, number][] = [[0.725, 0.5 + carriageLift], [0.725, top]];
+  for (let a = 0.5; a < Math.PI; a += 0.55) route.push([0.67 + Math.cos(a) * wheelRadius, top + Math.sin(a) * wheelRadius]);
+  route.push([0.615, top], [0.615, 1.0]);
+  let count = 0;
+  for (let i = 0; i + 1 < route.length; i++) {
+    const [ax, ay] = route[i], [bx, by] = route[i + 1];
+    const links = Math.max(1, Math.round(Math.hypot(bx - ax, by - ay) / 0.058)); // 一节大约 5.8 厘米
+    for (let j = 0; j < links; j++, count++) {
+      const from = j / links, to = (j + 0.86) / links; // 每节只占 86%，节与节之间留一条缝
+      const wide = count % 2 === 1;
+      k.bar('steel_worn', [ax + (bx - ax) * from, ay + (by - ay) * from, z], [ax + (bx - ax) * to, ay + (by - ay) * to, z], 0.011, wide ? 0.034 : 0.022, { plain: true, tint: wide ? 0.55 : 0.75 });
+    }
+  }
+  k.cyl(STEEL, wheelRadius - 0.006, 0.04, 0.67, top, z, { axis: 'z', seg: 12, tint: 0.7 }); // 链轮
+}
+
+/**
+ * 门架。两级：外门架固定在车头，内门架套在外门架的槽钢里可以往上抽。
+ * 货叉架每升高 1 米，内门架只升高半米 —— 链条绕过内门架顶上的链轮，一头拴在货叉架上，是个动滑轮。
+ * carriageLift 是货叉架抬高了多少，mastLift 是内门架抬高了多少。
+ */
+function addMast(k: Kit, shade: () => number, carriageLift: number, mastLift: number) {
+  const back = 0.6, front = 0.73, outside = 0.375; // 外门架槽钢：x 从 0.60 到 0.73，外侧面在 z = ±0.375
+  const bottom = 0.08, top = 2.02;
+  for (const side of [1, -1]) {
+    // 外门架立柱：槽钢，开口朝车的中线。截面画在 (x, z) 平面里：腹板厚 14 毫米，两条翼缘各宽 65 毫米
+    const zo = side * outside, zi = zo - side * 0.065, zw = zo - side * 0.014;
+    const section: [number, number][] = [[back, zo], [front, zo], [front, zi], [front - 0.014, zi], [front - 0.014, zw], [back + 0.014, zw], [back + 0.014, zi], [back, zi]];
+    // 挤出件是"在 xy 平面里画、沿 z 拉厚"。把截面的 z 取反当成 y 来画，再绕 x 轴转 −90°，拉厚的方向就立起来变成了高度
+    k.extrude(STEEL, section.map(([x, z]) => [x, -z]), top - bottom, { soft: 0, rot: [-HALF_PI, 0, 0], pos: [0, (bottom + top) / 2, 0], tint: shade() });
+    k.box(STEEL, 0.085, 1.86, 0.036, 0.665, 0.13 + mastLift + 0.93, side * 0.335, { c: 0.006, tint: shade() * 1.25 }); // 内门架立柱：嵌在槽里，被滚轮磨得比别处亮
+    k.decal('hazard_general', 0.1, [0.665, 1.3, side * (outside + 0.002)], [0, side > 0 ? 0 : Math.PI, 0]);            // 外侧的黄三角警示贴
+
+    // 倾斜油缸：从车身斜着顶住门架，让门架前后倾。粗的是缸筒（藏在前围里面），细的亮的是活塞杆（从前围的前脸伸出来）。
+    // 缸筒的末端在参考里是 z=0.317，半径 0.034 的缸筒会从前围的侧面（z=0.35）冒出 1 毫米的一个黑点；这里往里收 5 毫米
+    const rodStart: V3 = [0.5, 0.777, side * 0.312];
+    k.tube(STEEL, [0.36, 0.66, side * 0.3], rodStart, 0.034, { seg: 8, cap: true, tint: 0.55 });
+    k.tube('steel_bare', rodStart, [0.6, 0.86, side * 0.33], 0.018, { seg: 6 });
+
+    addChain(k, side * 0.13, carriageLift, mastLift);
+  }
+  k.box(STEEL, 0.04, 0.09, 0.78, back - 0.012, 1.96, 0, { c: 0.008, tint: shade() });  // 外门架上横梁
+  k.box(STEEL, 0.04, 0.12, 0.78, back - 0.012, 0.42, 0, { c: 0.008, tint: shade() });  // 外门架下横梁
+  k.box(STEEL, 0.07, 0.09, 0.66, 0.665, 1.99 + mastLift, 0, { c: 0.008, tint: shade() }); // 内门架上横梁，跟着内门架升
+  // 起升油缸：立在两根立柱正中。缸筒不动，镀铬的活塞杆顶着内门架的上横梁，内门架升多少它就伸出多少
+  k.cyl(STEEL, 0.048, 1.15, 0.645, 0.72, 0, { seg: 10, tint: 0.6 });
+  k.cyl(STEEL, 0.055, 0.05, 0.645, 1.3, 0, { seg: 10, tint: 0.5 }); // 缸口的压盖
+  const rod = 0.64 + mastLift;
+  k.cyl('steel_bare', 0.027, rod, 0.645, 1.31 + rod / 2, 0, { seg: 8, open: true });
+  // 载重铭文：喷在外门架横梁朝司机的一面。
+  // 参考把它喷在下横梁上（y=0.42），可那里离底盘的前脸只有不到两厘米，从哪个角度都看不见；这里改喷到上横梁，司机一抬头就能看到
+  fitLabel(k, '最大载重2500千克', { color: 'yellow', font: 'stencil', distress: 0.3 }, 0.5, 0.05, [back - 0.033, 1.96, 0], [0, -HALF_PI, 0]);
+  // 两根液压软管：从前围里钻出来，翻过内门架顶，垂到货叉架上。门架和货叉架升起来的时候，中间几个点跟着往上走。
+  // 第一个点是这里补的：参考的软管从 (0.60, 1.25) 凭空开始，下端悬在前围上方；补一个埋在前围里的起点，管子就是从车身里出来的了
+  for (const z of [0.21, 0.245]) {
+    softHose(k, 'rubber', [[0.5, 1.03, z], [0.6, 1.25, z], [0.59, 1.65 + mastLift * 0.6, z], [0.655, 1.86 + mastLift, z + 0.005], [0.735, 1.6 + mastLift * 1.2, z], [0.74, 0.56 + carriageLift, z]], 0.011);
+  }
+}
+
+/** 货叉架（在门架上上下滑的那个框）、挡货架（防止货往司机这边倒的栅栏）和两根 L 形货叉。整体抬高 carriageLift。 */
+function addCarriage(k: Kit, shade: () => number, carriageLift: number) {
+  k.at([0, carriageLift, 0], null, () => {
+    for (const y of [0.18, 0.56]) k.box(STEEL, 0.04, 0.1, 1.02, 0.755, y, 0, { c: 0.008, tint: shade() }); // 上下两根横梁，货叉就挂在它们上面
+    k.box('hazard_stripes', 0.003, 0.06, 0.4, 0.7765, 0.56, 0, { plain: true, tint: 0.9 });                // 上横梁正面的警示条
+    for (const side of [1, -1]) {
+      k.box(STEEL, 0.03, 0.5, 0.06, 0.745, 0.37, side * 0.3, { c: 0.006, tint: shade() });     // 侧板，把两根横梁连成一个框
+      k.box(STEEL, 0.11, 0.36, 0.022, 0.685, 0.37, side * 0.305, { c: 0.005, tint: shade() }); // 滚轮座：往后伸进门架的槽里
+      k.cyl('steel_worn', 0.04, 0.03, 0.67, 0.26, side * 0.325, { axis: 'z', seg: 10, tint: 0.7 }); // 滚轮
+      k.box(STEEL, 0.03, 0.78, 0.04, 0.755, 1.0, side * 0.5, { c: 0.006, tint: shade() });     // 挡货架两边的立柱
+    }
+    k.box(STEEL, 0.03, 0.04, 1.04, 0.755, 1.39, 0, { c: 0.006, tint: shade() }); // 挡货架顶梁
+    k.box(STEEL, 0.02, 0.03, 1.0, 0.755, 1.0, 0, { c: 0.004, tint: shade() });   // 挡货架中梁
+    for (let i = -2; i <= 2; i++) k.box(STEEL, 0.02, 0.76, 0.02, 0.755, 1.0, i * 0.165, { c: 0.004, tint: shade() }); // 五根竖条
+
+    for (const side of [1, -1]) {
+      // 货叉：L 形的侧面轮廓拉成 10 厘米宽。水平的叉面长 0.92，根部厚 4.6 厘米、到叉尖只剩 1 厘米；竖着的叉背高 0.62
+      k.extrude('steel_worn', [[0.777, 0.035], [1.45, 0.035], [1.7, 0.041], [1.7, 0.051], [0.87, 0.081], [0.826, 0.11], [0.822, 0.655], [0.777, 0.655]], 0.1, {
+        soft: 0.45, pos: [0, 0, side * 0.26],
+        // 根部暗，越到叉尖越亮：叉尖天天往托盘里插，磨得发亮。再乘一层细碎的深浅，像一道道划痕
+        tint: (x, _y, z) => (0.5 + 0.5 * clamp((x - 0.8) / 0.9, 0, 1)) * (0.8 + 0.2 * noise3(x * 14, z * 30 + side, 0)),
+      });
+      k.box(STEEL, 0.075, 0.05, 0.112, 0.772, 0.635, side * 0.26, { c: 0.006, tint: 0.55 }); // 上挂钩：货叉靠它钩在上横梁上
+      k.box(STEEL, 0.03, 0.04, 0.112, 0.79, 0.13, side * 0.26, { c: 0.006, tint: 0.55 });    // 下挂钩
+    }
+  });
+}
+
 // ====================================================================== 整车
 
 /**
@@ -526,11 +622,33 @@ export function buildForklift(o: { seed?: number; forksUp?: number; interior?: b
   addDashboard(k);
   addOverheadGuard(k, shade);
   addGasTank(k);
+  addMast(k, shade, carriageLift, mastLift);
+  addCarriage(k, shade, carriageLift);
+
+  // 碰撞盒。不是一个大方块，而是十一个小盒子：驾驶室是镂空的 —— 子弹能从立柱之间穿过去，人可以躲在配重后面。
+  // 货叉落地的时候，货叉那个盒子只有 10 厘米高，摆放时会被当成"可以直接走过去"而跳过（见 propfield.ts）。
+  const boxes: LocalBox[] = [
+    { min: [-1.7, 0, -0.6], max: [0.58, 1.24, 0.6], surface: 'metal' },                                    // 车身：配重、机罩、前围
+    { min: [-1.56, 1.24, -0.4], max: [-1.22, 1.6, 0.4], surface: 'metal' },                                // 气罐
+    { min: [-0.88, 1.24, -0.24], max: [-0.7, 1.66, 0.24], surface: 'rubber' },                             // 座椅靠背
+    { min: [0.56, 0, -0.42], max: [0.78, 2.04 + mastLift, 0.42], surface: 'metal' },                       // 门架
+    { min: [0.72, carriageLift, -0.53], max: [0.8, carriageLift + 1.42, 0.53], surface: 'metal' },         // 货叉架和挡货架
+    { min: [0.8, carriageLift, -0.33], max: [1.7, carriageLift + 0.1, 0.33], surface: 'metal' },           // 货叉
+    { min: [-1.02, 2.0, -0.5], max: [0.32, 2.1, 0.5], surface: 'metal' },                                  // 顶棚
+  ];
+  for (const side of [1, -1]) {
+    // 四根立柱各一个细长的盒子，在 z 方向从 inner 到 0.5。盒子的 min 必须比 max 小，所以 −z 那一侧要把两头对调
+    const zRange = (inner: number) => (side > 0 ? [inner, 0.5] : [-0.5, -inner]);
+    const [rear0, rear1] = zRange(0.41), [front0, front1] = zRange(0.37);
+    boxes.push(
+      { min: [-1.03, 1.0, rear0], max: [-0.92, ROOF, rear1], surface: 'metal' },  // 后立柱
+      { min: [0.24, 1.08, front0], max: [0.5, ROOF, front1], surface: 'metal' },  // 前立柱（斜的，盒子把它整个包住）
+    );
+  }
 
   // 占地 3.4 × 1.25 米；高度随货叉抬升而变：平时是护顶架和警示灯（2.2），抬高以后是挡货架或者内门架的顶
   const height = Math.max(2.2, 0.06 + carriageLift + 1.36, 2.04 + mastLift);
-  // 碰撞盒先不给：零件箱会拿整个外包盒顶着。等整车搭完，再换成一组贴身的小盒子
-  const model = k.finish({ size: [3.4, height, 1.25], surface: 'metal' });
+  const model = k.finish({ size: [3.4, height, 1.25], boxes });
   applyTireUv(model.group, tireUvs);
   return model;
 }
