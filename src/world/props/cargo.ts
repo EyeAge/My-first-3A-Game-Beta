@@ -626,6 +626,275 @@ export function ibcTote(o: CargoOpts = {}): PropModel {
   });
 }
 
+// ====================================================================== 纸箱堆
+
+interface CartonSpec {
+  /** 压瘪的程度 0–1：上半截塌下去、往一边歪。 */
+  crush?: number;
+  /** 受潮线的高度（占箱高的比例）：这以下的纸板吸了水，颜色变深。 */
+  damp?: number;
+  /** 敞口：没有顶面，四片箱盖各自张开。 */
+  open?: boolean;
+  /** 正面的印字（会连带一张白色的运单标签）。 */
+  label?: string;
+  /** 两个侧面印向上的箭头。 */
+  arrow?: boolean;
+  /** 整只箱子的深浅。 */
+  shade?: number;
+}
+/** 往零件箱里放一只纸箱：长 L × 高 H × 宽 W，底面中心在 pos，按 rot 转。 */
+function addCarton(k: Kit, L: number, H: number, W: number, pos: V3, rot: V3, s: CartonSpec = {}) {
+  const crush = s.crush ?? 0, shade = s.shade ?? 1, wob = k.rng() * 40, pose = matrixOf(pos, rot);
+  // 压瘪：越靠上塌得越多（t² 增长），塌的量沿长度方向不均匀（一头塌得多）；中段往外鼓，整体往 +x 歪
+  const squash = (p: THREE.Vector3) => {
+    if (!crush) return;
+    const t = clamp(p.y / H, 0, 1);
+    p.y -= crush * H * 0.32 * t * t * (0.55 + 0.45 * Math.cos(((Math.PI * p.x) / L) * 0.9 + 0.5)) * (0.8 + 0.2 * Math.cos((Math.PI * p.z) / W));
+    p.z *= 1 + 0.1 * crush * Math.sin(Math.PI * t);
+    p.x += 0.12 * crush * H * t + 0.02 * crush * Math.sin(Math.PI * t) * Math.sign(p.x);
+  };
+  const g = softBox(L, H, W, 0.007, 4, 5, 4, s.open ? 'top' : undefined).translate(0, H / 2, 0);
+  if (crush) smoothNormals(deform(g, squash));
+  const dampY = (s.damp ?? 0.3) * H;
+  k.push(pos, rot);
+  k.add('cardboard', g, {
+    tint: inLocal(pose, (x, y, z) => {
+      // 受潮线不是一条直线：用噪声把它上下推几厘米。dry 在线以上是 1、以下是 0
+      const dry = smoothstep(dampY - 0.03, dampY + 0.04, y + 0.08 * (noise3(x * 6 + wob, y * 3, z * 6 + wob) - 0.5));
+      const c = (0.86 + 0.14 * noise3(x * 13, y * 13 + wob, z * 13)) * shade;
+      return [c * (0.5 + 0.5 * dry), c * (0.47 + 0.53 * dry), c * (0.42 + 0.58 * dry)];
+    }),
+  });
+  const skin = 0.0025; // 胶带、标签比纸板面高出这么多
+  if (s.open) {
+    // 箱子里面：一张往下沉的"箱底"和四面朝里的内壁，都压得很暗（里面照不到光）
+    const depth = Math.min(0.16, H * 0.6);
+    k.plane('cardboard', L - 0.012, W - 0.012, [0, H - depth, 0], { rot: [-HALF_PI, 0, 0], tint: 0.45 * shade });
+    for (const [a, w, off] of [[0, L, W / 2], [Math.PI, L, W / 2], [HALF_PI, W, L / 2], [-HALF_PI, W, L / 2]])
+      k.plane('cardboard', w - 0.012, depth, [Math.sin(a) * (off - 0.006), H - depth / 2, Math.cos(a) * (off - 0.006)], { rot: [0, a + Math.PI, 0], tint: 0.55 * shade });
+    // 四片箱盖：长边的两片分两节（中间有一道折痕），短边的两片是一整片；张开的角度各自随机
+    for (const side of [1, -1]) {
+      const a = k.range(0.3, 1.9), len = W / 2 - 0.01;
+      k.strip('cardboard', [[0, H, (side * W) / 2], [0, H + Math.sin(a) * len * 0.5, side * (W / 2 + Math.cos(a) * len * 0.5)], [0, H + Math.sin(a) * len, side * (W / 2 + Math.cos(a) * len + 0.01)]], [L / 2 - 0.004, 0, 0], { tint: 0.9 * shade, cast: true });
+    }
+    for (const side of [1, -1]) {
+      const a = k.range(0.9, 2.3), len = W / 2 - 0.02;
+      k.strip('cardboard', [[(side * L) / 2, H, 0], [side * (L / 2 + Math.cos(a) * len), H + Math.sin(a) * len, 0]], [0, 0, W / 2 - 0.004], { tint: 0.82 * shade, cast: true });
+    }
+  } else {
+    // 封箱胶带：沿箱顶中线贴过去，两头各垂下 7.5 厘米。箱子压瘪了，胶带跟着一起变形
+    const tape: V3[] = [[-L / 2 - skin, H - 0.075, 0]];
+    for (let i = 0; i <= 8; i++) tape.push([(-0.5 + i / 8) * (L + 2 * skin), H + skin, 0]);
+    tape.push([L / 2 + skin, H - 0.075, 0]);
+    const p = new THREE.Vector3();
+    for (const pt of tape) { p.set(...pt); squash(p); pt[0] = p.x; pt[1] = p.y + (crush ? 0.004 : 0); pt[2] = p.z; }
+    k.strip('polymer_tan', tape, [0, 0, 0.025], { tint: 0.9 });
+  }
+  const front = W / 2 + skin;
+  if (s.label && !crush) {
+    const ink: LabelOpts = { color: 'black', font: 'sans', distress: 0.3 };
+    text(k, s.label, ink, L * 0.6, Math.min(0.055, H * 0.2), [-L * 0.1, H * 0.62, front]);
+    k.plane('paint_white', 0.11, 0.075, [L * 0.26, H * 0.3, front - 0.001], { tint: 0.9, cast: false }); // 运单标签
+    text(k, '4 019 772', { ...ink, distress: 0.15 }, 0.095, 0.022, [L * 0.26, H * 0.3, front + 0.0006]);
+  }
+  if (s.arrow && !crush) {
+    const h = Math.min(0.09, H * 0.3);
+    for (const side of [1, -1]) k.decal('arrow_up', h * 0.62, [side * (L / 2 + skin), H * 0.55, side * W * 0.2], [0, side * HALF_PI, 0], h);
+  }
+  k.pop();
+}
+
+/** 纸箱堆：6 只大小不一的纸箱 —— 两只打底、一只压瘪的、一只敞口的、一只小盒、一只歪倒在前面。占地 1.0 × 0.8 × 0.8 米。3 个个体。 */
+export function cardboardBoxes(o: CargoOpts = {}): PropModel {
+  const v = variantOf(o.seed, 3);
+  return cached(`cardboard_boxes|${v}${tag(o)}`, () => {
+    const k = new Kit('cardboard_boxes', v, { interior: o.interior });
+    const nudge = () => k.range(-0.015, 0.015), shade = () => k.range(0.82, 1);
+    addCarton(k, 0.5, 0.38, 0.44, [-0.23 + nudge(), 0, -0.16 + nudge()], [0, k.range(-0.05, 0.05), 0], { damp: 0.45, label: '易碎物品', arrow: true, shade: shade() });
+    addCarton(k, 0.42, 0.33, 0.4, [0.26 + nudge(), 0, -0.17 + nudge()], [0, k.range(-0.08, 0.08), 0], { damp: 0.5, label: '保持干燥', shade: shade() });
+    addCarton(k, 0.46, 0.28, 0.4, [-0.24 + nudge(), 0.38, -0.15 + nudge()], [0, k.range(-0.2, 0.2), 0], { crush: 1, damp: 0.75, shade: shade() * 0.92 });
+    addCarton(k, 0.33, 0.26, 0.32, [0.27 + nudge(), 0.33, -0.18 + nudge()], [0, k.range(-0.3, 0.3), 0], { open: true, damp: 0.1, arrow: true, shade: shade() });
+    addCarton(k, 0.3, 0.16, 0.24, [-0.26 + nudge(), 0.565, -0.16 + nudge()], [0.03, k.range(-0.5, 0.5), -0.09], { damp: 0.2, label: 'HX-2291', shade: shade() });
+    // 歪倒的那只：绕 x 轴翻了 0.62 弧度，靠在后面两只箱子上。底面中心抬高 0.087 = 半个箱宽 × sin(0.62)，前下方那条棱正好着地
+    addCarton(k, 0.36, 0.26, 0.3, [0.06 + nudge(), 0.087, 0.2], [0.62, k.range(-0.25, 0.25), 0], { damp: 0.9, crush: 0.25, shade: shade() * 0.85 });
+    return k.finish({ size: [1, 0.8, 0.8], boxes: [{ min: [-0.5, 0, -0.4], max: [0.5, 0.8, 0.4] }], surface: 'wood' });
+  });
+}
+
+// ====================================================================== 盖防水布的货
+
+/**
+ * 盖着防水布的一堆货，2.4 × 1.5 × 1.4 米：两只托盘上 4 个高矮不一的货块，一张布搭在上面，
+ * 四周垂下裙边，两条橙色捆扎带横着勒住、一根细绳纵向压着。3 个个体。
+ */
+export function tarpCargo(o: CargoOpts = {}): PropModel {
+  const v = variantOf(o.seed, 3);
+  return cached(`tarp_cargo|${v}${tag(o)}`, () => {
+    const k = new Kit('tarp_cargo', v, { interior: o.interior }), wob = v * 1.7;
+    const PALLET_H = 0.144;
+    // 四个货块 [x0, x1, z0, z1, 顶面高度]
+    const blocks = [
+      [-1.06, -0.12, -0.58, 0.58, k.range(0.98, 1.12)],
+      [-0.06, 1.06, -0.58, 0.12, k.range(1.32, 1.42)],
+      [0.02, 0.62, 0.16, 0.58, k.range(0.72, 0.86)],
+      [0.66, 1.06, 0.18, 0.56, k.range(0.5, 0.62)],
+    ];
+    for (const x of [-0.6, 0.6]) k.at([x, 0, 0], null, () => addPallet(k));
+    for (const [x0, x1, z0, z1, top] of blocks) {
+      const w = x1 - x0, d = z1 - z0, h = top - PALLET_H, cx = (x0 + x1) / 2, cz = (z0 + z1) / 2, shade = k.range(0.7, 0.95);
+      // 画出来的货块比"撑起布的货块"四周各小 3 厘米、矮 4 厘米：布面的网格一格有 10 厘米宽，
+      // 在货块的棱上是斜着切过去的，货块要是做足尺寸，棱角会从布里戳出来
+      k.box('wood_pallet', w - 0.06, h - 0.04, d - 0.06, cx, PALLET_H + (h - 0.04) / 2, cz, { c: 0.006, tint: [shade, shade * 0.95, shade * 0.88] });
+      k.box('wood_pallet', w + 0.012, 0.07, d + 0.012, cx, PALLET_H + 0.04, cz, { plain: true, tint: shade * 0.75 }); // 底下一圈垫木，从裙边底下能看到
+    }
+
+    // ---- 布面：一张 22 × 14 格的"高度图"。
+    // 每个格点的高度 = 所有货块里"能把布顶到多高"的最大值：正上方就是货块顶面，离开货块边缘 d 米就垂下 0.95d + 0.9d²
+    // （先陡后更陡，像布从桌沿垂下来）；货与货之间于是自然形成下垂的沟。最后加一点噪声和正弦，是布面的小褶子。
+    const NX = 22, NZ = 14, X0 = -1.125, X1 = 1.125, Z0 = -0.645, Z1 = 0.645;
+    const drape = (x: number, z: number) => {
+      let h = 0.3;
+      for (const [x0, x1, z0, z1, top] of blocks) {
+        const d = Math.hypot(Math.max(x0 - x, 0, x - x1), Math.max(z0 - z, 0, z - z1));
+        h = Math.max(h, top - 0.95 * d - 0.9 * d * d);
+      }
+      return h + 0.016 + 0.022 * noise3(x * 5 + wob, z * 5, 0) + 0.008 * Math.sin(x * 23 + z * 7 + wob) + 0.006 * Math.sin(z * 31 - x * 5);
+    };
+    const P: number[] = [], I: number[] = [];
+    const at = (i: number, j: number) => j * (NX + 1) + i; // 布面格点 (i, j) 的顶点编号
+    for (let j = 0; j <= NZ; j++) for (let i = 0; i <= NX; i++) {
+      const x = X0 + ((X1 - X0) * i) / NX, z = Z0 + ((Z1 - Z0) * j) / NZ;
+      P.push(x, drape(x, z), z);
+    }
+    for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) I.push(at(i, j), at(i, j + 1), at(i + 1, j), at(i + 1, j), at(i, j + 1), at(i + 1, j + 1));
+
+    // ---- 裙边：沿布面的边缘走一圈，每个边缘点往外、往下再接 5 个点。
+    // rim 的每一项是 [格点 i, 格点 j, 朝外的方向 x, z]
+    const RINGS = 5, rim: number[][] = [];
+    for (let i = 0; i < NX; i++) rim.push([i, 0, 0, -1]);
+    for (let j = 0; j < NZ; j++) rim.push([NX, j, 1, 0]);
+    for (let i = NX; i > 0; i--) rim.push([i, NZ, 0, 1]);
+    for (let j = NZ; j > 0; j--) rim.push([0, j, -1, 0]);
+    const RIM = rim.length, firstSkirt = (NX + 1) * (NZ + 1), rimIndex = new Map<string, number>();
+    const lifted = k.rng() * RIM; // 下摆被掀起来的那一处（沿边缘的位置）
+    rim.forEach(([i, j, ox, oz], n) => {
+      rimIndex.set(`${i},${j}`, n);
+      const corner = (i === 0 || i === NX) && (j === 0 || j === NZ);
+      const dx = corner ? (i === 0 ? -0.707 : 0.707) : ox, dz = corner ? (j === 0 ? -0.707 : 0.707) : oz; // 四个角朝斜外方垂
+      const e = at(i, j), ex = P[e * 3], ey = P[e * 3 + 1], ez = P[e * 3 + 2];
+      let gap = Math.abs(n - lifted);
+      gap = Math.min(gap, RIM - gap);
+      // 下摆离地的高度：17 厘米上下起伏，在 lifted 附近鼓起一个 30 厘米的包（被风掀起的一角）
+      const hem = 0.17 + 0.07 * Math.sin(n * 0.55 + wob) + 0.07 * noise3(n * 0.31 + wob, 2.2, 0) + 0.3 * Math.exp((-gap * gap) / 14);
+      const phase = k.rng() * 6;
+      for (let r = 1; r <= RINGS; r++) {
+        const t = r / RINGS;
+        const y = ey + (hem - ey) * (0.25 * t + 0.75 * t * t) - (r === 1 ? 0.02 : 0); // 先缓后急地垂下去；第一圈再压低 2 厘米，折出"布沿"
+        const pinch = (i === 5 || i === 16) && ox === 0 ? 0.035 * Math.sin(Math.PI * t) : 0; // 捆扎带经过的两列：被勒进去一点
+        const wave = t * (0.04 * Math.sin(n * 1.7 + phase * 0.2) + 0.028 * Math.sin(n * 0.83 + 1.3 + wob)) + 0.02 * t * noise3(n * 0.8, r * 0.9 + wob, 0) - pinch; // 下摆的波浪：越往下摆动越大
+        const out = (r === 1 ? 0.028 : 0.04 + 0.03 * t) + wave + (corner ? 0.012 * t : 0);
+        P.push(clamp(ex + dx * out, -1.2, 1.2), y, clamp(ez + dz * out, -0.7, 0.7)); // 不许超出碰撞盒
+      }
+    });
+    const skirt = (n: number, ring: number) => (ring === 0 ? at(rim[n][0], rim[n][1]) : firstSkirt + n * RINGS + (ring - 1));
+    for (let n = 0; n < RIM; n++) for (let r = 0; r < RINGS; r++) {
+      const m = (n + 1) % RIM;
+      I.push(skirt(n, r), skirt(m, r), skirt(n, r + 1), skirt(m, r), skirt(m, r + 1), skirt(n, r + 1));
+    }
+    const cloth = new THREE.BufferGeometry();
+    cloth.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
+    cloth.setIndex(I);
+    cloth.computeVertexNormals();
+    // 布的正反两面都看得见（掀起的那一角能看到里子），所以用双面材质
+    k.add(surface('tarp', { vertexColors: true, doubleSide: true, interior: o.interior }), cloth, {
+      tint: (x, y, z) => (0.72 + 0.28 * noise3(x * 2.3 + wob, y * 2.3, z * 2.3)) * (0.9 + 0.1 * noise3(x * 11, y * 11, z * 11 + wob)) * (0.8 + 0.2 * smoothstep(0.15, 0.6, y)),
+    });
+
+    // ---- 捆扎带和绳子贴着布面走：取布面上的一串点，沿法线抬高几毫米
+    const N = cloth.getAttribute('normal');
+    const lift = (v: number, by: number): V3 => [P[v * 3] + N.getX(v) * by, P[v * 3 + 1] + N.getY(v) * by, P[v * 3 + 2] + N.getZ(v) * by];
+    const buckleDark = toward(0x3d4146, 0x8a8e92, 0.8);
+    for (const col of [5, 16]) {
+      const near = rimIndex.get(`${col},0`)!, far = rimIndex.get(`${col},${NZ}`)!;
+      const path: V3[] = [[P[skirt(near, RINGS) * 3], 0.11, -0.52]]; // 从布底下的托盘边钩出来
+      for (let r = RINGS; r >= 1; r--) path.push(lift(skirt(near, r), 0.007));
+      for (let j = 0; j <= NZ; j++) path.push(lift(at(col, j), 0.007));
+      for (let r = 1; r <= RINGS; r++) path.push(lift(skirt(far, r), 0.007));
+      path.push([P[skirt(far, RINGS) * 3], 0.11, 0.52]);
+      k.strip('paint_orange', path, [0.024, 0, 0], { tint: [1, 0.82, 0.5], cast: true });
+      const q = path[path.length - 4]; // 棘轮扣挂在 +z 一侧的裙边上
+      k.box('steel_worn', 0.065, 0.1, 0.03, q[0], q[1], q[2] + 0.014, { rot: [0.25, 0, 0], c: 0.006, tint: 0.8 });
+      k.box('steel_worn', 0.02, 0.09, 0.012, q[0] + 0.03, q[1] + 0.06, q[2] + 0.04, { rot: [0.9, 0, 0], c: 0.003, tint: buckleDark });
+    }
+    const ROW = 6, west = rimIndex.get(`0,${ROW}`)!, east = rimIndex.get(`${NX},${ROW}`)!;
+    const rope: V3[] = [[-1.1, 0.1, P[skirt(west, RINGS) * 3 + 2]]];
+    for (let r = RINGS; r >= 1; r -= 2) rope.push(lift(skirt(west, r), 0.012));
+    for (let i = 0; i <= NX; i += 2) rope.push(lift(at(i, ROW), 0.012));
+    for (let r = 1; r <= RINGS; r += 2) rope.push(lift(skirt(east, r), 0.012));
+    rope.push([1.1, 0.1, P[skirt(east, RINGS) * 3 + 2]]);
+    k.hose('rope', rope, 0.009, { seg: 4, steps: 44, tint: 0.85 });
+
+    const tallest = Math.max(...blocks.map((b) => b[4])) + 0.04;
+    return k.finish({ size: [2.4, 1.5, 1.4], boxes: [{ min: [-1.2, 0, -0.7], max: [1.2, tallest, 0.7] }], surface: 'dirt' });
+  });
+}
+
+// ====================================================================== 沙袋墙
+
+/**
+ * 一只沙袋的几何体：长 len × 高 h × 宽 wid 的圆角盒，再捏成"装了沙的袋子"：
+ * 两头收窄、两头往下塌、顶面中间鼓起来，最后用噪声把表面揉得坑坑洼洼。
+ * 底面虽然看不见，但不能省：阴影是用"背对着光的面"画的，从上往下照的光只认底面，
+ * 去掉底面，沙袋的影子就只剩一圈空心的轮廓。
+ */
+function sandbagGeo(k: Kit, len: number, h: number, wid: number) {
+  // 高度方向只切 2 格：袋子本来就扁，侧面"上圆角 — 腰线 — 下圆角"三圈顶点已经够圆了，比切 3 格省两成三角形
+  const g = softBox(len, h, wid, Math.min(h * 0.46, 0.075), 3, 2, 3);
+  const wob = k.rng() * 9, lean = k.range(-0.05, 0.05), sag = k.range(0.4, 1);
+  deform(g, (p) => {
+    const u = p.x / (len / 2), w = p.z / (wid / 2), t = p.y / (h / 2); // 都是 -1…1：沿长、宽、高
+    p.z *= (1 - 0.22 * Math.pow(Math.abs(u), 2.5)) * (t < 0 ? 1.05 : 1);    // 两头收窄；下半截被压得略宽
+    p.y = (p.y + h / 2) * (1 - 0.3 * Math.pow(Math.abs(u), 3)) - h / 2;     // 两头变薄
+    if (t > 0) p.y += 0.016 * Math.cos(HALF_PI * u) * Math.cos(HALF_PI * w); // 顶面中间鼓
+    p.y -= sag * 0.018 * u * u * (t > -0.9 ? 1 : 0) + lean * p.x * 0.3;     // 两头下垂；整只略微一头高一头低
+    const n = noise3(p.x * 9 + wob, p.y * 9, p.z * 9 + wob) - 0.5;
+    p.x += n * 0.014; p.z += n * 0.016;
+    if (t > -0.9) p.y += n * 0.014; // 贴地的那一圈不上下动，免得陷进下面一层
+  });
+  return smoothNormals(g);
+}
+
+export interface SandbagOpts extends CargoOpts { /** 垒几层，1–7，默认 5。 */ courses?: number }
+/** 沙袋墙，2.0 × 层数×0.18 × 0.6 米。像砌砖一样错缝：一层两排顺着放，一层一排横着放。3 个个体。 */
+export function sandbags(o: SandbagOpts = {}): PropModel {
+  const v = variantOf(o.seed, 3), courses = clamp(Math.round(o.courses ?? 5), 1, 7);
+  return cached(`sandbags|${courses}|${v}${tag(o)}`, () => {
+    const k = new Kit('sandbags', v, { interior: o.interior });
+    const COURSE = 0.18, burlap = recolored('glove_fabric', 0x8c7d5e, o); // 用布料的质感，换成麻袋的土黄色
+    const bag = (len: number, wid: number, at: V3, yaw: number) => {
+      const h = COURSE * k.range(1.02, 1.12);
+      const shade = k.rng() < 0.3 ? k.range(0.55, 0.75) : k.range(0.82, 1); // 三成的袋子是湿的，颜色深
+      const wob = k.rng() * 30;
+      const pos: V3 = [at[0] + k.range(-0.012, 0.012), at[1] + h / 2 - 0.004, at[2] + k.range(-0.012, 0.012)];
+      const rot: V3 = [k.range(-0.03, 0.03), yaw + k.range(-0.06, 0.06), 0];
+      k.add(burlap, sandbagGeo(k, len, h, wid), {
+        tint: (x, y, z) => { const n = noise3(x * 7 + wob, y * 7, z * 7); return [shade * (0.85 + 0.15 * n), shade * (0.84 + 0.15 * n), shade * (0.8 + 0.16 * n)]; },
+      }, matrixOf(pos, rot));
+      // 两头各一条缝口：袋口缝合后多出来的那一道边，横着伸出袋子一点点
+      k.at(pos, rot, () => {
+        for (const end of [1, -1]) k.strip(burlap, [[end * (len / 2 - 0.004), k.range(-0.008, 0.008), -wid * 0.27], [end * (len / 2 - 0.002), k.range(-0.008, 0.008), wid * 0.27]], [end * 0.009, 0.001, 0], { tint: shade * 0.9, cast: true });
+      });
+    };
+    for (let c = 0; c < courses; c++) {
+      const y = c * COURSE, top = c === courses - 1 && courses > 2; // 最上面一层少放一只：墙头有个缺口，不像刚码好的
+      if (c % 2 === 0) { for (let i = 0; i < 3; i++) for (const row of [1, -1]) if (!(top && i === 2 && row === 1)) bag(0.655, 0.3, [(i - 1) * 0.655, y, row * 0.148], 0); }
+      else for (let i = 0; i < 5; i++) if (!(top && i === 0)) bag(0.585, 0.385, [(i - 2) * 0.392, y, 0], HALF_PI);
+    }
+    const h = courses * COURSE;
+    return k.finish({ size: [2, h, 0.6], boxes: [{ min: [-1, 0, -0.3], max: [1, h, 0.3] }], surface: 'dirt' });
+  });
+}
+
 // ====================================================================== 轮胎堆
 
 /**
@@ -840,5 +1109,6 @@ export function trafficCone(o: TrafficConeOpts = {}): PropModel {
 /** 所有货物道具，按参考道具表里的名字登记。摆放的代码可以用名字取：CARGO.barrel({ color: 'red' })。 */
 export const CARGO: Record<string, (o?: any) => PropModel> = {
   barrel, pallet, pallet_stack: palletStack, crate_wood: crateWood, crate_stack: crateStack, ibc_tote: ibcTote,
-  tire_stack: tireStack, cable_reel: cableReel, jerry_can: jerryCan, traffic_cone: trafficCone,
+  cardboard_boxes: cardboardBoxes, tarp_cargo: tarpCargo, sandbags, tire_stack: tireStack, cable_reel: cableReel,
+  jerry_can: jerryCan, traffic_cone: trafficCone,
 };
