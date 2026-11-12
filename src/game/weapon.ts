@@ -30,6 +30,7 @@ export class Weapon {
   private dot: THREE.Object3D;
   private mag: THREE.Object3D; private bolt: THREE.Object3D; private handle: THREE.Object3D; private left: THREE.Object3D;
   private boltK = 0;
+  private torch: THREE.SpotLight; lightOn = false;
   private gun: THREE.Group;
   private hit: RayHit = { t: 0, nx: 0, ny: 0, nz: 0 };
 
@@ -38,6 +39,10 @@ export class Weapon {
     const g = this.gun = built.gun;
     this.mag = built.mag; this.bolt = built.bolt; this.handle = built.handle; this.left = built.left; this.dot = built.dot;
     this.muzzle.position.set(0, 0, built.muzzleZ - 0.01); g.add(this.muzzle);
+    // 战术手电：一盏跟着枪口转的聚光灯。不投影子，开销很小
+    const torch = this.torch = new THREE.SpotLight(0xdfeaff, 0, 60, 0.34, 0.75, 1.5);
+    torch.position.copy(built.lightPos); torch.target.position.copy(built.lightPos).add(new THREE.Vector3(0.004, 0.002, -1));
+    g.add(torch, torch.target);
     // 夜里枪身是黑的，只靠环境光看不出细节：在枪的左上方挂一盏只照得到一米多远的小灯，专门给枪打轮廓光
     const fill = new THREE.PointLight(0xfff0dc, 2.2, 2, 2); fill.position.set(-0.25, 0.35, -0.15); this.view.add(fill);
     // 枪口焰：两片交叉的发光面片，只显示一两帧
@@ -53,7 +58,7 @@ export class Weapon {
     this.view.add(g);
   }
 
-  reset() { this.ammo = MAG; this.reserve = 120; this.reloading = 0; this.cooldown = 0; this.ads = 0; this.bloom = 0; this.hitMarker = 0; }
+  reset() { this.lightOn = false; this.torch.intensity = 0; this.ammo = MAG; this.reserve = 120; this.reloading = 0; this.cooldown = 0; this.ads = 0; this.bloom = 0; this.hitMarker = 0; }
   addReserve(n: number, cap = 180) { this.reserve = Math.min(cap, this.reserve + n); }
   get reloadProgress() { return this.reloading > 0 ? 1 - this.reloading / RELOAD : 0; }
 
@@ -65,6 +70,9 @@ export class Weapon {
     this.bloom = Math.max(0, this.bloom - dt * 2.2);
     const moveK = clamp(player.horizSpeed / 5, 0, 1.4);
     this.spread = (0.018 + moveK * 0.016 + (player.onGround ? 0 : 0.03)) * (1 - this.ads * 0.9) + this.bloom * 0.012 * (1 - this.ads * 0.6);
+
+    if (input.pressed('KeyF')) { this.lightOn = !this.lightOn; audio.empty(); }
+    this.torch.intensity = damp(this.torch.intensity, this.lightOn ? 130 : 0, 30, dt);
 
     // ---- 换弹
     if (this.reloading > 0) {
@@ -152,7 +160,7 @@ export class Weapon {
       const toMag = clamp(p / 0.14, 0, 1) * (1 - clamp((p - 0.62) / 0.1, 0, 1)), toHandle = clamp((p - 0.66) / 0.08, 0, 1) * (1 - clamp((p - 0.9) / 0.1, 0, 1));
       const pull = p > 0.76 && p < 0.9 ? Math.sin(((p - 0.76) / 0.14) * Math.PI) : 0;
       // 这几个部件的坐标单位是毫米（枪模内部的图纸坐标）
-      this.left.position.set(-toHandle * 12, -toMag * (78 + out * 190) + toHandle * 52, toMag * 132 + toHandle * (292 + pull * 32));
+      this.left.position.set(toMag * 20 - toHandle * 5, -toMag * (40 + out * 190) + toHandle * 106, toMag * 152 + toHandle * (318 + pull * 32));
       this.left.rotation.z = toHandle * 0.5;
       this.handle.position.z = pull * 32;
     } else { this.mag.position.set(0, 0, 0); this.left.position.set(0, 0, 0); this.left.rotation.z = 0; this.handle.position.z = 0; }

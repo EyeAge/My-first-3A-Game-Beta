@@ -114,7 +114,7 @@ export class Input {
     const edge = (i: number) => (now[i] && !this.padPrev[i] ? 1 : !now[i] && this.padPrev[i] ? -1 : 0);
     if (now.some(Boolean) || mx || my || lx || ly) this.padActive = true;
     const tap = (i: number, ...codes: string[]) => { if (edge(i) === 1) for (const c of codes) this.pressedNow.add(c); };
-    tap(0, 'Space', 'PadA'); tap(1, 'PadB'); tap(2, 'KeyR'); tap(5, 'KeyV'); tap(9, 'Escape');
+    tap(0, 'Space', 'PadA'); tap(1, 'PadB'); tap(2, 'KeyR'); tap(5, 'KeyV'); tap(9, 'Escape'); tap(12, 'KeyF');
     if (edge(3)) this.setKey('KeyE', now[3]);
     if (edge(7)) this.fire = now[7] && this.enabled;
     if (edge(6)) this.ads = now[6] && this.enabled;
