@@ -8,7 +8,7 @@ import { barrierMesh, coneMesh, crateMesh, drumMesh, lightCones } from './props'
 import { reflectionUniforms, type ReflectionUniforms } from '../render/reflection';
 import { SUN_DIR } from './atmosphere';
 import { containerGeometry, doorTextures, frameTextures, RIBS, sideTextures, tintByAlpha, type Brand } from './container';
-import { asphaltTexture, corrugationNormal, signTexture, stencilTexture, windowsTexture } from './textures';
+import { asphaltTextures, corrugationNormal, paintWearTexture, signTexture, stencilTexture, windowsTexture } from './textures';
 
 // 激战港区 · 四号泊位。
 // 坐标约定：+x 是东（海在东边），-z 是北。玩家从西南角进场，撤离艇在码头南端。
@@ -49,11 +49,13 @@ export function buildPort(progress: (msg: string) => void): Port {
 
   // ---------------------------------------------------------------- 地面
   progress('正在生成港区地面');
-  const asphalt = asphaltTexture();
-  asphalt.repeat.set(70, 90);
-  const groundMat = new THREE.MeshStandardMaterial({ map: asphalt, roughness: 0.5, metalness: 0, envMapIntensity: 1.0 });
-  // 往标准材质里注入一段着色器：按世界坐标的噪声决定哪里是积水。
-  // 积水处粗糙度趋近 0，于是像镜子一样反射天空，这就是"湿地面"的全部秘密。
+  const asphalt = asphaltTextures();
+  asphalt.map.repeat.set(185, 240); asphalt.normalMap.repeat.set(185, 240); // 一张图铺 2.5 米见方，石子大约一两厘米
+  const groundMat = new THREE.MeshStandardMaterial({ map: asphalt.map, normalMap: asphalt.normalMap, normalScale: new THREE.Vector2(1.15, 1.15), roughness: 0.5, metalness: 0, envMapIntensity: 1.0 });
+  // 往标准材质里注入一段着色器，按世界坐标的噪声把地面分成三种状态：
+  //   · 积水：路面低洼的地方。水把石子全淹了，表面是平的，像镜子，雨点在上面砸出一圈圈涟漪
+  //   · 潮湿：积水周围一圈。颜色更深，石子尖还露着，反光是碎的
+  //   · 淋湿：其余的地方。粗糙，只有逆光看才有一层细碎的亮
   const reflection = reflectionUniforms();
   groundMat.onBeforeCompile = (sh) => {
     Object.assign(sh.uniforms, reflection);
@@ -67,7 +69,7 @@ export function buildPort(progress: (msg: string) => void): Port {
         float pnoise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
           return mix(mix(phash(i), phash(i+vec2(1,0)), f.x), mix(phash(i+vec2(0,1)), phash(i+vec2(1,1)), f.x), f.y); }
         float pfbm(vec2 p){ float a = 0.5, s = 0.0; for(int i=0;i<4;i++){ s += a*pnoise(p); p = p*2.03 + 5.3; a *= 0.5; } return s; }
-        float gPud;
+        float gPud; float gDamp; vec2 gRp;
         varying vec4 vRefl;
         uniform sampler2D tRefl; uniform float uReflOn; uniform float uReflTime;
         // 雨点打在积水上的涟漪：把水面分成格子，每格里有一圈按各自节奏不断扩散的环
@@ -79,23 +81,30 @@ export function buildPort(progress: (msg: string) => void): Port {
           return d / max(r, 1e-3) * sin(ring * 42.0) * smoothstep(0.07, 0.0, abs(ring)) * (1.0 - tt);
         }`)
       .replace('#include <map_fragment>', /* glsl */ `#include <map_fragment>
-        gPud = smoothstep(0.47, 0.6, pfbm(vWp.xz * 0.085));
-        diffuseColor.rgb *= mix(1.0, 0.4, gPud);`)
+        float low = pfbm(vWp.xz * 0.085) + (pnoise(vWp.xz * 0.9) - 0.5) * 0.07;   // 路面的高低：大的起伏加一点小的坑洼，积水的边缘才不是光溜溜的弧线
+        gPud = smoothstep(0.475, 0.535, low);
+        gDamp = smoothstep(0.34, 0.475, low);
+        gRp = (rip(vWp.xz * 1.4, uReflTime) + rip(vWp.xz * 2.3 + 7.0, uReflTime + 0.37) + rip(vWp.xz * 3.7 + 3.0, uReflTime + 0.71) * 0.6) * gPud;
+        diffuseColor.rgb *= mix(mix(1.0, 0.6, gDamp), 0.32, gPud);`)
       .replace('#include <roughnessmap_fragment>', /* glsl */ `float roughnessFactor = roughness;
         float gWet = pfbm(vWp.xz * 0.7 + 3.0);
-        roughnessFactor = mix(mix(0.62, 0.3, gWet), 0.03, gPud);`)
+        roughnessFactor = mix(mix(mix(0.8, 0.55, gWet), 0.34, gDamp), 0.03, gPud);`)
+      // 法线：积水里把石子的凹凸抹平（水面是平的），换成涟漪的起伏
+      .replace('#include <normal_fragment_maps>', /* glsl */ `#include <normal_fragment_maps>
+        vec3 waterN = normalize((viewMatrix * vec4(normalize(vec3(-gRp.x * 0.5, 1.0, -gRp.y * 0.5)), 0.0)).xyz);
+        normal = normalize(mix(normal, waterN, gPud));`)
       // 平面反射：用镜像相机拍到的画面替换掉"只有天空"的环境反射。越粗糙的地方采样越模糊的层级，占比也越低
       .replace('#include <lights_fragment_end>', /* glsl */ `#include <lights_fragment_end>
         if (uReflOn > 0.5) {
-          vec2 rp = (rip(vWp.xz * 1.4, uReflTime) + rip(vWp.xz * 2.3 + 7.0, uReflTime + 0.37)) * gPud;
-          vec2 rough = (vec2(pnoise(vWp.xz * 9.0), pnoise(vWp.xz * 9.0 + 31.0)) - 0.5) * (1.0 - gPud);
-          vec2 ruv = vRefl.xy / vRefl.w + rp * 0.02 + rough * 0.012;
-          vec3 refl = textureLod(tRefl, ruv, roughnessFactor * 4.5).rgb;
-          float fres = 0.04 + 0.96 * pow(1.0 - saturate(dot(normal, normalize(vViewPosition))), 5.0);
-          reflectedLight.indirectSpecular = mix(reflectedLight.indirectSpecular, refl * fres, 1.0 - smoothstep(0.4, 0.9, roughnessFactor));
+          // 没积水的地方，倒影被石子打散：按石子的法线把采样位置推开，越粗糙推得越远、图像也越糊
+          vec3 wn = (vec4(normal, 0.0) * viewMatrix).xyz;
+          vec2 ruv = vRefl.xy / vRefl.w + gRp * 0.02 + wn.xz * 0.05 * (1.0 - gPud);
+          vec3 refl = textureLod(tRefl, ruv, roughnessFactor * 5.0).rgb;
+          float fres = 0.04 + 0.96 * pow(1.0 - saturate(dot(normalize(vNormal), normalize(vViewPosition))), 5.0);
+          reflectedLight.indirectSpecular = mix(reflectedLight.indirectSpecular, refl * fres, 1.0 - smoothstep(0.25, 0.8, roughnessFactor));
         }`);
   };
-  groundMat.customProgramCacheKey = () => 'wet-ground-refl';
+  groundMat.customProgramCacheKey = () => 'wet-ground-refl-2';
   const ground = new THREE.Mesh(new THREE.PlaneGeometry(462, 600), groundMat);
   ground.rotation.x = -Math.PI / 2;
   ground.position.set(QUAY_X - 231, 0, 0);
@@ -427,7 +436,7 @@ export function buildPort(progress: (msg: string) => void): Port {
   marks.push({ x: QUAY_X - 1.8, z: 0, w: 0.3, l: 198, c: YEL }, { x: 27.4, z: 0, w: 0.2, l: 198, c: YEL });
   for (let z = -90; z <= 90; z += 20) marks.push({ x: 46, z, w: 22, l: 0.16, c: YEL });
   const markGeo = new THREE.PlaneGeometry(1, 1); markGeo.rotateX(-Math.PI / 2);
-  const markMesh = new THREE.InstancedMesh(markGeo, new THREE.MeshStandardMaterial({ roughness: 0.42, metalness: 0, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, transparent: true, opacity: 0.8 }), marks.length);
+  const markMesh = new THREE.InstancedMesh(markGeo, new THREE.MeshStandardMaterial({ roughness: 0.5, metalness: 0, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, transparent: true, opacity: 0.78, alphaMap: paintWearTexture(), depthWrite: false }), marks.length);
   marks.forEach((mk, i) => { markMesh.setMatrixAt(i, m4.compose(v1.set(mk.x, 0.012, mk.z), q.identity(), v2.set(mk.w, 1, mk.l))); markMesh.setColorAt(i, col.setHex(mk.c)); });
   markMesh.receiveShadow = true;
   group.add(markMesh);

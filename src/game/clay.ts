@@ -36,18 +36,19 @@ function coneDist(px: number, py: number, pz: number, c: Cone) {
  * cell 是格子的边长，越小越精细也越慢。
  */
 export function clayMesh(cones: Cone[], grooves: Groove[] = [], blend = 4.5, cell = 2.2) {
-  const W = 1.5; // 褶子的半宽
+  const W = blend / 3; // 褶子的半宽
+  const FAR = blend * 2; // 离表面这么远就不用细算了（单位跟着 blend 走：手用毫米，敌人用米）
   // 每段锥体先算一个包围球：离它很远的采样点根本不用算这一段，建模时间能省掉一大半
-  const bound = cones.map(([a, b, r1, r2]) => { const R = a.distanceTo(b) / 2 + Math.max(r1, r2) + 9; return [(a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2, R * R]; });
+  const bound = cones.map(([a, b, r1, r2]) => { const R = a.distanceTo(b) / 2 + Math.max(r1, r2) + FAR; return [(a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2, R * R]; });
   const field = (x: number, y: number, z: number) => {
-    let d = 9;
+    let d = FAR;
     for (let i = 0; i < cones.length; i++) {
       const bd = bound[i], bx = x - bd[0], by = y - bd[1], bz = z - bd[2];
       if (bx * bx + by * by + bz * bz > bd[3]) continue;
       const c = cones[i], k = c[4] ?? blend, e = coneDist(x, y, z, c), h = Math.max(k - Math.abs(d - e), 0) / k;
       d = Math.min(d, e) - h * h * k * 0.25; // 平滑取最小值：两个距离接近时再往里收一点，接缝处就鼓出一段过渡
     }
-    if (d < 4 && d > -4) for (const [at, dir, reach, depth] of grooves) {
+    if (d < FAR * 0.45 && d > -FAR * 0.45) for (const [at, dir, reach, depth] of grooves) {
       const px = x - at.x, py = y - at.y, pz = z - at.z, r2 = px * px + py * py + pz * pz;
       if (r2 > reach * reach) continue;
       const t = (px * dir.x + py * dir.y + pz * dir.z) / W, fade = 1 - Math.sqrt(r2) / reach;
@@ -57,7 +58,7 @@ export function clayMesh(cones: Cone[], grooves: Groove[] = [], blend = 4.5, cel
   };
   // 采样范围：包住所有锥体，再留一点余量
   const box = new THREE.Box3();
-  for (const [a, b, r1, r2] of cones) { const r = Math.max(r1, r2) + blend + cell * 2; for (const p of [a, b]) { box.expandByPoint(_v.copy(p).addScalar(r)); box.expandByPoint(_v.copy(p).addScalar(-r)); } }
+  for (const [a, b, r1, r2] of cones) { const r = Math.max(r1, r2) + cell * 3; for (const p of [a, b]) { box.expandByPoint(_v.copy(p).addScalar(r)); box.expandByPoint(_v.copy(p).addScalar(-r)); } }
   const nx = Math.ceil((box.max.x - box.min.x) / cell) + 1, ny = Math.ceil((box.max.y - box.min.y) / cell) + 1, nz = Math.ceil((box.max.z - box.min.z) / cell) + 1;
   const ox = box.min.x, oy = box.min.y, oz = box.min.z;
   const val = new Float32Array(nx * ny * nz), at = (i: number, j: number, k: number) => (k * ny + j) * nx + i;

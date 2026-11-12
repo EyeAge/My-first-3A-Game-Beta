@@ -56,20 +56,52 @@ export function corrugationNormal(ribs = 46) {
   return finish(c, false, true);
 }
 
-/** 沥青：深色底 + 细碎颗粒。积水是在着色器里做的，不在这张图上。 */
-export function asphaltTexture() {
-  const S = 512;
-  const { c, g } = canvas(S, S);
-  const img = g.createImageData(S, S);
-  const rng = mulberry32(42);
+/**
+ * 沥青路面：颜色图 + 法线图。
+ *
+ * 沥青是"黑色的胶 + 一粒粒碎石子"压出来的，表面其实坑坑洼洼。下雨之后它并不会变成镜子：
+ * 石子的尖还露在水膜外面，所以远看是一片细碎的闪光，只有真正积了水的坑才是平的镜面。
+ * 这张法线图画的就是那些石子；积水在哪里、有多平，是着色器按世界坐标另算的。
+ */
+export function asphaltTextures() {
+  const S = 512, rng = mulberry32(42);
+  // 高度：每颗石子是一个小鼓包，大小不一，密密地铺满
+  const h = new Float32Array(S * S);
+  for (let k = 0; k < 15000; k++) {
+    const cx = rng() * S, cy = rng() * S, rad = 1.2 + rng() * rng() * 4.2, top = 0.4 + rng() * 0.6, R = Math.ceil(rad);
+    for (let oy = -R; oy <= R; oy++) for (let ox = -R; ox <= R; ox++) {
+      const d = Math.hypot(ox, oy) / rad; if (d >= 1) continue;
+      const i = ((((cy + oy) | 0) + S) % S) * S + ((((cx + ox) | 0) + S) % S);
+      h[i] = Math.max(h[i], top * (1 - d * d));
+    }
+  }
+  const H = (x: number, y: number) => h[((y + S) % S) * S + ((x + S) % S)];
+  const col = canvas(S, S), nor = canvas(S, S);
+  const ci = col.g.createImageData(S, S), ni = nor.g.createImageData(S, S);
   for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
-    const n = fbm(x / 60, y / 60, 4) * 0.5 + rng() * 0.5;
-    const v = 34 + n * 38;
-    const i = (y * S + x) * 4;
-    img.data[i] = v; img.data[i + 1] = v * 1.01; img.data[i + 2] = v * 1.04; img.data[i + 3] = 255;
+    const i = (y * S + x) * 4, hv = h[y * S + x];
+    // 颜色：胶是近黑的，石子磨出来的顶是灰的，偶尔有一颗偏浅或偏褐
+    const patch = fbm(x / 70, y / 70, 3), stone = hv * hv, tint = vnoise(x / 3.1 + 40, y / 3.1);
+    const v = 26 + patch * 8 + stone * (20 + tint * 26);
+    ci.data[i] = v * (1 + (tint - 0.5) * 0.14); ci.data[i + 1] = v; ci.data[i + 2] = v * (1.03 - (tint - 0.5) * 0.1); ci.data[i + 3] = 255;
+    const dx = (H(x - 1, y) - H(x + 1, y)) * 1.5, dy = (H(x, y - 1) - H(x, y + 1)) * 1.5, l = Math.hypot(dx, dy, 1);
+    ni.data[i] = (dx / l * 0.5 + 0.5) * 255; ni.data[i + 1] = (-dy / l * 0.5 + 0.5) * 255; ni.data[i + 2] = (1 / l * 0.5 + 0.5) * 255; ni.data[i + 3] = 255;
+  }
+  col.g.putImageData(ci, 0, 0); nor.g.putImageData(ni, 0, 0);
+  return { map: finish(col.c, true, true), normalMap: finish(nor.c, false, true) };
+}
+
+/** 标线的磨损：一张灰度图当透明度用。车轮碾过的地方漆掉得多，露出下面的沥青。 */
+export function paintWearTexture() {
+  const S = 256, { c, g } = canvas(S, S), img = g.createImageData(S, S), rng = mulberry32(5);
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const n = fbm(x / 26, y / 26, 4), fine = rng();
+    const v = Math.max(0.12, Math.min(1, (n - 0.4) * 4.5)) * (0.75 + fine * 0.25) * (fine < 0.06 ? 0.3 : 1); // 大片的剥落 + 石子尖上磨掉的小点
+    const i = (y * S + x) * 4; img.data[i] = img.data[i + 1] = img.data[i + 2] = v * 255; img.data[i + 3] = 255;
   }
   g.putImageData(img, 0, 0);
-  return finish(c, true, true);
+  const t = finish(c, false, true); t.repeat.set(1, 1);
+  return t;
 }
 
 /** 通用标牌：港区里所有的告示、铭牌都用它生成。 */
