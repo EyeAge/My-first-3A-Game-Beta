@@ -96,7 +96,7 @@ export function paintWearTexture() {
   const S = 256, { c, g } = canvas(S, S), img = g.createImageData(S, S), rng = mulberry32(5);
   for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
     const n = fbm(x / 26, y / 26, 4), fine = rng();
-    const v = Math.max(0.12, Math.min(1, (n - 0.4) * 4.5)) * (0.75 + fine * 0.25) * (fine < 0.06 ? 0.3 : 1); // 大片的剥落 + 石子尖上磨掉的小点
+    const v = Math.max(0.3, Math.min(1, (n - 0.33) * 4.2)) * (0.75 + fine * 0.25) * (fine < 0.06 ? 0.3 : 1); // 大片的剥落 + 石子尖上磨掉的小点
     const i = (y * S + x) * 4; img.data[i] = img.data[i + 1] = img.data[i + 2] = v * 255; img.data[i + 3] = 255;
   }
   g.putImageData(img, 0, 0);
@@ -142,17 +142,27 @@ export function stencilTexture(text: string) {
   return finish(c);
 }
 
-/** 船楼和仓库的窗户：大部分黑着，零星几扇亮着灯。 */
+/**
+ * 船楼的舷窗：一排排带窗框的小窗，大部分黑着，零星几扇亮着灯（有的拉着半截窗帘，有的偏冷光）。
+ * 透明底，只画窗户本身；亮着的窗是发光的，黑着的窗是一块深色玻璃。
+ */
 export function windowsTexture(cols: number, rows: number, seed: number, lit = 0.25) {
-  const cw = 32, ch = 32;
-  const { c, g } = canvas(cols * cw, rows * ch);
-  g.fillStyle = '#000'; g.fillRect(0, 0, c.width, c.height);
+  const CW = 64, CH = 96;
+  const { c, g } = canvas(cols * CW, rows * CH);
   const rng = mulberry32(seed);
   for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
+    const x0 = x * CW + 18, y0 = y * CH + 26, w = 28, h = 30;
+    g.fillStyle = '#0c0e10'; g.fillRect(x0 - 3, y0 - 3, w + 6, h + 6);            // 窗框
     if (rng() < lit) {
-      g.fillStyle = rng() < 0.7 ? '#ffc070' : '#bcd8ff';
-      g.fillRect(x * cw + 6, y * ch + 8, cw - 12, ch - 16);
-    }
+      const warm = rng() < 0.75, v = 0.45 + rng() * 0.55;
+      const gr = g.createLinearGradient(0, y0, 0, y0 + h);
+      gr.addColorStop(0, warm ? `rgba(255,${190 * v + 40},${110 * v},1)` : `rgba(${170 * v + 40},${205 * v + 40},255,1)`);
+      gr.addColorStop(1, warm ? `rgba(${200 * v},${120 * v},${50 * v},1)` : `rgba(${110 * v},${140 * v},${190 * v},1)`);
+      g.fillStyle = gr; g.fillRect(x0, y0, w, h);
+      if (rng() < 0.4) { g.fillStyle = 'rgba(20,16,12,0.75)'; g.fillRect(x0, y0, w, h * (0.3 + rng() * 0.4)); }   // 半截窗帘
+      if (rng() < 0.3) { g.fillStyle = 'rgba(10,10,10,0.8)'; g.fillRect(x0 + 6 + rng() * 10, y0 + h * 0.45, 7, h * 0.55); } // 窗前的人影或柜子
+    } else { g.fillStyle = '#1a2026'; g.fillRect(x0, y0, w, h); g.fillStyle = 'rgba(120,140,160,0.12)'; g.fillRect(x0, y0, w * 0.45, h); }
+    g.fillStyle = '#0c0e10'; g.fillRect(x0 + w / 2 - 1, y0, 2, h);                // 中梃
   }
   return finish(c);
 }

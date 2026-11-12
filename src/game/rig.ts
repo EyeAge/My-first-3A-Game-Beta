@@ -10,8 +10,8 @@ import { clayMesh, type Cone } from './clay';
 // 每个顶点记下自己跟着哪根骨骼动（skinIndex / skinWeight）。
 // 运行时只要转动骨骼，显卡就会把顶点带着一起动——这就是骨骼动画。
 
-export type MatKey = 'body' | 'accent' | 'dark' | 'steel' | 'eye' | 'glow';
-const MAT_ORDER: MatKey[] = ['body', 'accent', 'dark', 'steel', 'eye', 'glow'];
+export type MatKey = 'body' | 'accent' | 'dark' | 'steel' | 'eye' | 'glow' | 'blur';
+const MAT_ORDER: MatKey[] = ['body', 'accent', 'dark', 'steel', 'eye', 'glow', 'blur'];
 
 interface BoneDef { name: string; parent: number; x: number; y: number; z: number }
 export interface RigDef { geometry: THREE.BufferGeometry; bones: BoneDef[]; mats: MatKey[] }
@@ -94,6 +94,24 @@ export class RigBuilder {
     g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
     this.push(bone, mat, g);
   }
+  /**
+   * 薄板：俯视轮廓（[x, z] 一圈点）往下压出 thick 厚，上表面在高度 y。边缘带一点倒角。
+   * 翅膀和尾羽用它 —— 轮廓可以剪出一根根羽毛的形状，比一块长方形的板像翅膀得多。
+   */
+  plate(bone: string, mat: MatKey, pts: [number, number][], y: number, thick: number) {
+    const sh = new THREE.Shape(pts.map(([x, z]) => new THREE.Vector2(x, z)));
+    const bv = thick * 0.3;
+    const g = new THREE.ExtrudeGeometry(sh, { depth: thick - bv * 2, bevelEnabled: true, bevelThickness: bv, bevelSize: bv, bevelOffset: -bv, bevelSegments: 1 });
+    g.rotateX(Math.PI / 2); g.translate(0, y - bv, 0);
+    const uv = g.getAttribute('uv'); for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) / 0.45, uv.getY(i) / 0.45);
+    this.push(bone, mat, g);
+  }
+  /** 车削件：侧面轮廓 [半径, 高度] 绕竖轴转一圈。旋翼的涵道环用它。 */
+  lathe(bone: string, mat: MatKey, prof: [number, number][], x: number, y: number, z: number, seg = 24) {
+    const g = new THREE.LatheGeometry(prof.map(([r, h]) => new THREE.Vector2(r, h)), seg);
+    g.translate(x, y, z);
+    this.push(bone, mat, g);
+  }
   /** 连接 a、b 两点的一根圆管。 */
   tube(bone: string, mat: MatKey, a: V3, b: V3, r: number, r2 = r) {
     _v.set(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
@@ -152,77 +170,121 @@ export function instantiate(def: RigDef, materials: Record<MatKey, THREE.Materia
 // 三种敌人。本地坐标 +z 是正前方；地面单位原点在脚下，飞鸥原点在机身中心。
 
 function hound(): RigDef {
+  // 机械猎犬：四足机器狗。板状的机身分前、中、后三段（跑起来腰能跟着弯），外面扣着一层浅色外壳和橙色警示条；
+  // 腿根是圆盘形的大关节，腿是板状的大腿加细长的小腿，脚是橡胶球。背上驮着传感器塔，屁股后面一根鞭状天线。
   const r = new RigBuilder();
   r.bone('root', null, 0, 0.72, -0.42);
   r.bone('spine', 'root', 0, 0.74, -0.12);
   r.bone('chest', 'spine', 0, 0.74, 0.22);
   r.bone('neck', 'chest', 0, 0.86, 0.56);
   r.bone('head', 'neck', 0, 0.9, 0.78);
-  r.bone('jaw', 'head', 0, 0.8, 0.88);
-  r.bone('tail1', 'root', 0, 0.84, -0.66);
-  r.bone('tail2', 'tail1', 0, 0.9, -0.94);
+  r.bone('jaw', 'head', 0, 0.82, 0.9);
+  r.bone('tail1', 'root', -0.15, 0.93, -0.58);   // 天线的根部和中段：原来摇尾巴的动作现在让天线晃
+  r.bone('tail2', 'tail1', -0.15, 1.28, -0.6);
 
-  // 躯干
-  r.clay('root', 'body', [[[0, 0.77, -0.6], [0, 0.76, -0.3], 0.16, 0.19], [[-0.14, 0.72, -0.44], [0.14, 0.72, -0.44], 0.15, 0.15]]); // 骨盆：后窄前宽，两侧鼓出髋关节
-  r.cyl('root', 'dark', 0.1, 0.62, 0, 0.68, -0.44, 'x');            // 后轴
-  r.box('root', 'accent', 0.3, 0.05, 0.3, 0, 0.965, -0.44);
-  r.cyl('spine', 'dark', 0.13, 0.46, 0, 0.72, -0.05, 'z');           // 腰：一截细的传动轴
-  for (let i = 0; i < 3; i++) r.box('spine', 'body', 0.32, 0.3, 0.07, 0, 0.74, -0.18 + i * 0.13); // 肋片
-  // 胸腔：前粗后细的桶形，两侧鼓出肩，下面收出一道胸骨；背上一条隆起的橙色背脊
-  r.clay('chest', 'body', [[[0, 0.77, 0.14], [0, 0.79, 0.52], 0.21, 0.24], [[-0.17, 0.74, 0.36], [0.17, 0.74, 0.36], 0.17, 0.17], [[0, 0.66, 0.4], [0, 0.7, 0.6], 0.15, 0.12]]);
-  r.clay('chest', 'accent', [[[0, 0.98, 0.14], [0, 1.02, 0.52], 0.085, 0.1]]);
-  r.cyl('chest', 'dark', 0.11, 0.7, 0, 0.68, 0.36, 'x');             // 前轴
-  r.box('chest', 'dark', 0.3, 0.17, 0.1, 0, 0.72, 0.7);               // 胸前进气格栅
-  r.cyl('neck', 'dark', 0.1, 0.3, 0, 0.88, 0.66, 'z');
-  r.sph('neck', 'body', 0.12, 0, 0.86, 0.56);
-
-  // 头：弱点在这里
-  r.clay('head', 'body', [[[0, 0.94, 0.82], [0, 0.92, 1.02], 0.16, 0.135], [[-0.09, 0.88, 0.9], [0.09, 0.88, 0.9], 0.1, 0.1]], 0.03, 0.018); // 颅骨和两腮
-  r.clay('head', 'dark', [[[0, 0.9, 1.04], [0, 0.885, 1.3], 0.105, 0.062]], 0.03, 0.018);                                                  // 上颌：往前收尖的吻部
-  r.box('head', 'eye', 0.3, 0.05, 0.1, 0, 0.975, 1.1);               // 目镜
-  r.box('head', 'accent', 0.16, 0.04, 0.24, 0, 1.085, 0.9);
+  // ---- 后段：底盘、散热格栅、尾板
+  r.box('root', 'dark', 0.38, 0.25, 0.46, 0, 0.76, -0.44, undefined, 0.03);
+  r.box('root', 'dark', 0.44, 0.04, 0.3, 0, 0.9, -0.46, undefined, 0.01);
+  for (let i = 0; i < 10; i++) r.box('root', 'steel', 0.01, 0.07, 0.27, -0.171 + i * 0.038, 0.945, -0.46, undefined, 0.003); // 散热片
+  for (const z of [-0.33, -0.59]) r.box('root', 'dark', 0.42, 0.016, 0.026, 0, 0.985, z, undefined, 0.004);
+  r.box('root', 'body', 0.42, 0.22, 0.07, 0, 0.77, -0.69, undefined, 0.02);                                  // 尾板
+  r.box('root', 'dark', 0.24, 0.07, 0.02, 0, 0.8, -0.726, undefined, 0.006);
+  r.box('root', 'eye', 0.18, 0.016, 0.006, 0, 0.8, -0.738);                                                  // 尾灯
+  r.cyl('root', 'steel', 0.03, 0.03, 0.12, 0.71, -0.73, 'z'); r.cyl('root', 'dark', 0.034, 0.012, -0.1, 0.69, -0.73, 'z');
+  for (const sx of [-0.17, 0.17]) for (const sy of [-0.075, 0.075]) r.bolt('root', sx, 0.77 + sy, -0.727, 'z', 0.012);
+  r.cyl('root', 'dark', 0.03, 0.07, 0.15, 0.955, -0.6); r.sph('root', 'eye', 0.028, 0.15, 1.0, -0.6);         // 警示灯
+  // ---- 中段：底盘、顶壳、电池仓
+  r.box('spine', 'dark', 0.36, 0.24, 0.34, 0, 0.76, -0.07, undefined, 0.03);
+  r.box('spine', 'body', 0.48, 0.07, 0.36, 0, 0.9, -0.05, undefined, 0.02);
+  r.box('spine', 'accent', 0.13, 0.074, 0.36, 0, 0.9, -0.05, undefined, 0.014);
+  r.box('spine', 'dark', 0.33, 0.13, 0.76, 0, 0.59, -0.04, undefined, 0.03);                                  // 肚子下面的电池仓
+  for (const z of [-0.2, 0.12]) r.box('spine', 'accent', 0.338, 0.04, 0.12, 0, 0.6, z, undefined, 0.008);
+  // ---- 前段：底盘、顶壳、前保险杠和两只前灯
+  r.box('chest', 'dark', 0.38, 0.25, 0.5, 0, 0.76, 0.37, undefined, 0.03);
+  r.box('chest', 'body', 0.48, 0.07, 0.4, 0, 0.9, 0.37, undefined, 0.02);
+  r.box('chest', 'accent', 0.42, 0.21, 0.1, 0, 0.765, 0.66, undefined, 0.025);
+  r.box('chest', 'dark', 0.28, 0.1, 0.03, 0, 0.785, 0.708, undefined, 0.008);
+  for (let i = 0; i < 6; i++) r.box('chest', i % 2 ? 'dark' : 'body', 0.07, 0.046, 0.02, -0.175 + i * 0.07, 0.63, 0.706, undefined, 0.004); // 保险杠下沿的警示块
+  for (const s of [-1, 1]) { r.cyl('chest', 'steel', 0.03, 0.02, s * 0.16, 0.785, 0.716, 'z'); r.cyl('chest', 'eye', 0.021, 0.006, s * 0.16, 0.785, 0.729, 'z'); }
   for (const s of [-1, 1]) {
-    r.box('head', 'dark', 0.05, 0.16, 0.12, s * 0.14, 1.12, 0.8, [-0.35, 0, s * 0.2]); // 耳朵（天线）
-    r.box('head', 'body', 0.03, 0.05, 0.05, s * 0.09, 0.83, 1.3);    // 上牙
+    // 两侧的外壳板、橙色腰线、侧面的检修窗、沿着背脊的提手杆
+    r.box('root', 'body', 0.045, 0.2, 0.42, s * 0.212, 0.79, -0.44, undefined, 0.016);
+    r.box('spine', 'body', 0.045, 0.2, 0.2, s * 0.212, 0.79, -0.1, undefined, 0.016);
+    r.box('chest', 'body', 0.045, 0.2, 0.44, s * 0.212, 0.79, 0.36, undefined, 0.016);
+    r.box('root', 'accent', 0.048, 0.05, 0.42, s * 0.213, 0.655, -0.44, undefined, 0.01);
+    r.box('chest', 'accent', 0.048, 0.05, 0.44, s * 0.213, 0.655, 0.36, undefined, 0.01);
+    r.box('chest', 'dark', 0.04, 0.13, 0.15, s * 0.222, 0.79, 0.44, undefined, 0.01);
+    for (let i = 0; i < 4; i++) r.box('chest', 'steel', 0.006, 0.016, 0.12, s * 0.243, 0.745 + i * 0.03, 0.44);
+    r.cable('spine', [[s * 0.19, 0.93, -0.62], [s * 0.19, 1.0, -0.56], [s * 0.19, 1.01, 0.0], [s * 0.19, 1.0, 0.5], [s * 0.19, 0.93, 0.56]], 0.014);
+    for (const z of [-0.3, 0.26]) r.cyl('spine', 'steel', 0.011, 0.08, s * 0.19, 0.965, z);
+    for (const z of [-0.18, 0.08]) r.bolt('spine', s * 0.2, 0.938, z, 'y', 0.014);
+    for (const z of [0.22, 0.52]) r.bolt('chest', s * 0.2, 0.938, z, 'y', 0.014);
+    for (const [bn, z] of [['root', -0.6], ['root', -0.28], ['chest', 0.2], ['chest', 0.54]] as const) r.bolt(bn, s * 0.237, 0.85, z, 'x', 0.012);
+    r.cable('spine', [[s * 0.15, 0.53, -0.4], [s * 0.172, 0.515, -0.2], [s * 0.172, 0.52, 0.12], [s * 0.15, 0.535, 0.32]], 0.012); // 肚子两侧的线束
   }
-  r.box('jaw', 'dark', 0.2, 0.06, 0.36, 0, 0.79, 1.08);
-  for (const s of [-1, 1]) r.box('jaw', 'body', 0.03, 0.05, 0.05, s * 0.07, 0.83, 1.22);
+  // ---- 背上的传感器塔：转盘、两片耳板夹着一个带镜头的吊舱
+  r.cyl('spine', 'dark', 0.15, 0.045, 0, 0.955, -0.05, 'y', 0.135);
+  r.box('spine', 'dark', 0.23, 0.026, 0.21, 0, 0.99, -0.05, undefined, 0.006);
+  for (const s of [-1, 1]) { r.box('spine', 'body', 0.036, 0.15, 0.2, s * 0.1, 1.07, -0.045, undefined, 0.014); r.cyl('spine', 'steel', 0.028, 0.012, s * 0.122, 1.08, -0.03, 'x'); }
+  r.box('spine', 'body', 0.14, 0.11, 0.27, 0, 1.085, -0.04, undefined, 0.02);
+  r.box('spine', 'accent', 0.143, 0.026, 0.272, 0, 1.057, -0.04, undefined, 0.008);
+  r.cyl('spine', 'dark', 0.045, 0.14, 0, 1.085, 0.14, 'z');
+  for (let i = 0; i < 4; i++) r.cyl('spine', 'steel', 0.05, 0.01, 0, 1.085, 0.09 + i * 0.033, 'z');
+  r.cyl('spine', 'dark', 0.03, 0.22, 0, 1.085, 0.3, 'z', 0.028); r.cyl('spine', 'dark', 0.046, 0.07, 0, 1.085, 0.43, 'z');
+  r.box('spine', 'dark', 0.046, 0.046, 0.12, -0.04, 1.165, -0.03, undefined, 0.01); r.cyl('spine', 'eye', 0.014, 0.004, -0.04, 1.165, 0.032, 'z'); // 塔顶的小瞄具
+  r.cyl('spine', 'dark', 0.072, 0.076, 0.108, 1.08, -0.1, 'x'); r.cyl('spine', 'steel', 0.026, 0.084, 0.108, 1.08, -0.1, 'x');                // 侧面的弹鼓
+  // ---- 脖子：一截粗管套着三道环；头：圆角盒，正面一条发光的目镜
+  r.tube('neck', 'dark', [0, 0.83, 0.54], [0, 0.93, 0.8], 0.062, 0.05);
+  for (let i = 0; i < 3; i++) { const k = 0.22 + i * 0.26, y = 0.83 + 0.1 * k, z = 0.54 + 0.26 * k; r.tube('neck', 'body', [0, y - 0.006, z - 0.015], [0, y + 0.006, z + 0.015], 0.074); }
+  r.box('neck', 'body', 0.18, 0.07, 0.14, 0, 0.845, 0.59, undefined, 0.016);
+  r.cable('neck', [[0.07, 0.83, 0.56], [0.095, 0.9, 0.66], [0.085, 0.96, 0.76], [0.065, 0.97, 0.82]], 0.011);
+  r.box('head', 'body', 0.28, 0.175, 0.37, 0, 0.95, 0.975, undefined, 0.045);
+  r.box('head', 'dark', 0.25, 0.11, 0.045, 0, 0.945, 1.15, undefined, 0.016);
+  r.box('head', 'eye', 0.19, 0.036, 0.01, 0, 0.955, 1.176);                                                   // 目镜
+  for (const s of [-1, 1]) { r.cyl('head', 'dark', 0.022, 0.018, s * 0.083, 0.912, 1.172, 'z'); r.cyl('head', 'steel', 0.013, 0.006, s * 0.083, 0.912, 1.183, 'z'); }
+  r.box('head', 'accent', 0.09, 0.012, 0.3, 0, 1.04, 0.97, undefined, 0.004);
+  r.cyl('head', 'dark', 0.048, 0.32, 0, 0.95, 0.895, 'x');                                                    // 贯穿头部的转轴，两头是"耳朵"
+  for (const s of [-1, 1]) { r.cyl('head', 'accent', 0.034, 0.01, s * 0.164, 0.95, 0.895, 'x'); for (const z of [0.9, 1.07]) r.bolt('head', s * 0.118, 1.04, z, 'y', 0.012); }
+  r.cyl('head', 'dark', 0.054, 0.04, 0, 1.057, 0.9); r.cyl('head', 'steel', 0.056, 0.01, 0, 1.068, 0.9);      // 头顶的激光雷达
+  r.box('head', 'dark', 0.18, 0.045, 0.2, 0, 0.85, 1.0, undefined, 0.012);
+  // 下颌：一块托板，前面伸出两根电击叉
+  r.box('jaw', 'dark', 0.17, 0.03, 0.26, 0, 0.815, 1.02, undefined, 0.01);
+  for (const s of [-1, 1]) { r.tube('jaw', 'steel', [s * 0.055, 0.818, 1.14], [s * 0.05, 0.822, 1.27], 0.012, 0.005); r.sph('jaw', 'eye', 0.011, s * 0.05, 0.823, 1.275); }
+  // 天线
+  r.cyl('root', 'dark', 0.02, 0.07, -0.15, 0.955, -0.58);
+  r.tube('tail1', 'steel', [-0.15, 0.98, -0.58], [-0.15, 1.28, -0.6], 0.007, 0.005);
+  r.tube('tail2', 'steel', [-0.15, 1.28, -0.6], [-0.15, 1.66, -0.64], 0.005, 0.003); r.sph('tail2', 'accent', 0.014, -0.15, 1.67, -0.64);
 
-  // 细节：背上的传感器、沿脊柱走的线缆、装甲板四角的螺栓、肩部的轴承盖、颈部的液压杆
-  r.box('chest', 'dark', 0.14, 0.07, 0.2, 0, 1.125, 0.3); r.sph('chest', 'eye', 0.028, 0, 1.15, 0.4);
-  r.cyl('chest', 'dark', 0.008, 0.26, 0.05, 1.26, 0.24); r.sph('chest', 'accent', 0.014, 0.05, 1.39, 0.24);
-  for (const s of [-1, 1]) {
-    r.cable('spine', [[s * 0.1, 0.94, -0.3], [s * 0.13, 0.9, -0.12], [s * 0.12, 0.92, 0.04], [s * 0.1, 0.99, 0.14]], 0.018);
-    r.cyl('chest', 'dark', 0.12, 0.05, s * 0.345, 0.72, 0.36, 'x'); r.bolt('chest', s * 0.375, 0.72, 0.36, 'x', 0.04);
-    r.cyl('root', 'dark', 0.11, 0.05, s * 0.3, 0.7, -0.44, 'x'); r.bolt('root', s * 0.33, 0.7, -0.44, 'x', 0.04);
-    for (const dz of [-0.17, 0.17]) r.bolt('root', s * 0.13, 0.992, -0.44 + dz * 0.7, 'y');
-    r.piston('neck', [s * 0.1, 0.72, 0.56], [s * 0.1, 0.82, 0.82], 0.022);
-    r.box('head', 'body', 0.03, 0.2, 0.3, s * 0.185, 0.93, 0.94);        // 头两侧的护板
-    r.bolt('head', s * 0.202, 0.93, 0.86, 'x'); r.bolt('head', s * 0.202, 0.93, 1.02, 'x');
-  }
-  for (let i = 0; i < 4; i++) r.box('chest', 'steel', 0.26, 0.012, 0.012, 0, 0.665 + i * 0.037, 0.752); // 进气格栅的栅条
-  r.cyl('tail1', 'dark', 0.04, 0.3, 0, 0.87, -0.8, 'z', 0.03);
-  r.cyl('tail2', 'dark', 0.03, 0.3, 0, 0.92, -1.08, 'z', 0.015);
-  r.sph('tail2', 'accent', 0.035, 0, 0.93, -1.24);
-
-  // 四条腿：每条三节（大腿、小腿、脚掌），绑定姿势就是站立时的弯曲形状
+  // ---- 四条腿：髋部一个横着的作动筒、一个大圆盘关节；大腿是板，小腿是细管，脚是球
   const leg = (id: string, parent: string, s: number, hip: V3, knee: V3, ankle: V3, toe: V3) => {
     const X = (p: V3): V3 => [p[0] * s, p[1], p[2]];
     r.bone(id + '1', parent, ...X(hip)); r.bone(id + '2', id + '1', ...X(knee)); r.bone(id + '3', id + '2', ...X(ankle)); r.bone(id + 'T', id + '3', ...X(toe));
-    r.clay(id + '1', 'body', [[X(hip), X(knee), 0.105, 0.068], [X([hip[0], hip[1] - 0.08, hip[2] - 0.05]), X([knee[0], knee[1] + 0.08, knee[2] - 0.04]), 0.085, 0.06]], 0.03, 0.018); // 大腿：上粗下细，后侧鼓出一块
-    r.sph(id + '1', 'dark', 0.1, ...X(hip));
-    r.sph(id + '2', 'dark', 0.075, ...X(knee));
-    r.clay(id + '2', 'dark', [[X(knee), X(ankle), 0.055, 0.04]], 0.03, 0.018);
-    r.box(id + '2', 'accent', 0.1, 0.12, 0.03, knee[0] * s, (knee[1] + ankle[1]) / 2, (knee[2] + ankle[2]) / 2 + 0.07);
-    r.sph(id + '3', 'dark', 0.055, ...X(ankle));
-    r.clay(id + '3', 'body', [[X(ankle), X([toe[0], toe[1] + 0.05, toe[2]]), 0.046, 0.04]], 0.03, 0.018);
-    r.box(id + '3', 'dark', 0.13, 0.06, 0.2, toe[0] * s, toe[1] + 0.03, toe[2] + 0.04);
-    // 大腿外侧的护甲板、膝盖后面的液压杆、三根爪尖
-    r.box(id + '1', 'accent', 0.03, 0.2, 0.15, (hip[0] + 0.1) * s, (hip[1] + knee[1]) / 2, (hip[2] + knee[2]) / 2);
-    r.bolt(id + '1', (hip[0] + 0.118) * s, hip[1] - 0.06, hip[2] - 0.01, 'x', 0.03);
-    r.piston(id + '1', X([hip[0] - 0.06, hip[1] - 0.04, hip[2] - 0.1]), X([knee[0] - 0.06, knee[1] + 0.03, knee[2] - 0.07]), 0.02);
-    r.piston(id + '2', X([knee[0] + 0.05, knee[1] - 0.05, knee[2] - 0.06]), X([ankle[0] + 0.05, ankle[1] + 0.04, ankle[2] - 0.05]), 0.016);
-    for (const c of [-0.045, 0, 0.045]) r.tube(id + '3', 'steel', [toe[0] * s + c, toe[1] + 0.035, toe[2] + 0.12], [toe[0] * s + c, toe[1] + 0.005, toe[2] + 0.19], 0.014, 0.003);
+    const hx = hip[0] * s, kx = knee[0] * s;
+    r.cyl(parent, 'dark', 0.082, 0.24, hx - s * 0.075, hip[1], hip[2], 'z');                                   // 外展作动筒，固定在机身上
+    r.box(parent, 'body', 0.15, 0.05, 0.2, hx - s * 0.075, hip[1] + 0.082, hip[2], undefined, 0.016);
+    r.cyl(parent, 'steel', 0.04, 0.26, hx - s * 0.075, hip[1], hip[2], 'z');
+    r.cyl(id + '1', 'body', 0.112, 0.085, hx + s * 0.035, hip[1], hip[2], 'x');                                // 髋关节的大圆盘
+    r.cyl(id + '1', 'accent', 0.117, 0.02, hx + s * 0.06, hip[1], hip[2], 'x');
+    r.cyl(id + '1', 'dark', 0.066, 0.105, hx + s * 0.035, hip[1], hip[2], 'x');
+    for (let i = 0; i < 5; i++) r.bolt(id + '1', hx + s * 0.08, hip[1] + Math.cos(i * 1.2566) * 0.088, hip[2] + Math.sin(i * 1.2566) * 0.088, 'x', 0.011);
+    const T = (p: V3, dx: number, dz: number): V3 => [p[0] * s + s * dx, p[1], p[2] + dz];
+    r.seg(id + '1', 'body', T(hip, 0.035, 0), T(knee, 0.035, 0), 0.075, 0.135);                                // 大腿外壳
+    r.seg(id + '1', 'dark', T(hip, 0.035, -0.045), T(knee, 0.035, -0.04), 0.055, 0.08);
+    const mid = (k: number): V3 => [hip[0] + (knee[0] - hip[0]) * k, hip[1] + (knee[1] - hip[1]) * k, hip[2] + (knee[2] - hip[2]) * k];
+    r.box(id + '1', 'accent', 0.08, 0.05, 0.14, mid(0.52)[0] * s + s * 0.035, mid(0.52)[1], mid(0.52)[2], undefined, 0.01);
+    r.box(id + '1', 'dark', 0.079, 0.014, 0.139, mid(0.82)[0] * s + s * 0.035, mid(0.82)[1], mid(0.82)[2], undefined, 0.004);
+    r.piston(id + '1', T(mid(0.12), 0.035, -0.1), T(mid(0.9), 0.035, -0.085), 0.02);
+    r.cable(id + '1', [T(mid(0.05), 0.08, 0.05), T(mid(0.4), 0.088, 0.066), T(mid(0.9), 0.08, 0.05)], 0.008);
+    r.cyl(id + '1', 'dark', 0.066, 0.11, kx + s * 0.035, knee[1], knee[2], 'x');                               // 膝关节
+    r.cyl(id + '1', 'body', 0.046, 0.118, kx + s * 0.035, knee[1], knee[2], 'x');
+    r.tube(id + '2', 'dark', T(knee, 0.035, 0), T(ankle, 0.035, 0), 0.04, 0.03);                               // 小腿
+    const sm: V3 = [(knee[0] + ankle[0]) / 2, (knee[1] + ankle[1]) / 2, (knee[2] + ankle[2]) / 2];
+    r.seg(id + '2', 'body', T([sm[0], sm[1] + 0.07, sm[2] - 0.02], 0.035, 0.03), T([sm[0], sm[1] - 0.08, sm[2] + 0.03], 0.035, 0.03), 0.07, 0.05);
+    r.box(id + '2', 'accent', 0.073, 0.022, 0.054, sm[0] * s + s * 0.035, sm[1] - 0.06, sm[2] + 0.052, undefined, 0.005);
+    r.sph(id + '3', 'dark', 0.045, ankle[0] * s + s * 0.035, ankle[1], ankle[2]);
+    r.tube(id + '3', 'dark', T(ankle, 0.035, 0), T([toe[0], toe[1] + 0.08, toe[2]], 0.035, 0), 0.03, 0.026);
+    r.cyl(id + '3', 'steel', 0.036, 0.03, toe[0] * s + s * 0.035, toe[1] + 0.105, toe[2]);
+    r.sph(id + '3', 'dark', 0.064, toe[0] * s + s * 0.035, toe[1] + 0.055, toe[2] + 0.005, 1, 0.86, 1.08);     // 橡胶球脚
   };
   for (const s of [-1, 1]) {
     const k = s < 0 ? 'l' : 'r';
@@ -334,47 +396,71 @@ function guard(): RigDef {
 }
 
 function gull(): RigDef {
+  // 机械飞鸥：四旋翼无人机。水滴形的外壳扣在一块底盘上，四根机臂各带一个涵道旋翼；
+  // 机头下方吊着云台相机球（弱点），机腹挂一门双管炮，底下是两根起落橇。
   const r = new RigBuilder();
+  const ROTORS: [number, number][] = [[0.53, 0.48], [-0.53, 0.48], [0.53, -0.48], [-0.53, -0.48]], RY = 0.07;
   r.bone('root', null, 0, 0, 0);
-  r.bone('head', 'root', 0, 0.04, 0.46);
-  r.bone('tail', 'root', 0, 0.02, -0.5);
-  r.clay('root', 'body', [[[0, 0, -0.4], [0, 0.02, 0.36], 0.14, 0.2], [[-0.2, 0.08, 0.02], [0.2, 0.08, 0.02], 0.1, 0.1]], 0.04, 0.02); // 机身：前粗后细的纺锤形，两侧鼓出翼根
-  r.clay('root', 'accent', [[[0, 0.15, -0.26], [0, 0.19, 0.2], 0.06, 0.075]], 0.04, 0.02);                                              // 背脊
-  r.box('root', 'dark', 0.2, 0.1, 0.5, 0, -0.19, 0.05);               // 腹部挂架
-  r.cyl('root', 'dark', 0.035, 0.5, 0, -0.26, 0.3, 'z');              // 机腹炮
-  r.cyl('root', 'dark', 0.11, 0.18, 0, 0, -0.56, 'z', 0.08);          // 尾喷口
-  r.sph('root', 'eye', 0.07, 0, 0, -0.6, 1, 1, 0.5);
-  for (const s of [-1, 1]) r.box('root', 'dark', 0.08, 0.1, 0.3, s * 0.2, 0.02, 0.1); // 进气道
+  r.bone('head', 'root', 0, -0.25, 0.44);                    // 云台相机球
+  ROTORS.forEach(([x, z], i) => r.bone('rotor' + i, 'root', x, RY, z));
 
-  // 细节：机背的检修盖螺栓、机腹的传感器球、天线、尾喷口的调节片
-  r.sph('root', 'dark', 0.07, 0, -0.2, -0.2); r.sph('root', 'eye', 0.03, 0, -0.255, -0.18);
-  r.tube('root', 'dark', [0, 0.18, -0.24], [0, 0.4, -0.34], 0.008); r.sph('root', 'accent', 0.014, 0, 0.4, -0.34);
-  for (let i = 0; i < 6; i++) { const a = (i / 6) * 6.283; r.box('root', 'steel', 0.05, 0.012, 0.1, Math.cos(a) * 0.1, Math.sin(a) * 0.1, -0.67, [0, 0, a + 1.57]); }
-  for (const s of [-1, 1]) { r.tube('root', 'steel', [s * 0.07, -0.225, 0.1], [s * 0.07, -0.225, 0.5], 0.012); for (let i = 0; i < 3; i++) r.box('root', 'steel', 0.012, 0.07, 0.012, s * 0.243, 0.02, 0.02 + i * 0.07); }
-  r.clay('head', 'body', [[[0, 0.05, 0.5], [0, 0.04, 0.7], 0.13, 0.1]], 0.03, 0.016);
-  r.cyl('head', 'accent', 0.085, 0.3, 0, 0.01, 0.92, 'z', 0.012);     // 喙
-  for (const s of [-1, 1]) r.sph('head', 'eye', 0.045, s * 0.115, 0.09, 0.72, 0.6, 1, 1);
-  r.box('head', 'dark', 0.16, 0.04, 0.2, 0, 0.165, 0.6);
-
-  r.box('tail', 'body', 0.52, 0.035, 0.3, 0, 0.04, -0.7);
-  r.box('tail', 'body', 0.04, 0.3, 0.26, 0, 0.2, -0.7, [-0.3, 0, 0]);
-  r.box('tail', 'accent', 0.52, 0.036, 0.06, 0, 0.04, -0.84);
-
+  // ---- 机身
+  r.sph('root', 'body', 1, 0, 0.03, 0, 0.19, 0.12, 0.43);
+  r.sph('root', 'accent', 1, 0, 0.03, 0.3, 0.152, 0.086, 0.14);                                    // 机头的橙色整流罩
+  r.sph('root', 'dark', 1, 0, 0.03, -0.03, 0.197, 0.03, 0.125);                                    // 腰上一圈深色的箍
+  r.box('root', 'body', 0.19, 0.024, 0.32, 0, 0.143, -0.05, undefined, 0.008);                     // 背上的盖板
+  r.box('root', 'accent', 0.05, 0.012, 0.32, 0, 0.158, -0.05, undefined, 0.003);
+  for (const x of [-0.08, 0.08]) for (const z of [-0.19, 0.09]) r.bolt('root', x, 0.157, z, 'y', 0.012);
+  r.box('root', 'dark', 0.28, 0.1, 0.6, 0, -0.056, -0.01, undefined, 0.026);                       // 底盘
+  r.box('root', 'dark', 0.19, 0.12, 0.18, 0, 0.008, -0.42, undefined, 0.022);                      // 尾部的电调舱
+  r.box('root', 'accent', 0.2, 0.032, 0.05, 0, 0.048, -0.48, undefined, 0.008);
+  r.box('root', 'eye', 0.08, 0.01, 0.005, 0, 0.0, -0.512);
+  r.tube('root', 'steel', [0.06, 0.07, -0.44], [0.08, 0.3, -0.52], 0.006, 0.003); r.tube('root', 'steel', [-0.06, 0.07, -0.44], [-0.08, 0.24, -0.5], 0.006, 0.003);
+  r.sph('root', 'eye', 0.016, 0, 0.082, -0.5);                                                     // 尾部的防撞灯
   for (const s of [-1, 1]) {
-    const k = s < 0 ? 'wingL' : 'wingR';
-    r.bone(k + '1', 'root', s * 0.2, 0.1, 0.04); r.bone(k + '2', k + '1', s * 0.98, 0.1, 0);
-    r.sph(k + '1', 'dark', 0.08, s * 0.22, 0.1, 0.04);
-    r.box(k + '1', 'body', 0.8, 0.045, 0.46, s * 0.6, 0.1, 0, undefined, 0.02);
-    r.box(k + '1', 'dark', 0.74, 0.05, 0.06, s * 0.6, 0.1, 0.22);     // 前缘
-    r.cyl(k + '1', 'dark', 0.035, 0.1, s * 0.98, 0.1, 0, 'z');        // 翼中段的折叠铰链
-    r.box(k + '2', 'body', 0.72, 0.035, 0.36, s * 1.34, 0.1, -0.03, [0, s * 0.12, 0], 0.015);
-    r.box(k + '2', 'accent', 0.14, 0.04, 0.3, s * 1.72, 0.1, -0.1, [0, s * 0.12, 0]);
-    for (let i = 0; i < 4; i++) r.box(k + '1', 'dark', 0.014, 0.052, 0.4, s * (0.34 + i * 0.17), 0.1, 0);   // 翼肋
-    r.piston(k + '1', [s * 0.2, 0.02, -0.12], [s * 0.56, 0.07, -0.14], 0.016);                             // 扇翅用的作动筒
-    r.cyl(k + '1', 'dark', 0.05, 0.16, s * 0.62, 0.05, 0.04, 'z'); r.sph(k + '1', 'eye', 0.02, s * 0.62, 0.05, 0.13); // 翼下的小发动机
-    r.sph(k + '2', 'eye', 0.014, s * 1.78, 0.125, -0.1);
-    for (let i = 0; i < 3; i++) r.box(k + '2', 'dark', 0.18, 0.018, 0.2, s * (1.14 + i * 0.2), 0.1, -0.27 - i * 0.02, [0, s * 0.2, 0], 0.008); // 翼羽
+    for (let i = 0; i < 4; i++) r.box('root', 'steel', 0.006, 0.016, 0.1, s * 0.142, -0.095 + i * 0.026, -0.1); // 底盘两侧的散热缝
+    r.box('root', 'accent', 0.006, 0.05, 0.16, s * 0.142, -0.056, 0.14, undefined, 0.002);
+    // 起落橇
+    r.tube('root', 'steel', [s * 0.11, -0.1, 0.18], [s * 0.21, -0.37, 0.22], 0.012); r.tube('root', 'steel', [s * 0.11, -0.1, -0.24], [s * 0.21, -0.37, -0.28], 0.012);
+    r.tube('root', 'dark', [s * 0.21, -0.37, -0.36], [s * 0.21, -0.37, 0.3], 0.016);
+    for (const z of [-0.36, 0.3]) r.sph('root', 'dark', 0.02, s * 0.21, -0.37, z);
   }
+  // ---- 四根机臂和涵道
+  const DUCT: [number, number][] = [[0.282, -0.058], [0.314, -0.051], [0.33, 0], [0.323, 0.048], [0.304, 0.064], [0.285, 0.051], [0.277, 0], [0.282, -0.058]];
+  ROTORS.forEach(([x, z], i) => {
+    const sx = Math.sign(x), sz = Math.sign(z), ang = Math.atan2(z, x);
+    r.tube('root', 'dark', [sx * 0.1, -0.02, sz * 0.17], [x, RY - 0.05, z], 0.04, 0.03);            // 机臂
+    r.seg('root', 'body', [sx * 0.15, 0.012, sz * 0.2], [x * 0.72, RY - 0.016, z * 0.74], 0.07, 0.04);
+    r.cyl('root', 'dark', 0.055, 0.1, x, RY - 0.045, z);                                             // 电机
+    r.cyl('root', 'steel', 0.058, 0.014, x, RY - 0.012, z);
+    r.lathe('root', 'body', DUCT, x, RY, z, 28);                                                    // 涵道环
+    for (let k = 0; k < 3; k++) { const a = k * 2.094 + 0.5 + i; r.box('root', 'dark', 0.235, 0.011, 0.026, x + Math.cos(a) * 0.168, RY - 0.036, z - Math.sin(a) * 0.168, [0, a, 0], 0.003); } // 支撑电机的三根撑杆
+    for (let k = -1; k <= 1; k++) { const a = ang + k * 0.2; r.box('root', k ? 'accent' : 'dark', 0.02, 0.08, 0.058, x + Math.cos(a) * 0.328, RY, z + Math.sin(a) * 0.328, [0, -a, 0], 0.005); } // 涵道外沿的标识块
+    r.sph('root', 'eye', 0.018, x + sx * 0.345, RY, z);                                              // 航行灯
+    // 旋翼：桨毂 + 两片带一点扭角的桨叶；再加一张半透明的圆片，转起来像一圈残影
+    r.cyl('rotor' + i, 'steel', 0.03, 0.05, x, RY, z);
+    for (const d of [-1, 1]) { r.box('rotor' + i, 'dark', 0.25, 0.006, 0.048, x + d * 0.14, RY + 0.014, z, [d * 0.22, 0, 0], 0.002); r.box('rotor' + i, 'accent', 0.032, 0.007, 0.05, x + d * 0.252, RY + 0.014, z, [d * 0.22, 0, 0], 0.002); }
+    r.cyl('rotor' + i, 'blur', 0.268, 0.002, x, RY + 0.014, z);
+  });
+  // ---- 云台：一个 U 形叉架夹着相机球
+  r.cyl('root', 'dark', 0.058, 0.03, 0, -0.118, 0.44);
+  r.box('root', 'dark', 0.26, 0.018, 0.05, 0, -0.14, 0.44, undefined, 0.005);
+  for (const s of [-1, 1]) r.box('root', 'dark', 0.016, 0.13, 0.05, s * 0.122, -0.2, 0.44, undefined, 0.005);
+  r.sph('head', 'dark', 0.098, 0, -0.25, 0.44);
+  r.cyl('head', 'steel', 0.021, 0.232, 0, -0.25, 0.44, 'x');
+  r.cyl('head', 'dark', 0.056, 0.06, 0, -0.244, 0.525, 'z', 0.05); r.cyl('head', 'steel', 0.058, 0.01, 0, -0.244, 0.552, 'z');
+  r.cyl('head', 'eye', 0.04, 0.008, 0, -0.244, 0.558, 'z');                                         // 镜头
+  r.cyl('head', 'dark', 0.02, 0.018, 0.048, -0.193, 0.505, 'z');
+  r.cyl('head', 'dark', 0.034, 0.07, 0, -0.33, 0.47, 'z', 0.03); r.cyl('head', 'eye', 0.024, 0.006, 0, -0.33, 0.507, 'z'); // 球下面的探照灯
+  r.box('head', 'accent', 0.11, 0.012, 0.07, 0, -0.158, 0.42, undefined, 0.004);
+  // ---- 机腹的双管炮
+  r.box('root', 'dark', 0.08, 0.05, 0.08, 0, -0.125, -0.16, undefined, 0.01);
+  r.cyl('root', 'steel', 0.02, 0.11, 0, -0.15, -0.16, 'x');
+  r.box('root', 'dark', 0.085, 0.075, 0.21, 0, -0.195, -0.16, undefined, 0.014);
+  r.box('root', 'accent', 0.088, 0.02, 0.08, 0, -0.175, -0.21, undefined, 0.005);
+  r.box('root', 'dark', 0.05, 0.08, 0.08, 0.066, -0.2, -0.19, undefined, 0.01);                     // 弹匣
+  for (const x of [-0.023, 0.023]) { r.cyl('root', 'dark', 0.014, 0.32, x, -0.195, 0.1, 'z'); r.cyl('root', 'steel', 0.02, 0.05, x, -0.195, 0.25, 'z'); }
+  r.box('root', 'steel', 0.072, 0.02, 0.02, 0, -0.195, 0.16, undefined, 0.004);
   return r.build();
 }
 

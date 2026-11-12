@@ -4,7 +4,7 @@ import { Colliders } from './colliders';
 import { buildDetails, type BoxSpec } from './details';
 import { NavGrid } from './nav';
 import { weathered } from '../render/weathered';
-import { barrierMesh, coneMesh, crateMesh, drumMesh, lightCones } from './props';
+import { barrierMesh, coneMesh, crateMesh, drumMesh, flares, lightCones } from './props';
 import { reflectionUniforms, type ReflectionUniforms } from '../render/reflection';
 import { SUN_DIR } from './atmosphere';
 import { containerGeometry, doorTextures, frameTextures, RIBS, sideTextures, tintByAlpha, type Brand } from './container';
@@ -194,6 +194,7 @@ export function buildPort(progress: (msg: string) => void): Port {
   // 发光的小方块（灯具的透光罩、亮着灯的窗户）：不受光照影响，亮度超过 1 的部分会被泛光晕开
   const glows: { x: number; y: number; z: number; sx: number; sy: number; sz: number; r: number; g: number; b: number }[] = [];
   const glow = (x: number, y: number, z: number, sx: number, sy: number, sz: number, r: number, g: number, b: number) => glows.push({ x, y, z, sx, sy, sz, r, g, b });
+  const flareList: Parameters<typeof flares>[0] = [];
   /** 一段带立柱的栏杆，从 a 到 b（两端高度可以不同，用在楼梯上）。 */
   const railing = (ax: number, ay: number, az: number, bx: number, by: number, bz: number, posts: number) => {
     for (const h of [0.55, 1.1]) beam(ax, ay + h, az, bx, by + h, bz, 0.05, RAIL);
@@ -280,7 +281,7 @@ export function buildPort(progress: (msg: string) => void): Port {
     }
     box(X1, TOP + 1.2, SZ + 2.4, 1.2, 0.08, 6.4, CRANE_D);                          // 通到大梁走道的栈桥
     // 作业照明：挂在大梁下面的一排投光灯
-    for (const x of [28, 46, 70, 92]) for (const s of [-1, 1]) { box(x, GB - 0.5, cz + s * 3.9, 0.7, 0.3, 0.5, 0x1c1e20); glow(x, GB - 0.68, cz + s * 3.9, 0.56, 0.06, 0.36, 0.55, 0.5, 0.42); }
+    for (const x of [28, 46, 70, 92]) for (const s of [-1, 1]) { box(x, GB - 0.5, cz + s * 3.9, 0.7, 0.3, 0.5, 0x1c1e20); glow(x, GB - 0.68, cz + s * 3.9, 0.56, 0.06, 0.36, 0.55, 0.5, 0.42); flareList.push({ x, y: GB - 0.75, z: cz + s * 3.9, r: 1.3, g: 1.1, b: 0.85, size: 1.5 }); }
     craneLights.push(new THREE.Vector3(54, 62.9, cz), new THREE.Vector3(104.5, GT + 0.8, cz), new THREE.Vector3(21.5, GT + 0.8, cz));
   };
   crane(-42, 78);
@@ -295,18 +296,36 @@ export function buildPort(progress: (msg: string) => void): Port {
     const h = 1 + Math.floor(rng() * 4);
     for (let k = 0; k < h; k++) addContainer(69.6 + r * 2.62, 9.75 + CH / 2 + k * CH, -86 + b * 12.6, 0, pick(rng, PALETTE), true);
   }
-  box(84, 20, 20, 30, 21, 18, 0x80827e); // 船楼
-  box(84, 31.5, 20, 34, 2.4, 14, 0x757772);
+  // 船楼：一层一层的甲板，每层挑出一圈带栏杆的走廊；顶上是带翼桥的驾驶台、桅杆和雷达
+  const HOUSE = 0x80827e, DECK = 0x4c5052;
+  box(84, 20, 20, 30, 21, 18, HOUSE);
+  for (let k = 0; k < 5; k++) {
+    const y = 13 + k * 3.5;
+    box(84, y, 20, 31.6, 0.22, 19.6, DECK);
+    for (const h of [0.55, 1.05]) { box(68.25, y + h, 20, 0.06, 0.06, 19.6, DECK); box(84, y + h, 10.25, 31.6, 0.06, 0.06, DECK); }
+    for (let z = 10.3; z <= 29.8; z += 2.44) box(68.25, y + 0.55, z, 0.06, 1.1, 0.06, DECK);
+    for (let x = 68.3; x <= 99.7; x += 2.62) box(x, y + 0.55, 10.25, 0.06, 1.1, 0.06, DECK);
+  }
+  box(84, 31.5, 20, 34, 2.4, 14, 0x757772);                                    // 驾驶台，两头伸出去的是翼桥
+  box(84, 32.85, 20, 35, 0.3, 15, DECK);
   box(84, 36, 26, 5, 8, 6, 0x2a3138); // 烟囱
   box(84, 37.5, 26, 5.2, 1.4, 6.2, 0xb85a1c);
-  const winTex = windowsTexture(18, 5, 11, 0.3);
-  const winMat = new THREE.MeshBasicMaterial({ map: winTex, color: new THREE.Color(2.2, 2.2, 2.2), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: true });
-  const win = new THREE.Mesh(new THREE.PlaneGeometry(18, 14), winMat);
-  win.rotation.y = -Math.PI / 2; win.position.set(68.95, 22, 20);
-  group.add(win);
-  const win2 = new THREE.Mesh(new THREE.PlaneGeometry(26, 14), winMat);
-  win2.rotation.y = Math.PI; win2.position.set(84, 22, 10.95);
-  group.add(win2);
+  box(84, 40.1, 26, 4.4, 0.3, 5.4, 0x16181a);
+  beam(84, 33, 17, 84, 43, 17, 0.5, DECK); box(84, 39.5, 17, 7, 0.25, 0.25, DECK); box(84, 41.5, 17, 4, 0.2, 0.2, DECK); // 桅杆
+  box(84, 43.2, 17, 3.2, 0.3, 0.5, 0x9a9d9a); box(81, 39.9, 17, 0.9, 0.6, 0.9, 0x9a9d9a);                               // 雷达天线
+  for (const z of [13.5, 26]) { box(68.1, 14.6, z, 1.7, 1.7, 5.4, 0xb85a1c); box(68.1, 15.9, z, 0.2, 1.2, 0.2, DECK); } // 救生艇
+  for (const [x, y, z, r, g, b, blink] of [[84, 43.6, 17, 1.6, 1.5, 1.3, 0], [67.2, 33.3, 20, 0.2, 1.4, 0.4, 0], [84, 40.5, 26, 1.8, 0.12, 0.08, 2.4]] as const) flareList.push({ x, y, z, r, g, b, size: 1.6, blink });
+  const winMat = (cols: number, rows: number, seed: number, lit: number, k: number) => new THREE.MeshBasicMaterial({ map: windowsTexture(cols, rows, seed, lit), color: new THREE.Color(k, k, k), transparent: true, depthWrite: false, fog: true });
+  const win = new THREE.Mesh(new THREE.PlaneGeometry(18, 17.5), winMat(14, 5, 11, 0.3, 1.25));
+  win.rotation.y = -Math.PI / 2; win.position.set(68.97, 21.75, 20);
+  const win2 = new THREE.Mesh(new THREE.PlaneGeometry(28.6, 17.5), winMat(22, 5, 23, 0.26, 1.25));
+  win2.rotation.y = Math.PI; win2.position.set(84, 21.75, 10.97);
+  // 驾驶台是一整圈连着的大窗，里面只亮着仪表的冷光
+  const br = new THREE.Mesh(new THREE.PlaneGeometry(13.6, 1.5), winMat(11, 1, 5, 1, 0.45));
+  br.rotation.y = -Math.PI / 2; br.position.set(66.97, 31.7, 20);
+  const br2 = new THREE.Mesh(new THREE.PlaneGeometry(33.4, 1.5), winMat(27, 1, 9, 1, 0.45));
+  br2.rotation.y = Math.PI; br2.position.set(84, 31.7, 12.97);
+  group.add(win, win2, br, br2);
 
   // ---------------------------------------------------------------- 仓库
   const wallMat = new THREE.MeshStandardMaterial({ color: 0x59636a, roughness: 0.55, metalness: 0.25, normalMap: corrugationNormal(110) });
@@ -382,16 +401,19 @@ export function buildPort(progress: (msg: string) => void): Port {
     beam(x, 9.2, z, x + dir * 1.9, 9.95, z, 0.12, 0x3a3f42);                    // 斜挑出去的灯臂
     box(x + dir * 2.2, 9.98, z, 0.95, 0.14, 0.4, 0x23272a);                     // 灯壳
     glow(x + dir * 2.2, 9.9, z, 0.72, 0.03, 0.26, 1, 1, 1);                     // 透光罩
+    flareList.push({ x: x + dir * 2.2, y: 9.84, z, r: 1.5, g: 0.95, b: 0.45, size: 2.0 });
     lampPos.push(new THREE.Vector3(x + dir * 2.2, 9.86, z));
   };
   for (const z of [-79, -47.55, -15.85, 15.85, 47.55, 82]) { pole(-26.6, z, 1); pole(-9.4, z, -1); }
   for (const z of [-90, -62, -18, 2, 44, 72]) pole(28.6, z, 1);
   for (const z of [-48, 0, 48]) pole(-63.4, z, -1);
   pole(60.4, 78, -1); pole(60.4, -80, -1);
-  craneLights.forEach((p) => glow(p.x, p.y, p.z, 0.45, 0.45, 0.45, 1.6, 0.1, 0.08)); // 航空障碍灯
-  const glowMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ color: new THREE.Color(4.2, 2.5, 1.1) }), glows.length);
+  craneLights.forEach((p) => { glow(p.x, p.y, p.z, 0.3, 0.3, 0.3, 1.2, 0.08, 0.06); flareList.push({ x: p.x, y: p.y, z: p.z, r: 2.2, g: 0.14, b: 0.1, size: 2.2, blink: 2.2 }); }); // 航空障碍灯：慢慢地一明一灭
+  const glowMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ color: new THREE.Color(1.9, 1.2, 0.6) }), glows.length); // 灯具本身不用太亮，"发光"的感觉交给下面的光晕
   glows.forEach((gl, i) => { glowMesh.setMatrixAt(i, m4.compose(v1.set(gl.x, gl.y, gl.z), q.identity(), v2.set(gl.sx, gl.sy, gl.sz))); glowMesh.setColorAt(i, col.setRGB(gl.r, gl.g, gl.b)); });
   group.add(glowMesh);
+  const flare = flares(flareList);
+  group.add(flare.points);
   // 路灯是往下照的：用聚光灯在地上打出一圈一圈的光斑，而不是朝四面八方发光的灯泡。
   // 真正发光的灯只有几盏，哪几盏路灯离玩家最近就"借"给谁
   const lightPool: THREE.SpotLight[] = [];
@@ -486,6 +508,7 @@ export function buildPort(progress: (msg: string) => void): Port {
     playerStart: new THREE.Vector3(-18, 0, 93),
     setLampCount(n) { lampCount = n; lastSort = -1; },
     update(t, focus) {
+      flare.uniforms.uTime.value = t;
       // 阴影相机跟着玩家走，并按整米对齐，避免阴影边缘抖动
       const fx = Math.round(focus.x / 4) * 4, fz = Math.round(focus.z / 4) * 4;
       sun.target.position.set(fx, 0, fz);

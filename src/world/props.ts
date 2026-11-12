@@ -214,3 +214,39 @@ export function lightCones(lamps: THREE.Vector3[]) {
   mesh.frustumCulled = false; mesh.renderOrder = 4;
   return mesh;
 }
+
+// ------------------------------------------------------------------ 灯的光晕
+/**
+ * 远处的灯。灯具本身在远处只有一两个像素大，直接画就是一个生硬的亮方块，还会一闪一闪。
+ * 所以每盏灯另外画一个始终朝向镜头的柔和光点：中间一个亮芯，外面一圈淡淡的晕；
+ * 离得再远也不会小于几个像素，于是远看是"一点灯光"而不是"一个亮像素"。blink 大于 0 的会按这个周期闪（航空障碍灯）。
+ */
+export function flares(list: { x: number; y: number; z: number; r: number; g: number; b: number; size: number; blink?: number }[]) {
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(list.length * 3), colr = new Float32Array(list.length * 3), par = new Float32Array(list.length * 2);
+  list.forEach((f, i) => { pos.set([f.x, f.y, f.z], i * 3); colr.set([f.r, f.g, f.b], i * 3); par.set([f.size, f.blink ?? 0], i * 2); });
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('aColor', new THREE.BufferAttribute(colr, 3));
+  geo.setAttribute('aPar', new THREE.BufferAttribute(par, 2));
+  const uniforms = { uTime: { value: 0 }, uScale: { value: 800 } };
+  const mat = new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false, uniforms,
+    vertexShader: /* glsl */ `
+      attribute vec3 aColor; attribute vec2 aPar; uniform float uTime; uniform float uScale; varying vec3 vC;
+      void main(){
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        float d = max(0.1, -mv.z);
+        float px = aPar.x * uScale / d;
+        gl_PointSize = clamp(px, 5.0, 260.0);
+        float on = aPar.y > 0.0 ? smoothstep(0.0, 0.12, fract(uTime / aPar.y + position.x * 0.013)) * smoothstep(0.5, 0.3, fract(uTime / aPar.y + position.x * 0.013)) : 1.0;
+        // 太远时点已经缩不动了，就改成把亮度降下来；再乘上雾
+        vC = aColor * on * min(1.0, px / 5.0) * exp(-d * d * 0.000022);
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: /* glsl */ `varying vec3 vC;
+      void main(){ vec2 p = gl_PointCoord - 0.5; float d2 = dot(p, p) * 4.0; float a = exp(-d2 * 26.0) + 0.22 * exp(-d2 * 5.0) * (1.0 - smoothstep(0.7, 1.0, d2)); gl_FragColor = vec4(max(vC * a, vec3(0.0)), 1.0); }`,
+  });
+  const points = new THREE.Points(geo, mat);
+  points.frustumCulled = false; points.renderOrder = 5;
+  return { points, uniforms };
+}

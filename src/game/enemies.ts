@@ -15,7 +15,7 @@ export const KIND_NAME: Record<Kind, string> = { gull: '机械飞鸥', hound: '�
 
 interface Spec { hp: number; speed: number; bodyY: number; bodyR: number; weak: [number, number, number]; weakR: number }
 const SPEC: Record<Kind, Spec> = {
-  gull: { hp: 45, speed: 9, bodyY: 0, bodyR: 0.6, weak: [0, 0.02, 0.7], weakR: 0.2 },
+  gull: { hp: 45, speed: 9, bodyY: 0, bodyR: 0.6, weak: [0, -0.25, 0.46], weakR: 0.2 },
   hound: { hp: 75, speed: 7.4, bodyY: 0.68, bodyR: 0.62, weak: [0, 0.92, 0.98], weakR: 0.27 },
   guard: { hp: 240, speed: 2.7, bodyY: 1.45, bodyR: 0.85, weak: [0, 2.48, 0.06], weakR: 0.3 },
 };
@@ -44,9 +44,10 @@ const SPH = new THREE.SphereGeometry(1, 12, 8);
 
 // 机体材质：三种都用同一套装甲板贴图（板缝、铆钉、掉漆），只是底色和金属感不同
 const PLATE = plating();
-const BODY = new THREE.MeshStandardMaterial({ color: 0x5a6168, map: PLATE.map, roughness: 1, metalness: 1, roughnessMap: PLATE.roughnessMap, metalnessMap: PLATE.roughnessMap, normalMap: PLATE.normalMap, normalScale: new THREE.Vector2(1.1, 1.1) });
+const BODY = new THREE.MeshStandardMaterial({ color: 0xc9cbc8, map: PLATE.map, roughness: 1, metalness: 0.5, roughnessMap: PLATE.roughnessMap, metalnessMap: PLATE.roughnessMap, normalMap: PLATE.normalMap, normalScale: new THREE.Vector2(1.1, 1.1) });
 const ACCENT = new THREE.MeshStandardMaterial({ color: 0xa8501c, map: PLATE.map, roughness: 1.1, metalness: 0.75, roughnessMap: PLATE.roughnessMap, metalnessMap: PLATE.roughnessMap, normalMap: PLATE.normalMap });
 const DARK = new THREE.MeshStandardMaterial({ color: 0x24282c, map: PLATE.map, roughness: 0.9, metalness: 0.9, roughnessMap: PLATE.roughnessMap, metalnessMap: PLATE.roughnessMap, normalMap: PLATE.normalMap, normalScale: new THREE.Vector2(0.7, 0.7) });
+const BLUR = new THREE.MeshBasicMaterial({ color: 0x0b0d0f, transparent: true, opacity: 0.2, depthWrite: false, side: THREE.DoubleSide }); // 旋翼转起来的残影
 const STEEL = new THREE.MeshStandardMaterial({ color: 0xb9bec2, roughness: 0.22, metalness: 1 }); // 液压杆的活塞杆：磨得发亮的镀铬钢
 const EYE = new THREE.MeshBasicMaterial({ color: new THREE.Color(3.2, 0.25, 0.12) });
 const BOLT = new THREE.MeshBasicMaterial({ color: new THREE.Color(9, 1.6, 0.5) });
@@ -80,7 +81,7 @@ export class Enemies {
   spawn(kind: Kind, x: number, z: number) {
     const bodyMat = BODY.clone();
     const glow = kind === 'guard' ? new THREE.MeshBasicMaterial({ color: new THREE.Color(0.4, 0.08, 0.03) }) : null;
-    const rig = instantiate(rigDef(kind), { body: bodyMat, accent: ACCENT, dark: DARK, steel: STEEL, eye: EYE, glow: glow ?? EYE });
+    const rig = instantiate(rigDef(kind), { body: bodyMat, accent: ACCENT, dark: DARK, steel: STEEL, eye: EYE, glow: glow ?? EYE, blur: BLUR });
     const spec = SPEC[kind];
     const group = new THREE.Group();
     group.add(rig.mesh);
@@ -147,6 +148,7 @@ export class Enemies {
     this.world.effects.explosion(c, big);
     this.world.effects.debris(c, big, e.kind === 'guard' ? 22 : 12);
     this.world.effects.smoke(c, big);
+    if (e.pos.y < 2.5 && e.pos.x < BOUNDS.maxX) this.world.decals.add(_b.set(e.pos.x, 0, e.pos.z), 0, 1, 0, 'scorch'); // 地上留一块烧焦的痕迹
     const [vol, pan] = this.spatial(c);
     this.world.audio.explode(vol, pan);
     this.group.remove(e.group);
@@ -407,15 +409,13 @@ function poseGuard(e: Enemy, dt: number, t: number, rel: number, dist: number, t
 
 function poseGull(e: Enemy, t: number, rel: number, dist: number, targetY: number) {
   const b = e.bones;
-  const w = t * 11 + e.phase, amp = 0.44 - clamp(e.vel.length() / 9, 0, 1) * 0.16; // 飞得快时改为滑翔，扇得浅一些
-  const u1 = Math.sin(w) * amp + 0.1, u2 = Math.sin(w - 1.0) * amp * 1.3;           // 外翼比内翼慢半拍，翅膀才有"甩"的感觉
-  b.wingL1.rotation.z = -u1; b.wingL2.rotation.z = -u2; b.wingR1.rotation.z = u1; b.wingR2.rotation.z = u2;
-  b.root.position.y = -Math.sin(w) * 0.05;
-  b.root.rotation.x = clamp(-e.vel.y * 0.04, -0.3, 0.3) - e.recoil * 0.22 + e.hitK * 0.25;
-  b.root.rotation.z = e.hitK * 0.4 * e.hitSide;
-  b.head.rotation.y = clamp(rel, -0.9, 0.9);
-  b.head.rotation.x = clamp(Math.atan2(e.pos.y - targetY, Math.max(1, dist)), -0.2, 1.0) * 0.8;
-  b.tail.rotation.x = Math.sin(w - 0.6) * 0.1 - clamp(e.vel.y * 0.05, -0.3, 0.3);
+  for (let i = 0; i < 4; i++) b['rotor' + i].rotation.y = (i % 3 === 0 ? 1 : -1) * (t * 38 + e.phase); // 对角的两只旋翼同向，相邻的反向
+  b.root.position.y = Math.sin(t * 2.1 + e.phase) * 0.04;                                                // 悬停时轻微的上下浮动
+  // 四旋翼靠倾斜机身来加速：飞得越快，机头压得越低
+  b.root.rotation.x = clamp(Math.hypot(e.vel.x, e.vel.z) * 0.028, 0, 0.26) + clamp(-e.vel.y * 0.04, -0.3, 0.3) - e.recoil * 0.22 + e.hitK * 0.25;
+  b.root.rotation.z = e.hitK * 0.4 * e.hitSide + Math.sin(t * 1.3 + e.phase) * 0.035;
+  b.head.rotation.y = clamp(rel, -1.2, 1.2);                                                              // 云台盯着玩家
+  b.head.rotation.x = clamp(Math.atan2(e.pos.y - targetY, Math.max(1, dist)), -0.2, 1.1) - b.root.rotation.x;
 }
 
 const _hit = { t: 0, nx: 0, ny: 0, nz: 0 };
