@@ -145,6 +145,38 @@ export class Parts {
     }
   }
 
+  /**
+   * 一截布料的袖管：从 a 出发沿 dir 伸出 len，半径从 r0 渐变到 r1。
+   * 布料的褶皱不是"半径忽大忽小的几个环"，而是斜着绕、互相错开的一道道折痕：
+   * 这里沿长度和圆周两个方向叠几组正弦，折痕的位置随角度偏移，于是每道褶都是歪的；袖口和手肘两处布料堆得最多，褶也最深。
+   */
+  cloth(mat: MatKey, a: V3, dir: V3, len: number, r0: number, r1: number) {
+    const w = ([x, y, u]: V3) => new THREE.Vector3(x, y, U0 - u);
+    const o = w(a), d = new THREE.Vector3(dir[0], dir[1], -dir[2]).normalize();
+    const e1 = new THREE.Vector3(0, 1, 0).cross(d).normalize(), e2 = d.clone().cross(e1);
+    const SEG = 32, RINGS = Math.ceil(len / 3.5), pos: number[] = [], idx: number[] = [];
+    const sm = (lo: number, hi: number, x: number) => { const t = Math.min(1, Math.max(0, (x - lo) / (hi - lo))); return t * t * (3 - 2 * t); };
+    for (let i = 0; i <= RINGS; i++) {
+      const z = (i / RINGS) * len, C = i / RINGS;
+      for (let j = 0; j < SEG; j++) {
+        const q = (j / SEG) * Math.PI * 2;
+        const N = Math.pow(Math.abs(Math.sin(Math.PI * z / 27 + 1.7 * Math.sin(q + 0.5) + 0.8 * Math.sin(2 * q + 1.3))), 0.6) * 2 - 1.25;
+        const Q = Math.pow(Math.abs(Math.sin(Math.PI * z / 34 + 1.9 * Math.sin(q - 0.8) + 0.7 * Math.sin(2 * q))), 0.6) * 2 - 1.25;
+        const K = Math.sin(z * 0.04 + 2 * Math.sin(q * 2 + 1)) + 0.6 * Math.sin(3 * q + z * 0.025);
+        const G = 4.6 * Math.exp(-Math.pow((C - 0.12) / 0.11, 2)), J = 4.6 * sm(0.55, 0.85, C);
+        const r = (r0 + (r1 - r0) * Math.pow(C, 0.85) + G * N + J * Q + 1.3 * Q * (1 - C) + 1.5 * K) * (i === 0 ? 0.93 : 1);
+        pos.push(o.x + d.x * z + (e1.x * Math.cos(q) + e2.x * Math.sin(q)) * r, o.y + d.y * z + (e1.y * Math.cos(q) + e2.y * Math.sin(q)) * r, o.z + d.z * z + (e1.z * Math.cos(q) + e2.z * Math.sin(q)) * r);
+      }
+    }
+    for (let i = 0; i < RINGS; i++) for (let j = 0; j < SEG; j++) {
+      const p0 = i * SEG + j, p1 = i * SEG + (j + 1) % SEG, p2 = p0 + SEG, p3 = p1 + SEG;
+      idx.push(p0, p1, p2, p1, p3, p2);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setIndex(idx); g.computeVertexNormals();
+    this.add(mat, g, null);
+  }
+
   /** 把一组圆头锥融合成一整块连续的表面（见 clay.ts）。手用它。 */
   clay(mat: MatKey, cones: [V3, V3, number, number, number?][], grooves: [V3, V3, number, number][] = [], cell = 2) {
     const w = ([x, y, u]: V3) => new THREE.Vector3(x, y, U0 - u), dir = ([x, y, u]: V3) => new THREE.Vector3(x, y, -u).normalize();
@@ -190,11 +222,10 @@ export class Parts {
  * metal —— 阳极氧化铝：很细的颗粒 + 零星划痕（划痕处更光滑）+ 大块的手摸出来的油光。
  * poly  —— 工程塑料：密密的小凸点，像握把和护木盖板上的防滑纹。
  * weave —— 织物：斜纹布的经纬线。
- * leather —— 皮革：一小块一小块不规则的粒面，块与块之间是细细的纹沟。
  * drops —— 雨水：大小不一的水珠，只用它的法线图，叠在金属外面的那层"水膜"上。
  */
-function surface(kind: 'metal' | 'poly' | 'weave' | 'drops' | 'leather') {
-  const S = 256, r = mulberry32({ metal: 311, poly: 733, weave: 97, drops: 1543, leather: 409 }[kind]);
+function surface(kind: 'metal' | 'poly' | 'weave' | 'drops') {
+  const S = 256, r = mulberry32({ metal: 311, poly: 733, weave: 97, drops: 1543 }[kind]);
   const h = new Float32Array(S * S), rough = new Float32Array(S * S);
   // 低频斑块：8×8 的随机格子做双线性插值
   const G = 8, grid = new Float32Array(G * G).map(() => r());
@@ -203,21 +234,9 @@ function surface(kind: 'metal' | 'poly' | 'weave' | 'drops' | 'leather') {
     const at = (i: number, j: number) => grid[(j % G) * G + (i % G)];
     return (at(x0, y0) * (1 - tx) + at(x0 + 1, y0) * tx) * (1 - ty) + (at(x0, y0 + 1) * (1 - tx) + at(x0 + 1, y0 + 1) * tx) * ty;
   };
-  // 皮革的粒面：每个小格子里撒一个点，像素离最近的两个点差不多远的地方就是纹沟
-  const GC = 40, cell = S / GC, seeds = kind === 'leather' ? new Float32Array(GC * GC * 2).map(() => r()) : null;
-  const grainAt = (x: number, y: number) => {
-    const cx = Math.floor(x / cell), cy = Math.floor(y / cell); let f1 = 1e9, f2 = 1e9;
-    for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) {
-      const gx = cx + ox, gy = cy + oy, k = (((gy % GC) + GC) % GC * GC + ((gx % GC) + GC) % GC) * 2;
-      const d = Math.hypot((gx + seeds![k]) * cell - x, (gy + seeds![k + 1]) * cell - y);
-      if (d < f1) { f2 = f1; f1 = d; } else if (d < f2) f2 = d;
-    }
-    return Math.min(1, (f2 - f1) / 2.2);
-  };
   for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
     const i = y * S + x, l = low(x, y);
-    if (kind === 'leather') { const g = grainAt(x, y); h[i] = g * 0.8 + r() * 0.08; rough[i] = 0.74 - g * 0.12 + r() * 0.06 - Math.max(0, l - 0.5) * 0.4; }
-    else if (kind === 'metal') { h[i] = r() * 0.5; rough[i] = 0.78 + r() * 0.12 - Math.max(0, l - 0.55) * 0.55; }
+    if (kind === 'metal') { h[i] = r() * 0.5; rough[i] = 0.78 + r() * 0.12 - Math.max(0, l - 0.55) * 0.55; }
     else if (kind === 'poly') { h[i] = r() * 0.15; rough[i] = 0.86 + r() * 0.1 - Math.max(0, l - 0.6) * 0.3; }
     else if (kind === 'weave') { h[i] = 0.45 * Math.sin((x + y) * Math.PI / 2) + 0.35 * Math.sin((x - y) * Math.PI / 4) + r() * 0.25; rough[i] = 0.9 + r() * 0.1; }
     else rough[i] = 1;
@@ -303,7 +322,7 @@ function engraving(tex: THREE.Texture, w: number, h: number, x: number, y: numbe
 }
 
 export function buildGun() {
-  const metal = surface('metal'), grain = surface('poly'), hide = surface('leather'), weave = surface('weave').normalMap, drops = surface('drops').normalMap;
+  const metal = surface('metal'), grain = surface('poly'), weave = surface('weave').normalMap, drops = surface('drops').normalMap;
   weave.repeat.set(2.5, 2.5); drops.repeat.set(1.5, 1.5);
   const ns = (k: number) => new THREE.Vector2(k, k);
   // 下着雨：枪身外面裹一层清漆层当"水膜"，水膜上用水珠法线图鼓出一颗颗雨滴，路灯照上去会有零星的亮点
@@ -319,11 +338,11 @@ export function buildGun() {
     mag: new THREE.MeshPhysicalMaterial({ color: 0x64676a, roughness: 0.55, metalness: 0.8, vertexColors: true, ...metal, normalScale: ns(0.1), envMapIntensity: 1.5, ...wet }),
     dark: new THREE.MeshStandardMaterial({ color: 0x050506, roughness: 0.95, metalness: 0 }),
     void: new THREE.MeshBasicMaterial({ color: 0x020203, fog: false }), // 孔洞内部：不受任何灯光影响的纯黑
-    // 手套：黑色皮革。细密的皮纹 + 中等粗糙度，路灯下会有一条柔和的高光；外面同样裹一层带水珠的水膜
-    fabric: new THREE.MeshPhysicalMaterial({ color: 0x161617, roughness: 0.9, roughnessMap: hide.roughnessMap, metalness: 0, normalMap: hide.normalMap, normalScale: ns(0.55), envMapIntensity: 1.5, ...wet, clearcoat: 0.3 }),
+    // 手套：针织的战术手套。布料不反光，表面是一道道织纹，只在擦着边看的时候泛一层绒面的柔光（sheen）；淋了雨也只是略深一点
+    fabric: new THREE.MeshPhysicalMaterial({ color: 0x24272b, roughness: 0.96, metalness: 0, normalMap: weave, normalScale: ns(1.1), envMapIntensity: 0.55, sheen: 0.7, sheenRoughness: 0.65, sheenColor: new THREE.Color(0x565c64) }),
     // 虎口和掌根的加厚补强：同样是黑皮，更哑一些
     leather: new THREE.MeshStandardMaterial({ color: 0x0e0e0f, roughness: 0.72, metalness: 0, normalMap: grain.normalMap, normalScale: ns(0.3), envMapIntensity: 1.1 }),
-    guard: new THREE.MeshStandardMaterial({ color: 0x111113, roughness: 0.42, metalness: 0.05, envMapIntensity: 1.3 }),
+    guard: new THREE.MeshStandardMaterial({ color: 0x131416, roughness: 0.62, metalness: 0, normalMap: grain.normalMap, normalScale: ns(0.25), envMapIntensity: 1.0 }), // 模压的橡胶护块
     strap: new THREE.MeshStandardMaterial({ color: 0x1d1e1d, roughness: 0.92, metalness: 0, normalMap: weave, normalScale: ns(0.7) }),
     sleeve: new THREE.MeshStandardMaterial({ map: camo(), roughness: 0.95, metalness: 0, normalMap: weave, normalScale: ns(0.5) }),
     lume: new THREE.MeshStandardMaterial({ color: 0x0a1814, emissive: 0x35d0a8, emissiveIntensity: 0.55, roughness: 0.4 }),
