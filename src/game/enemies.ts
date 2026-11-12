@@ -305,6 +305,7 @@ export class Enemies {
       const p = b.mesh.position;
       _c.copy(p);
       p.addScaledVector(b.vel, dt);
+      effects.trail(_c); effects.trail(_d.copy(_c).lerp(p, 0.5));
       if (p.distanceToSquared(chest) < 0.55 * 0.55 || (Math.hypot(p.x - px, p.z - pz) < 0.42 && p.y > player.pos.y && p.y < player.pos.y + player.height)) {
         this.onPlayerHit(b.dmg, _d.copy(p).addScaledVector(b.vel, -1));
         b.life = 0;

@@ -31,7 +31,7 @@ class Pool {
       // 大的粒子（火球、烟团）不是光滑的圆，而是边缘被噪声啃过的一团，每一颗转的角度都不一样；
       // 小的粒子（火星）屏幕上只有几个像素，保持干净的圆点。vPuff 就是"这颗有多大"。
       vertexShader: /* glsl */ `attribute vec4 aColor; attribute float aSize; attribute float aSeed; uniform float uScale; varying vec4 vC; varying float vSeed; varying float vPuff;
-        void main(){ vC = aColor; vSeed = aSeed; vec4 mv = modelViewMatrix * vec4(position, 1.0); gl_PointSize = aSize * uScale / max(0.1, -mv.z); vPuff = smoothstep(5.0, 30.0, gl_PointSize); gl_Position = projectionMatrix * mv; }`,
+        void main(){ vC = aColor; vSeed = aSeed; vec4 mv = modelViewMatrix * vec4(position, 1.0); float px = aSize * uScale / max(0.1, -mv.z); gl_PointSize = max(px, 2.5); vC.a *= min(1.0, px / 2.5); vPuff = smoothstep(5.0, 30.0, gl_PointSize); gl_Position = projectionMatrix * mv; }`,
       fragmentShader: /* glsl */ `varying vec4 vC; varying float vSeed; varying float vPuff;
         float h(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
         float n(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f); return mix(mix(h(i), h(i+vec2(1,0)), f.x), mix(h(i+vec2(0,1)), h(i+vec2(1,1)), f.x), f.y); }
@@ -98,7 +98,8 @@ export class Effects {
   readonly group = new THREE.Group();
   private glow = new Pool(MAX, true);
   private soft = new Pool(SOFT_MAX, false);
-  private tracers: { mesh: THREE.Mesh; life: number }[] = [];
+  // 曳光：一小段亮条沿着弹道飞过去；它身后留下一条很淡的弹道线，零点几秒内散掉
+  private tracers: { mesh: THREE.Mesh; wake: THREE.Mesh; from: THREE.Vector3; to: THREE.Vector3; len: number; t: number; fade: number; live: boolean }[] = [];
   private flashes: { light: THREE.PointLight; life: number; max: number; power: number }[] = [];
   // 弹壳和碎片：一批会弹跳、会打转的小方块
   private chunks: THREE.InstancedMesh;
@@ -110,18 +111,40 @@ export class Effects {
   constructor() {
     this.group.add(this.glow.points, this.soft.points);
 
-    this.chunks = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial({ roughness: 0.4, metalness: 0.8 }), CHUNKS);
+    // 碎片的形状：把一个二十面体的顶点随机推拉几下，得到一块棱角不规则的碎铁（方块一看就是"程序做的"）
+    const shard = new THREE.IcosahedronGeometry(0.62, 0), sp = shard.getAttribute('position'), moved = new Map<string, number>();
+    for (let i = 0; i < sp.count; i++) {
+      const key = `${sp.getX(i).toFixed(3)},${sp.getY(i).toFixed(3)},${sp.getZ(i).toFixed(3)}`;
+      if (!moved.has(key)) moved.set(key, 0.55 + ((moved.size * 7919) % 13) / 13 * 0.9);
+      const k = moved.get(key)!; sp.setXYZ(i, sp.getX(i) * k, sp.getY(i) * k, sp.getZ(i) * k);
+    }
+    shard.computeVertexNormals();
+    this.chunks = new THREE.InstancedMesh(shard, new THREE.MeshStandardMaterial({ roughness: 0.45, metalness: 0.8, flatShading: true }), CHUNKS);
     this.chunks.frustumCulled = false; this.chunks.castShadow = true;
     _m.makeScale(0, 0, 0);
     for (let i = 0; i < CHUNKS; i++) { this.chunks.setMatrixAt(i, _m); this.chunks.setColorAt(i, _col.setRGB(1, 1, 1)); }
     this.group.add(this.chunks);
 
-    const tGeo = new THREE.BoxGeometry(1, 1, 1);
+    // 两片互相垂直的长条拼成十字，从哪个角度看都有宽度；长度方向是 +z，0 是尾、1 是头
+    const strip = new THREE.PlaneGeometry(1, 1); strip.rotateX(Math.PI / 2); strip.translate(0, 0, 0.5);
+    const strip2 = strip.clone(); strip2.rotateZ(Math.PI / 2);
+    const tGeo = new THREE.BufferGeometry();
+    tGeo.setAttribute('position', new THREE.Float32BufferAttribute([...(strip.getAttribute('position').array as Float32Array), ...(strip2.getAttribute('position').array as Float32Array)], 3));
+    tGeo.setAttribute('uv', new THREE.Float32BufferAttribute([...(strip.getAttribute('uv').array as Float32Array), ...(strip2.getAttribute('uv').array as Float32Array)], 2));
+    tGeo.setIndex([0, 2, 1, 2, 3, 1, 4, 6, 5, 6, 7, 5]);
+    const streakMat = (head: boolean) => new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
+      uniforms: { uColor: { value: new THREE.Color(1, 1, 1) }, uK: { value: 1 } },
+      vertexShader: /* glsl */ `varying vec2 vP; void main(){ vP = vec2(uv.x - 0.5, position.z); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+      // 横向：中间亮、两边软；纵向：曳光是头亮尾淡，弹道线是两头都淡
+      fragmentShader: /* glsl */ `uniform vec3 uColor; uniform float uK; varying vec2 vP;
+        void main(){ float w = exp(-vP.x * vP.x * 90.0) + 0.16 * exp(-vP.x * vP.x * 14.0) * (1.0 - smoothstep(0.3, 0.5, abs(vP.x))); float l = ${head ? 'pow(clamp(vP.y, 0.0, 1.0), 2.2) * (1.0 - smoothstep(0.93, 1.0, vP.y))' : 'smoothstep(0.0, 0.15, vP.y) * (1.0 - smoothstep(0.6, 1.0, vP.y))'}; gl_FragColor = vec4(max(uColor * w * l * uK, vec3(0.0)), 1.0); }`,
+    });
     for (let i = 0; i < 24; i++) {
-      const mesh = new THREE.Mesh(tGeo, new THREE.MeshBasicMaterial({ color: new THREE.Color(6, 3.4, 1.2), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false }));
-      mesh.visible = false; mesh.frustumCulled = false;
-      this.group.add(mesh);
-      this.tracers.push({ mesh, life: 0 });
+      const mesh = new THREE.Mesh(tGeo, streakMat(true)), wake = new THREE.Mesh(tGeo, streakMat(false));
+      mesh.visible = wake.visible = false; mesh.frustumCulled = wake.frustumCulled = false; mesh.renderOrder = wake.renderOrder = 6;
+      this.group.add(mesh, wake);
+      this.tracers.push({ mesh, wake, from: new THREE.Vector3(), to: new THREE.Vector3(), len: 0, t: 0, fade: 0, live: false });
     }
     const ringGeo = new THREE.RingGeometry(0.72, 1, 48, 1); ringGeo.rotateX(-Math.PI / 2);
     for (let i = 0; i < 4; i++) {
@@ -205,7 +228,7 @@ export class Effects {
     for (let i = 0; i < count; i++) {
       const s = 2 + Math.random() * 6;
       this.emit(pos.x, pos.y, pos.z, (nx + (Math.random() - 0.5) * 1.6) * s, (ny + (Math.random() - 0.3) * 1.6) * s, (nz + (Math.random() - 0.5) * 1.6) * s,
-        hot ? 5 : 1.2, hot ? 2.6 : 1.2, hot ? 0.8 : 1.3, 0.03 + Math.random() * 0.03, 0.18 + Math.random() * 0.3, 14);
+        hot ? 2.8 : 1.0, hot ? 1.5 : 1.0, hot ? 0.45 : 1.1, 0.04 + Math.random() * 0.03, 0.18 + Math.random() * 0.3, 14);
     }
     // 一小团灰尘
     for (let i = 0; i < 3; i++) this.emit(pos.x, pos.y, pos.z, nx * 1.2 + (Math.random() - 0.5), ny * 1.2 + Math.random() * 0.8, nz * 1.2 + (Math.random() - 0.5), 0.1, 0.1, 0.11, 0.3 + Math.random() * 0.3, 0.5, -0.5);
@@ -226,10 +249,10 @@ export class Effects {
     }
     for (let i = 0; i < 60 * scale; i++) {                                                      // 火星：飞得快、落得快，落地还会弹一下
       const th = R() * 6.283, ph = Math.acos(R() * 2 - 1), s = (4 + R() * 12) * scale;
-      this.glow.emit(x, y, z, Math.sin(ph) * Math.cos(th) * s, Math.cos(ph) * s + 2.5, Math.sin(ph) * Math.sin(th) * s, 6, 2.4 + R() * 1.6, 0.5, 0.035 + R() * 0.05, 0.35 + R() * 0.8, 13);
+      this.glow.emit(x, y, z, Math.sin(ph) * Math.cos(th) * s, Math.cos(ph) * s + 2.5, Math.sin(ph) * Math.sin(th) * s, 2.6, 1.1 + R() * 0.7, 0.22, 0.05 + R() * 0.05, 0.35 + R() * 0.8, 13);
     }
     for (let i = 0; i < 16 * scale; i++)                                                        // 余烬：飘得慢，亮得久
-      this.glow.emit(x + (R() - 0.5) * scale, y + R() * scale, z + (R() - 0.5) * scale, (R() - 0.5) * 3, 1 + R() * 3, (R() - 0.5) * 3, 3.2, 0.9, 0.12, 0.03 + R() * 0.03, 1.2 + R() * 1.6, 2.2);
+      this.glow.emit(x + (R() - 0.5) * scale, y + R() * scale, z + (R() - 0.5) * scale, (R() - 0.5) * 3, 1 + R() * 3, (R() - 0.5) * 3, 2.0, 0.6, 0.08, 0.045 + R() * 0.03, 1.2 + R() * 1.6, 2.2);
     for (let i = 0; i < 14 * scale; i++)                                                        // 浓烟
       this.soft.emit(x + (R() - 0.5) * 0.7 * scale, y + R() * 0.5 * scale, z + (R() - 0.5) * 0.7 * scale, (R() - 0.5) * 2.6, 1.2 + R() * 2.4, (R() - 0.5) * 2.6,
         0.045, 0.043, 0.045, (0.6 + R() * 0.6) * scale, 1.6 + R() * 1.6, -0.5, 0.62, 1.1 * scale, LIT_SMOKE);
@@ -251,15 +274,21 @@ export class Effects {
     f.light.position.copy(pos); f.life = f.max = life; f.power = power;
   }
 
+  /** 发射一发曳光。子弹本身是瞬间命中的，这里只是让眼睛"看见它飞过去"。 */
   tracer(from: THREE.Vector3, to: THREE.Vector3, hot = true) {
-    let tr = this.tracers[0];
-    for (const k of this.tracers) if (k.life < tr.life) tr = k;
-    const len = from.distanceTo(to);
-    tr.mesh.position.copy(from).lerp(to, 0.5);
-    tr.mesh.lookAt(to);
-    tr.mesh.scale.set(0.018, 0.018, len);
-    (tr.mesh.material as THREE.MeshBasicMaterial).color.setRGB(hot ? 6 : 6, hot ? 3.4 : 0.6, hot ? 1.2 : 0.3);
-    tr.mesh.visible = true; tr.life = 0.06;
+    const tr = this.tracers.find((k) => !k.live && k.fade <= 0) ?? this.tracers[0];
+    tr.from.copy(from); tr.to.copy(to); tr.len = from.distanceTo(to); tr.t = 0; tr.fade = 0.3; tr.live = true;
+    (tr.mesh.material as THREE.ShaderMaterial).uniforms.uColor.value.setRGB(hot ? 3.2 : 3.4, hot ? 1.9 : 0.5, hot ? 0.8 : 0.25);
+    (tr.wake.material as THREE.ShaderMaterial).uniforms.uColor.value.setRGB(0.5, 0.5, 0.52);
+    for (const m of [tr.mesh, tr.wake]) { m.position.copy(from); m.lookAt(to); }
+    // 亮条本身的宽度给得比真子弹粗得多：中间是很窄的亮芯、两边是柔和的辉光，十几米外才不会细到看不见
+    tr.wake.scale.set(0.08, 0.08, tr.len); tr.wake.visible = tr.len > 3;
+    tr.mesh.visible = true; tr.mesh.scale.set(0.2, 0.2, 0.01);
+  }
+
+  /** 敌方能量弹飞行时掉下来的一粒余光，连起来就是它的尾迹。 */
+  trail(pos: THREE.Vector3) {
+    this.glow.emit(pos.x, pos.y, pos.z, (Math.random() - 0.5) * 0.3, (Math.random() - 0.5) * 0.3, (Math.random() - 0.5) * 0.3, 2.4, 0.5, 0.2, 0.09, 0.16 + Math.random() * 0.1, 0);
   }
 
   update(dt: number) {
@@ -277,7 +306,7 @@ export class Effects {
       }
       if (c.hot > 0) {        // 烧着的碎片：一路掉火星、拖黑烟
         c.hot -= dt;
-        if (Math.random() < dt * 34) this.glow.emit(c.pos.x, c.pos.y, c.pos.z, (Math.random() - 0.5) * 0.8, 0.4 + Math.random() * 0.6, (Math.random() - 0.5) * 0.8, 4.5, 1.6, 0.3, 0.04 + Math.random() * 0.05, 0.25 + Math.random() * 0.25, 3);
+        if (Math.random() < dt * 34) this.glow.emit(c.pos.x, c.pos.y, c.pos.z, (Math.random() - 0.5) * 0.8, 0.4 + Math.random() * 0.6, (Math.random() - 0.5) * 0.8, 2.4, 0.9, 0.16, 0.05 + Math.random() * 0.05, 0.25 + Math.random() * 0.25, 3);
         if (Math.random() < dt * 16) this.soft.emit(c.pos.x, c.pos.y, c.pos.z, 0, 0.5, 0, 0.05, 0.05, 0.05, 0.1, 0.7 + Math.random() * 0.5, -0.3, 0.4, 0.5, LIT_SMOKE);
       }
       c.ang += c.spin * dt;
@@ -286,10 +315,17 @@ export class Effects {
     }
     if (dirty) this.chunks.instanceMatrix.needsUpdate = true;
     for (const tr of this.tracers) {
-      if (tr.life <= 0) continue;
-      tr.life -= dt;
-      (tr.mesh.material as THREE.MeshBasicMaterial).opacity = Math.max(0, tr.life / 0.06);
-      if (tr.life <= 0) tr.mesh.visible = false;
+      if (tr.live) {
+        tr.t += 420 * dt;                                              // 曳光的飞行速度（米/秒）：比真子弹慢，为的是看得见
+        const head = Math.min(tr.t, tr.len), tail = Math.max(0, tr.t - Math.min(14, tr.len * 0.6));
+        if (tail >= tr.len) { tr.live = false; tr.mesh.visible = false; }
+        else { tr.mesh.position.copy(tr.from).lerp(tr.to, tail / Math.max(tr.len, 1e-3)); tr.mesh.scale.z = Math.max(0.01, head - tail); }
+      }
+      if (tr.fade > 0) {
+        tr.fade -= dt;
+        (tr.wake.material as THREE.ShaderMaterial).uniforms.uK.value = Math.max(0, tr.fade / 0.3) * 0.22;
+        if (tr.fade <= 0) tr.wake.visible = false;
+      }
     }
     for (const r of this.rings) {
       if (r.life <= 0) continue;
