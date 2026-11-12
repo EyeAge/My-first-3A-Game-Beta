@@ -39,7 +39,7 @@ export class UI {
       <div class="objective"><div class="k">任务目标</div><div class="t" data-f="obj"></div>
         <div class="relays"><i></i><i></i><i></i><span data-f="relayN">中继 0/3</span></div></div>
       <div class="status"><div class="k">生命状态</div><div class="hp"><b data-f="hp">100</b><div class="bar"><i data-f="hpbar"></i></div></div></div>
-      <div class="ammo"><div class="n"><b data-f="ammo">30</b><span data-f="reserve">120</span></div><div class="w">激战九式突击步枪</div><div class="msg" data-f="ammomsg"></div></div>
+      <div class="ammo"><div class="n"><b data-f="ammo">30</b><span data-f="reserve">120</span></div><div class="w">M4A1 卡宾枪</div><div class="msg" data-f="ammomsg"></div></div>
       <div class="cross" data-f="cross"><i></i><i></i><i></i><i></i><u></u></div>
       <div class="hitmark" data-f="hitmark"><i></i><i></i><i></i><i></i></div>
       <div class="dmgdir" data-f="dmgdir"><i></i></div>
