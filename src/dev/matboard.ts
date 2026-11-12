@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { decal, DECALS, labelAtlasUsage, labelMaterial } from '../render/labels';
 import { surface, SURFACES, surfaceStats, wetness, type SurfaceName } from '../render/surfaces';
 import { Kit } from '../world/kit';
 
@@ -131,5 +132,45 @@ export function triplanarArm(name = 'armor_white', bend = 1.2): THREE.Group {
   block.position.set(0.5, 0.25, 0); block.rotation.set(0.5, 0.6, 0.2); block.castShadow = true;
   group.add(block);
   group.updateMatrixWorld(true);
+  return group;
+}
+
+/**
+ * 文字和贴纸的样张：全部具名贴纸排成一面墙（深灰漆面打底，藏青色的那张垫一块白板），下面是几行不同颜色、不同做旧程度的喷字。
+ *   /viewer.html?m=dev/matboard&fn=decalSheet&views=0,5,5.2&target=0,1.5,0
+ * atlas 为 true 时不排版，直接把整张图集贴出来看（检查排得满不满、有没有互相压到）。
+ */
+export function decalSheet(atlas = false): THREE.Group {
+  const k = new Kit('decalsheet');
+  const names = Object.keys(DECALS).filter((n) => n !== 'flammable' && n !== 'warning'); // 这两个是别名，不重复摆
+  const cols = 6, cell = 0.62, rows = Math.ceil(names.length / cols);
+  const top = 0.9 + rows * cell;
+  k.box('paint_grey', cols * cell + 0.2, top + 0.1, 0.04, 0, (top + 0.1) / 2, -0.02, { c: 0.004 });
+  names.forEach((name, i) => {
+    const x = ((i % cols) - (cols - 1) / 2) * cell, y = top - 0.35 - Math.floor(i / cols) * cell;
+    const aspect = decal(name).aspect, w = aspect >= 1 ? 0.54 : 0.54 * aspect; // 放进 0.54 米见方的格子里，保持宽高比
+    if (name === 'logo_c' || name === 'corrosive') k.box('paint_white', 0.58, 0.58 / Math.max(1, aspect) + 0.04, 0.004, x, y, 0.002, { plain: true });
+    k.decal(name, w, [x, y, 0.006], undefined, w / aspect);
+  });
+  // 几行字：颜色、字体、做旧程度各不相同
+  k.box('paint_white', cols * cell - 0.2, 0.16, 0.004, 0, 0.09, 0.002, { plain: true });
+  k.label('激战港区  B4-0271', { color: 'white' }, 3.4, 0.14, [-0.9, 0.62, 0.004]);
+  k.label('最大总重 30480 千克', { color: 'yellow', distress: 0.6 }, 3.4, 0.11, [-0.9, 0.44, 0.004]);
+  k.label('危险', { color: 'red', distress: 0.2 }, 1, 0.16, [1.2, 0.62, 0.004]);
+  k.label('Fragile 0123456789', { color: 'orange', distress: 0.9 }, 2, 0.11, [0.95, 0.44, 0.004]);
+  k.label('请勿靠近', { color: 'black', font: 'sans' }, 1, 0.12, [-1.2, 0.09, 0.006]);
+  k.label('JZTU 402719 6', { color: 'navy', distress: 0.5 }, 2, 0.12, [0.6, 0.09, 0.006]);
+  const group = k.finish({ grime: 0 }).group;
+  if (atlas) {
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(3, 3), new THREE.MeshBasicMaterial({ map: (labelMaterial() as THREE.MeshStandardMaterial).map, transparent: true }));
+    quad.position.set(0, 1.6, 0.2);
+    const back = new THREE.Mesh(new THREE.PlaneGeometry(3.1, 3.1), new THREE.MeshBasicMaterial({ color: 0x3a4048 }));
+    back.position.set(0, 1.6, 0.19);
+    const only = new THREE.Group();
+    only.add(back, quad);
+    console.info('[decalSheet] 图集用掉', (labelAtlasUsage() * 100).toFixed(0) + '%');
+    (window as unknown as { __surfaces: unknown }).__surfaces = { atlasUsed: labelAtlasUsage() };
+    return only;
+  }
   return group;
 }
