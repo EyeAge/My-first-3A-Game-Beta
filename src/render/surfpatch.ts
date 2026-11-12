@@ -32,7 +32,19 @@ varying vec3 vSurfObjNormal; varying vec3 vSurfAxisX; varying vec3 vSurfAxisY;
 #endif
 `;
 const VERT_BODY = /* glsl */ `
-#ifdef SURF_TRIPLANAR
+#if defined( SURF_TRIPLANAR ) && defined( SURF_WORLD )
+  // 世界坐标版的三平面投影：直接拿"摆好以后"的世界位置去取贴图。
+  // 给没有米制贴图坐标、而且不会动的东西用（按实例缩放的钢梁、直接用 BoxGeometry 搭的墙）：不管零件被拉多长，纹理密度都一样。
+  // 代价是贴图不跟着物体走 —— 物体一动，纹理就在它表面上滑，所以会动的东西不能用。
+  vec4 surfWorld = vec4(transformed, 1.0);
+  mat3 surfTurn = mat3(modelMatrix);
+  #ifdef USE_INSTANCING
+    surfWorld = instanceMatrix * surfWorld; surfTurn = surfTurn * mat3(instanceMatrix);
+  #endif
+  vSurfPos = (modelMatrix * surfWorld).xyz;
+  vSurfObjNormal = surfTurn * normal;            // 对盒子这类"面正对着轴"的几何体是准确的；拉伸过的曲面会略有偏差，只影响混合权重
+  vSurfAxisX = mat3(viewMatrix) * vec3(1.0, 0.0, 0.0); vSurfAxisY = mat3(viewMatrix) * vec3(0.0, 1.0, 0.0);   // 世界的 x、y 轴在镜头坐标系里的方向
+#elif defined( SURF_TRIPLANAR )
   // 三平面投影：用"骨骼还没动之前"的位置和法线去取贴图，于是不管四肢怎么摆，贴图都粘在零件上不会滑。
   vSurfPos = position; vSurfObjNormal = normal;
   // 贴图里的凹凸是在模型自己的坐标系里算的，要转到镜头的坐标系才能参与光照。
@@ -135,7 +147,7 @@ const FRAG_MAP = /* glsl */ `
     surfUp = smoothstep(0.15, 0.85, worldN.y);                                 // 朝天的程度
     float exposed = smoothstep(-0.4, -0.05, worldN.y);                         // 淋不淋得到：明显朝下的面是 0
     float streak = 0.0;
-    #ifndef SURF_TRIPLANAR
+    #if !defined( SURF_TRIPLANAR ) || defined( SURF_WORLD )
       // 立面上的水痕：横向变化快（每米 9 次和 29 次）、竖向变化慢（每米不到 1 次）的噪声 → 一道道竖条
       float across = vSurfPos.x + vSurfPos.z;
       streak = surfNoise(vec3(across * 9.0, vSurfPos.y * 0.55, across * 0.7 + 3.0)) * surfNoise(vec3(across * 29.0, vSurfPos.y * 1.1, 7.0));
@@ -145,7 +157,7 @@ const FRAG_MAP = /* glsl */ `
     float rain = uSurfWet * uSurfMisc.x * exposed;                             // 全场湿度 × 室内外 × 淋不淋得到
     // 立面：材质自己的"立面湿度" × (0.55 .. 1.45，看有没有水痕)；朝天：0.75 .. 1.25。按朝天的程度在两者之间过渡
     surfWetK = rain * mix(uSurfWetParams.z * (0.55 + 0.9 * streak), 0.75 + 0.5 * surfMacroA, surfUp);
-    #ifndef SURF_TRIPLANAR
+    #if !defined( SURF_TRIPLANAR ) || defined( SURF_WORLD )
       { // 溅湿带：离地半米以内的立面，被地上溅起来的水打湿，顺便溅上泥（最多暗 22%）。这里假定地面在 y = 0
         float low = smoothstep(0.5, 0.0, vSurfPos.y) * (1.0 - surfUp) * exposed;
         surfWetK += rain * low * 0.6;
@@ -256,7 +268,8 @@ const FRAG_DEBUG = /* glsl */ `
 
 /**
  * 给一个标准材质的着色器动手术。在 material.onBeforeCompile 里调用。
- * 材质上需要已经设好这几个宏：SURF_TINT（0–3），可选 SURF_FX（要不要不均匀和雨湿）、SURF_TRIPLANAR、SURF_ACUT（铁丝网镂空）。
+ * 材质上需要已经设好这几个宏：SURF_TINT（0–3），可选 SURF_FX（要不要不均匀和雨湿）、SURF_TRIPLANAR（三平面投影；
+ * 再加 SURF_WORLD 就是按世界坐标投影）、SURF_ACUT（铁丝网镂空）。
  */
 export function patchSurfaceShader(shader: THREE.WebGLProgramParametersWithUniforms, uniforms: SurfaceUniforms) {
   Object.assign(shader.uniforms, uniforms);

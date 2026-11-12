@@ -174,3 +174,24 @@ export function decalSheet(atlas = false): THREE.Group {
   }
   return group;
 }
+
+/**
+ * 世界坐标投影的检查：同一个 1 米的方块（贴图坐标是 0..1，不是米）拉成长短不一的几根梁，再用 InstancedMesh 摆几份。
+ * 左边一组用 { world: true }：不管拉多长，纹理都一样密。右边一组不用：纹理被拉花了。
+ *   /viewer.html?m=dev/matboard&fn=worldBeams&args=["paint_yellow"]
+ */
+export function worldBeams(name = 'paint_yellow'): THREE.Group {
+  const group = new THREE.Group(), unit = new THREE.BoxGeometry(1, 1, 1);
+  const beams: [number, number, number, number, number, number, number][] = [ // 尺寸 x、y、z，位置 x、y、z，绕竖轴转多少
+    [3, 0.2, 0.2, 0, 0.1, 0, 0], [0.2, 2, 0.2, -1.4, 1, 0, 0], [0.2, 2, 0.2, 1.4, 1, 0, 0], [3, 0.3, 0.3, 0, 2.15, 0, 0], [2.4, 0.12, 0.12, 0, 1.1, 0, 0.5], [1, 1, 1, 0, 0.8, -1.2, 0.4],
+  ];
+  [surface(name as SurfaceName, { world: true }), surface(name as SurfaceName)].forEach((mat, side) => {
+    const inst = new THREE.InstancedMesh(unit, mat, beams.length);
+    beams.forEach(([sx, sy, sz, x, y, z, yaw], i) => inst.setMatrixAt(i, new THREE.Matrix4().compose(
+      new THREE.Vector3(x + (side ? 2 : -2), y, z), new THREE.Quaternion().setFromEuler(new THREE.Euler(0, yaw, 0)), new THREE.Vector3(sx, sy, sz))));
+    inst.castShadow = inst.receiveShadow = true;
+    inst.computeBoundingSphere(); inst.computeBoundingBox();
+    group.add(inst);
+  });
+  return group;
+}

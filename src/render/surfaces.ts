@@ -132,6 +132,11 @@ export interface SurfaceOpts {
   color?: number;
   /** 三平面投影：给没有贴图坐标的蒙皮模型用。scale 是纹理密度倍数。 */
   triplanar?: boolean; scale?: number;
+  /**
+   * 按世界坐标做三平面投影：给"没有米制贴图坐标、而且不会动"的东西用 ——
+   * 比如同一个盒子按实例拉成长短不一的钢梁，或者直接用 BoxGeometry 搭的墙和地。纹理密度处处一样，但物体一动纹理就会滑。
+   */
+  world?: boolean;
 }
 
 /** 全场共用的"有多湿"：1 是正在下雨。所有材质的着色器都指向这一个对象，改它的 value 全场一起变。 */
@@ -156,7 +161,7 @@ let ready = false;
 
 /** 取一个具名材质。同名同选项返回同一个实例。 */
 export function surface(name: SurfaceName, o: SurfaceOpts = {}): THREE.Material {
-  const key = `${name}|${o.vertexColors ? 'v' : ''}|${o.triplanar ? 't' + (o.scale ?? 1) : ''}|${o.doubleSide ? 'd' : ''}|${o.interior ? 'i' : ''}|${o.color !== undefined ? 'c' + o.color : ''}`;
+  const key = `${name}|${o.vertexColors ? 'v' : ''}|${o.world ? 'w' + (o.scale ?? 1) : o.triplanar ? 't' + (o.scale ?? 1) : ''}|${o.doubleSide ? 'd' : ''}|${o.interior ? 'i' : ''}|${o.color !== undefined ? 'c' + o.color : ''}`;
   let m = cache.get(key);
   if (!m) cache.set(key, (m = make(name, o)));
   return m;
@@ -205,10 +210,11 @@ function dress(mat: THREE.MeshStandardMaterial) {
   if (d.alphaCut) mat.alphaTest = 0.5;
 
   // 透明的和镂空的材质不做雨湿和不均匀（玻璃上的雨滴已经画在贴图里了）
-  const tri = !!o.triplanar, fx = !d.transparent && !d.alphaCut, cut = !!d.alphaCut && !tri;
+  const world = !!o.world, tri = !!o.triplanar || world, fx = !d.transparent && !d.alphaCut, cut = !!d.alphaCut && !tri;
   // 宏（define）决定着色器里走哪条分支。宏相同的材质会共用同一个编译好的着色器程序
   const defines: Record<string, string | number> = { STANDARD: '', SURF_TINT: d.tint };
   if (tri) defines.SURF_TRIPLANAR = '';
+  if (world) defines.SURF_WORLD = '';
   if (fx) defines.SURF_FX = '';
   if (cut) defines.SURF_ACUT = '';
   if (DEBUG_VIEW) defines.SURF_DEBUG = '';
@@ -221,7 +227,7 @@ function dress(mat: THREE.MeshStandardMaterial) {
   };
   mat.onBeforeCompile = (shader) => patchSurfaceShader(shader, uniforms);
   // three.js 靠这个字符串判断"两个材质能不能共用一个程序"。颜色、湿度这些都是 uniform，不影响程序本身
-  mat.customProgramCacheKey = () => `surf1|${d.tint}${tri ? 't' : ''}${fx ? 'f' : ''}${cut ? 'a' : ''}${DEBUG_VIEW ? 'd' : ''}`;
+  mat.customProgramCacheKey = () => `surf1|${d.tint}${tri ? 't' : ''}${world ? 'w' : ''}${fx ? 'f' : ''}${cut ? 'a' : ''}${DEBUG_VIEW ? 'd' : ''}`;
   mat.userData.set = set.key; mat.userData.tile = set.tile; mat.userData.interior = !!o.interior;
   mat.needsUpdate = true;
 }
