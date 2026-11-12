@@ -8,6 +8,9 @@ import { BOUNDS, QUAY_X } from '../world/port';
 const HALF = 0.36;       // 玩家碰撞体的半宽
 const STAND = 1.78, CROUCH = 1.15;
 const GRAVITY = 19, JUMP = 6.3;
+// 脱战回血（数值照参考）：4 秒没挨打就开始回，每秒 25 点 —— 也就是躲进掩体 8 秒能从濒死回到满血。
+// 敌人的火力是按这个节奏设计的：探头打几枪、缩回去等几秒，而不是站在空地上对射。
+const REGEN_DELAY = 4, REGEN_RATE = 25;
 
 /** 第一人称角色：移动、跳跃、蹲伏、碰撞、受伤与回血。 */
 export class Player {
@@ -49,9 +52,12 @@ export class Player {
 
   takeDamage(n: number, from: THREE.Vector3 | null, t: number) {
     if (!this.alive) return;
-    this.hp -= n; this.lastDamageT = t; this.damageFlash = 1;
+    this.hp -= n; this.lastDamageT = t;
+    // 受伤的红色脉冲和镜头震动都按伤害大小给：机器狗的一发只有 5 点，轻轻闪一下；连着挨几发才会叠到满。
+    // （以前是不管伤害多少都直接闪到最红，现在敌人改成小伤害连发，那样会一直满屏红。）
+    this.damageFlash = Math.min(1, this.damageFlash + 0.5 + n / 40);
     if (from) this.damageFrom.copy(from);
-    this.addShake(0.25 + n * 0.012);
+    this.addShake(0.22 + n / 70);
     if (this.hp <= 0) { this.hp = 0; this.alive = false; }
   }
 
@@ -127,8 +133,8 @@ export class Player {
       this.bob = damp(this.bob, 1, 8, dt);
     } else this.bob = damp(this.bob, 0, 8, dt);
 
-    // ---- 回血：一段时间没挨打就慢慢恢复
-    if (this.alive && t - this.lastDamageT > 5 && this.hp < 100) this.hp = Math.min(100, this.hp + 14 * dt);
+    // ---- 回血：脱战 REGEN_DELAY 秒后，每秒回 REGEN_RATE 点，一直回到满
+    if (this.alive && t - this.lastDamageT > REGEN_DELAY && this.hp < 100) this.hp = Math.min(100, this.hp + REGEN_RATE * dt);
   }
 
   applyCamera(cam: THREE.PerspectiveCamera, t: number) {
