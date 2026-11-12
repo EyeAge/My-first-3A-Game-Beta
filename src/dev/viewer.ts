@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { surface } from '../render/surfaces';
+import { initSurfaces, surface } from '../render/surfaces';
 import { bakeEnvironment } from '../world/atmosphere';
 
 // 模型查看器（只在开发时用，不会打进游戏的单文件里）。
@@ -36,6 +36,7 @@ async function main() {
   gl.toneMappingExposure = Number(q.get('exp') ?? 1);
   gl.shadowMap.enabled = true;
   gl.shadowMap.type = THREE.PCFSoftShadowMap;
+  initSurfaces(gl); // 材质库要用渲染器在显卡上生成贴图
 
   const scene = new THREE.Scene();
   const game = q.get('light') === 'game';

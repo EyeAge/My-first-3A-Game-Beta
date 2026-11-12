@@ -12,6 +12,7 @@ import { Decals } from './render/decals';
 import { Effects } from './render/effects';
 import { PlanarReflection } from './render/reflection';
 import { Renderer } from './render/renderer';
+import { initSurfaces } from './render/surfaces';
 import { UI, type HudFrame, type Marker } from './ui/ui';
 import { bakeEnvironment, createSea, createSky } from './world/atmosphere';
 import { createRain } from './world/rain';
@@ -33,6 +34,7 @@ async function boot() {
   camera.rotation.order = 'YXZ';
   scene.add(camera);
   const renderer = new Renderer(canvas, scene, camera);
+  initSurfaces(renderer.gl); // 材质库要用渲染器在显卡上生成贴图
 
   await step('正在生成涂装、锈迹与雨水', 0.2);
   const sky = createSky();
