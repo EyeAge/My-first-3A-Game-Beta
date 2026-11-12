@@ -1,5 +1,8 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { mulberry32 } from '../core/math';
+import { DECALS } from '../render/labels';
+import { emissive } from '../render/surfaces';
 import { chamferBox, Kit, type LocalBox, type Mat, type Tint, type V3 } from './kit';
 
 // 四号泊位维修车间 —— 建筑本体（不含里面的陈设，陈设在 workshopfit.ts）。
@@ -33,6 +36,16 @@ export interface Workshop {
   roofHoles: { minX: number; maxX: number; minZ: number; maxZ: number }[];
   /** 每帧调用，t 是游戏开始以来的秒数。目前只有排风扇的扇叶在转。 */
   update?(t: number): void;
+}
+
+export interface WorkshopOptions {
+  /**
+   * 从场地上的高杆灯拉到檐角的下垂电缆，每根是 [灯杆上的挂点, 檐角的挂点, 中间下垂多少米]。
+   * 默认是参考关卡里的两根；我们的灯杆位置不一样时由调用方改，传 [] 就不拉。
+   */
+  mastCables?: [V3, V3, number][];
+  /** 南墙根引出来、贴着地绕进堆场的那根电缆。默认有。 */
+  groundCable?: boolean;
 }
 
 // ------------------------------------------------------------------ 尺寸
@@ -70,6 +83,17 @@ const ROOF_X0 = X0 - 0.3, ROOF_COLS = 20, COL_W = (X1 - X0 + 0.6) / ROOF_COLS;  
 const ROOF_ROWS = [-0.04, 0.25, 0.5, 0.75, 1];
 /** 被掀掉的 8 块板：[哪一坡（S 朝南 / N 朝北）, 第几排, 第几列]。 */
 const ROOF_HOLES: ['S' | 'N', number, number][] = [['S', 1, 4], ['S', 2, 5], ['S', 1, 11], ['S', 2, 15], ['S', 3, 8], ['N', 2, 7], ['N', 1, 13], ['N', 3, 17]];
+
+/** 吊灯的位置 [x, z]：两排五列，西北角那一盏的位置上是夹层办公室，所以没有。 */
+const LAMPS: [number, number][] = [];
+for (const z of [-15.4, -23.6]) for (const x of [-13.6, -8.5, -3.5, 2.6, 8.6]) if (!(z < -20 && x < -10)) LAMPS.push([x, z]);
+/** 9 盏吊灯里交错挑出来的 4 盏：它们下面各有一盏真的点光。 */
+const LIT_LAMPS: [number, number][] = [[-8.5, -15.4], [2.6, -15.4], [-3.5, -23.6], [8.6, -23.6]];
+
+const DEFAULT_MAST_CABLES: [V3, V3, number][] = [
+  [[-20.6, 11.8, -11.6], [-16.2, 7.25, -11.4], 0.9],
+  [[17, 12.4, -8.7], [12.3, 7.3, -11.3], 1],
+];
 
 /** 主要尺寸，给摆陈设、布置出生点、铺寻路网格的代码用。 */
 export const WORKSHOP = {
@@ -564,6 +588,134 @@ function buildEastDoor(c: Ctx) {
   boxes.push({ min: [leafX - 0.05, 0, leafZ0], max: [leafX + 0.12, h + 0.3, leafZ1], surface: 'metal' });
 }
 
+// ------------------------------------------------------------------ 排风扇
+/** 东山墙圆洞里的排风扇。返回会转的那一组（扇叶 + 轮毂），它要单独留着，不能和别的网格合并。 */
+function buildFan(c: Ctx): THREE.Group {
+  const { out, inn } = c, y = FAN.y, z = RIDGE_Z, r = FAN.r;
+  // 风筒：两层山墙板之间是空的，从洞里斜着看会看进夹层。套一圈短筒把它封住（参考里没有这一件）
+  inn.lathe('steel_galv', [[r - 0.005, 0], [r + 0.03, 0], [r + 0.03, 0], [r + 0.03, 0.21], [r + 0.03, 0.21], [r - 0.005, 0.21], [r - 0.005, 0.21], [r - 0.005, 0]], X1 - 0.14, y, z, { axis: 'x', seg: 28, tint: 0.8 });
+  out.torus('steel_galv', r + 0.02, 0.05, X1 + 0.04, y, z, { axis: 'x', seg: 28, tubeSeg: 8 });      // 外圈
+  inn.torus('steel_galv', r + 0.02, 0.035, X1 - 0.16, y, z, { axis: 'x', seg: 28, tubeSeg: 6 });     // 内圈
+  for (const a of [0.4, 0.4 + Math.PI / 2])  // 外侧的防护栏：两根过圆心的圆钢
+    out.tube('steel_galv', [X1 + 0.1, y - Math.sin(a) * r, z - Math.cos(a) * r], [X1 + 0.1, y + Math.sin(a) * r, z + Math.cos(a) * r], 0.012, { seg: 5 });
+  for (const a of [0, (Math.PI * 2) / 3, (Math.PI * 4) / 3])  // 内侧的电机支架：三根从圆周到圆心
+    inn.tube('steel_galv', [X1 - 0.18, y + Math.sin(a) * r, z + Math.cos(a) * r], [X1 - 0.18, y, z], 0.014, { seg: 5 });
+  inn.cyl('steel_dark', 0.13, 0.26, X1 - 0.22, y, z, { axis: 'x', seg: 12 });                        // 电机
+
+  // 会转的部分单独一只零件箱，绕着自己的原点（轮毂中心）搭
+  const k = new Kit('workshop-fan', 0, { interior: true });
+  for (let i = 0; i < 5; i++) {
+    const blade = chamferBox(0.012, 0.42, 0.2, 0.003), p = blade.getAttribute('position');
+    for (let j = 0; j < p.count; j++) p.setZ(j, p.getZ(j) * (0.75 + 0.5 * (p.getY(j) / 0.42 + 0.5)));   // 叶片越往外越宽
+    blade.rotateY(0.5);                          // 桨距：叶片要斜着才扇得动风
+    blade.translate(0, 0.3, 0);                  // 从轮毂往外挪
+    blade.rotateX((i / 5) * Math.PI * 2);        // 5 片均匀排一圈
+    k.add('steel_worn', blade);
+  }
+  k.cyl('steel_dark', 0.1, 0.1, 0, 0, 0, { axis: 'x', seg: 12 });
+  // grime 0：烤脏会把"贴地"的顶点压暗，而扇叶是绕着原点搭的，有一半在 y<0，会被当成埋在地里
+  const fan = k.finish({ boxes: [], grime: 0 }).group;
+  fan.position.set(X1 - 0.05, y, z);
+  return fan;
+}
+
+// ------------------------------------------------------------------ 吊灯
+/**
+ * 9 盏工矿吊灯。每盏只是一个铝灯罩加一块很亮的发光圆盘 —— 它自己并不照亮任何东西，
+ * "亮"的感觉来自后处理的泛光把它晕开。真正往地上投光的是其中 4 盏下面的点光（见 lights）。
+ */
+function buildLamps(c: Ctx): Workshop['lights'] {
+  const { inn } = c, glow = emissive(0xffb468, 7), y = 6.05;   // y 是灯罩口的高度
+  for (const [x, z] of LAMPS) {
+    inn.tube('steel_dark', [x, roofY(z) - 0.03, z], [x, y + 0.3, z], 0.012, { seg: 5 });   // 吊线，一直接到屋面内衬
+    // 灯罩：上小下大的喇叭口，车削出来。轮廓从顶面走到外壁、绕过罩口的边、再沿内壁走回去，所以它是有厚度的空壳，
+    // 从下面能看进去。（参考里灯罩是个实心圆台，发光盘被封在里面，其实一点也看不见。）
+    inn.lathe('aluminium', [[0, 0.3], [0.09, 0.3], [0.09, 0.3], [0.33, 0], [0.33, 0], [0.318, 0], [0.318, 0], [0.08, 0.288], [0.08, 0.288], [0, 0.288]], x, y, z, { seg: 14 });
+    inn.cyl('steel_dark', 0.09, 0.14, x, y + 0.37, z, { seg: 10 });                         // 灯头
+    inn.cyl(glow, 0.24, 0.02, x, y + 0.02, z, { seg: 14, raw: true });                      // 发光盘，缩在罩口里面 2 厘米
+  }
+  return LIT_LAMPS.map(([x, z]) => ({ pos: [x, 5.75, z] as V3, color: 0xffc48a, intensity: 34, distance: 13 }));
+}
+
+// ------------------------------------------------------------------ 外墙上的字、污渍和电缆
+/**
+ * 往贴纸表里补三张这栋楼要用的图。贴纸表里已经有同名的就不动它（??=），以后正式画了更好的，这里自动让位。
+ * 每张贴纸在图集里是 128 像素见方的一格，贴的时候再拉成需要的长宽比。
+ */
+function registerDecals() {
+  const clip = (g: CanvasRenderingContext2D, S: number) => { g.beginPath(); g.rect(0, 0, S, S); g.clip(); };
+  // 一撮往下淌的竖条：每条上头浓、下头淡。锈水和黑垢都是它，只是颜色不同
+  const streaks = (g: CanvasRenderingContext2D, S: number, seed: number, count: number, colors: string[], top: number) => {
+    const rng = mulberry32(seed);
+    for (let i = 0; i < count; i++) {
+      const x = S * (0.16 + 0.68 * (rng() * 0.5 + rng() * 0.5)), len = S * (0.22 + rng() * 0.72), w = 1.3 + rng() * rng() * 10, a = 0.07 + rng() * 0.2;
+      const rgb = colors[Math.floor(rng() * colors.length)], grad = g.createLinearGradient(0, top, 0, top + len);
+      grad.addColorStop(0, `rgba(${rgb},${a * 1.4})`); grad.addColorStop(0.25, `rgba(${rgb},${a})`); grad.addColorStop(1, `rgba(${rgb},0)`);
+      g.fillStyle = grad;
+      g.fillRect(x - w / 2, top, w, len);
+    }
+    return rng;
+  };
+  DECALS.rust_run ??= (g, S) => {
+    clip(g, S);
+    const rng = streaks(g, S, 977, 40, ['118,52,18', '150,78,26'], 5);
+    for (let i = 0; i < 9; i++) {   // 顶上几团深色：锈水是从这里（一颗烂掉的钉子）淌下来的
+      g.fillStyle = `rgba(${rng() < 0.5 ? '70,30,14' : '104,44,16'},${0.5 + rng() * 0.4})`;
+      g.beginPath(); g.ellipse(S * (0.3 + rng() * 0.4), 4 + rng() * 6, 3 + rng() * 7, 2 + rng() * 3, 0, 0, Math.PI * 2); g.fill();
+    }
+  };
+  DECALS.grime_streak ??= (g, S) => { clip(g, S); streaks(g, S, 431, 46, ['26,23,19'], 0); };
+  // "四号泊位"喷字外面的黄框。这一格会被拉成 3.2 × 1.12 米，所以横线和竖线在格子里的粗细不一样
+  DECALS.workshop_sign_frame ??= (g, S) => {
+    clip(g, S);
+    const px = S / 3.2, py = S / 1.12, edge = 0.04, line = 0.06;   // 框线宽 6 厘米，离边 4 厘米
+    g.fillStyle = '#d2a021';
+    g.fillRect(edge * px, edge * py, S - 2 * edge * px, line * py);
+    g.fillRect(edge * px, S - (edge + line) * py, S - 2 * edge * px, line * py);
+    g.fillRect(edge * px, edge * py, line * px, S - 2 * edge * py);
+    g.fillRect(S - (edge + line) * px, edge * py, line * px, S - 2 * edge * py);
+    for (const u of [0.25, 0.75]) g.clearRect(S * u - line * px * 0.5, 0, line * px, S);   // 漏字板的两道"断桥"
+  };
+}
+
+function buildSignsAndCables(c: Ctx, o: WorkshopOptions) {
+  const { out } = c, z = Z1 + 0.064;   // 外皮表面再往外 4 毫米，免得和墙板抢同一个平面
+  registerDecals();
+  // 两处喷字都比参考的位置往西挪了大约 1 米：照搬的话，各有一根落水管正好压在最后一个字上
+  out.label('四号泊位维修车间', { color: 'white', font: 'stencil', distress: 0.45 }, 8, 0.55, [3.2, 4.3, z]);
+  out.decal('workshop_sign_frame', 3.2, [-12.9, 3.4, z], undefined, 1.12);
+  out.label('四号泊位', { color: 'yellow', font: 'stencil', distress: 0.55 }, 2.8, 0.86, [-12.9, 3.38, z + 0.001]);
+  out.decal('rust_run', 1, [9, 3.2, z], undefined, 2);
+  out.decal('grime_streak', 1.2, [-14, 3.9, z], undefined, 2.4);
+
+  // 从高杆灯拉过来的两根电缆：两头拉直，中间按抛物线垂下去
+  for (const [a, b, sag] of o.mastCables ?? DEFAULT_MAST_CABLES) {
+    const pts: V3[] = [];
+    for (let i = 0; i <= 8; i++) { const u = i / 8; pts.push([a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u - sag * 4 * u * (1 - u), a[2] + (b[2] - a[2]) * u]); }
+    out.hose('rubber', pts, 0.018, { steps: 24, seg: 5 });
+  }
+  if (o.groundCable ?? true) {
+    // 南墙上一只接线盒，一根电缆从里面出来、落到地上、弯弯曲曲地绕进堆场
+    const route: number[][] = [[4.6, -10.9, 0.5], [4.7, -10.6, 0.05], [4.2, -9.2], [1, -8.4], [-2.6, -9.1], [-4.6, -6.4], [-5.9, -5.9]];   // [x, z, 高度（不写就是贴地）]
+    const r = 0.024, lay = r * 0.9, pts: V3[] = [];
+    route.forEach((p, i) => {
+      pts.push([p[0], p.length > 2 ? p[2] : lay, p[1]]);
+      const q = route[i + 1];
+      if (!q || p.length > 2 || q.length > 2) return;
+      // 贴地的长直段中间再插几个点，每个点往旁边偏一点：电缆是随手扔在地上的，不会笔直
+      const dx = q[0] - p[0], dz = q[1] - p[1], len = Math.hypot(dx, dz);
+      if (len <= 2.2) return;
+      const n = Math.floor(len / 1.6);
+      for (let j = 1; j < n; j++) {
+        const u = j / n, off = Math.sin((i * 3.1 + j) * 2.3) * Math.min(0.28, len * 0.04);
+        pts.push([p[0] + dx * u - (dz / len) * off, lay, p[1] + dz * u + (dx / len) * off]);
+      }
+    });
+    out.hose('rubber', pts, r, { steps: 44, seg: 5 });
+    out.box('steel_galv', 0.2, 0.26, 0.1, 4.6, 0.55, Z1 + 0.05, { c: 0.01, tint: 0.7 });
+  }
+}
+
 // ------------------------------------------------------------------ 墙的碰撞盒
 /**
  * 碰撞盒和看得见的网格是两套东西，各管各的。墙在碰撞上就是几块薄板：
@@ -589,7 +741,7 @@ function wallColliders(boxes: LocalBox[]) {
 }
 
 // ------------------------------------------------------------------ 组装
-export function buildWorkshop(): Workshop {
+export function buildWorkshop(opts: WorkshopOptions = {}): Workshop {
   const out = new Kit('workshop', 4);
   const inn = new Kit('workshop-in', 4, { interior: true });
   const boxes: LocalBox[] = [];
@@ -610,17 +762,51 @@ export function buildWorkshop(): Workshop {
   buildFrame(c);
   buildSouthDoor(c);
   buildEastDoor(c);
+  const fan = buildFan(c);
+  const lights = buildLamps(c);
+  buildSignsAndCables(c, opts);
 
   // 三只零件箱各自把同材质的零件合并成一个网格，再一起收进同一个 group
   const group = new THREE.Group();
   group.name = 'workshop';
   for (const part of [floor.finish({ boxes: [], grime: 0 }), out.finish({ boxes: [] }), inn.finish({ boxes: [], grime: 0.8 })])
     for (const mesh of [...part.group.children]) group.add(mesh);
+  fan.userData.dynamic = true;   // 提醒调用方：这一组每帧在动，不要和静态网格合并
+  group.add(fan);
 
   return {
-    group, boxes, roofHoles,
-    lights: [],   // 吊灯还没装
+    group, boxes, lights, roofHoles,
     interior: { min: [X0, 0, Z0], max: [X1, RIDGE, Z1] },
+    update(t: number) { fan.rotation.x = (t * FAN.speed) % (Math.PI * 2); },
   };
 }
 
+/**
+ * 把搭好的车间整体摆到地图上：先绕竖轴转 quarterTurns 个 90°（正的是从上往下看逆时针），再平移 (dx, dz)。
+ * 网格直接改 group 的位置和朝向；碰撞盒、灯位、室内范围盒、屋面破洞这些"数据"则逐个换算成地图坐标后返回。
+ * 只支持 90° 的整数倍：碰撞盒和范围盒必须是横平竖直的，转别的角度就不再是了。
+ */
+export function placeWorkshop(w: Workshop, dx: number, dz: number, quarterTurns = 0): Workshop {
+  const q = ((quarterTurns % 4) + 4) % 4, cos = [1, 0, -1, 0][q], sin = [0, 1, 0, -1][q];
+  // 和 three.js 里 rotation.y 的转法一致：x' = x·cos + z·sin，z' = −x·sin + z·cos
+  const point = (p: V3): V3 => [p[0] * cos + p[2] * sin + dx, p[1], -p[0] * sin + p[2] * cos + dz];
+  // 盒子转完以后，原来的"最小角"不一定还是最小角，所以两个角都换算，再重新分出大小
+  const box = <T extends { min: V3; max: V3 }>(b: T): T => {
+    const a = point(b.min), c = point(b.max);
+    return { ...b, min: [Math.min(a[0], c[0]), a[1], Math.min(a[2], c[2])], max: [Math.max(a[0], c[0]), c[1], Math.max(a[2], c[2])] };
+  };
+  w.group.position.set(dx, 0, dz);
+  w.group.rotation.y = (q * Math.PI) / 2;
+  w.group.updateMatrixWorld(true);
+  return {
+    group: w.group,
+    boxes: w.boxes.map(box),
+    lights: w.lights.map((l) => ({ ...l, pos: point(l.pos) })),
+    interior: box(w.interior),
+    roofHoles: w.roofHoles.map((h) => {
+      const b = box({ min: [h.minX, 0, h.minZ] as V3, max: [h.maxX, 0, h.maxZ] as V3 });
+      return { minX: b.min[0], maxX: b.max[0], minZ: b.min[2], maxZ: b.max[2] };
+    }),
+    update: w.update,
+  };
+}
