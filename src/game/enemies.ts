@@ -241,6 +241,24 @@ export interface Guard extends Walker {
 export type Enemy = Gull | Hound | Guard;
 export interface HitResult { enemy: Enemy; t: number; weak: boolean }
 export interface World { colliders: Colliders; nav: NavGrid; effects: Effects; decals: Decals; audio: GameAudio; camera: THREE.Camera }
+/** 一个能让无人机飞进飞出的门洞。 */
+export interface Door {
+  x: number; z: number;                            // 门洞中心（在墙面上）
+  nx: number; nz: number;                          // 朝屋外的方向（单位向量）
+  half: number;                                    // 门洞宽度的一半
+  top: number;                                     // 门楣的高度
+}
+/**
+ * 关卡交给敌人模块的"场地信息"：哪里是屋里、门在哪、哪些位置适合出怪和站位。
+ * 敌人模块自己不认识地图，这些都由任务那边（mission.ts）在开局前告诉它。
+ */
+export interface Site {
+  interior: THREE.Box3 | null;                     // 室内范围（没有就是全露天）
+  doors: Door[];
+  spawnGround: [number, number][];                 // 手摆的地面出生点 (x, z)
+  spawnAir: [number, number, number][];            // 手摆的空中出生点 (x, y, z)
+  cover: [number, number][];                       // 掩体点：紧挨着某件道具的位置，机器狗选射击位时优先考虑
+}
 export interface SpawnOpts {
   y?: number; yaw?: number;
   /** 给了就以"调查"状态出生，直奔这个位置；不给就是原地巡逻 */
@@ -293,6 +311,7 @@ export class Enemies {
   private player: Player | null = null;
   private lastRayDir = new THREE.Vector3(); private lastHitPoint = new THREE.Vector3(); private hasLastRay = false;
   private recentSpawns: { x: number; z: number; t: number }[] = [];
+  private site: Site = { interior: null, doors: [], spawnGround: [], spawnAir: [], cover: [] };
 
   constructor(private world: World) {
     // 弹丸：一个头粗尾细的小圆台，沿 +z 方向躺着、头在原点。32 发共用一个实例化网格，一次绘制调用画完
@@ -306,6 +325,16 @@ export class Enemies {
       this.bolts.push({ live: false, x: 0, y: 0, z: 0, dx: 0, dy: 0, dz: 1, fromX: 0, fromY: 0, fromZ: 0, speed: 0, dmg: 0, life: 0, len: 0, whizzed: false });
     }
     this.group.add(this.boltMesh);
+  }
+
+  /**
+   * 接收关卡的场地信息。地面出生点和掩体点是照着图纸手写的坐标，道具一挪位置就可能正好被压住，
+   * 所以这里先在寻路网格上"落地"：能站就原样用，不能站就挪到 2 米内最近的可站位置，再不行就丢掉。
+   */
+  setSite(site: Site) {
+    const nav = this.world.nav;
+    const land = (pts: [number, number][]) => pts.map(([x, z]) => nav.snap(x, z)).filter((p): p is [number, number] => !!p);
+    this.site = { ...site, spawnGround: land(site.spawnGround), cover: land(site.cover) };
   }
 
   /** 还活着的敌人数。垂死的和残骸不算：任务推进、刷怪上限、令牌上限都看这个数。 */
@@ -410,6 +439,14 @@ export class Enemies {
     const { colliders } = this.world;
     const eye = viewer ? viewer.eyePos : null, ex = eye ? eye.x : 0, ey = eye ? eye.y : 0, ez = eye ? eye.z : 0;
     let best = -Infinity, bx = 0, by = 0, bz = 0;
+    /** 给一个候选点打分，比现有的好就记下来。bonus 是额外加分。 */
+    const consider = (x: number, y: number, z: number, bonus: number) => {
+      const dist = Math.hypot(x - cx, z - cz);        // 被边界夹回来之后，实际距离可能比 rMin 近
+      let score = bonus + rnd() * 1.5 + (dist >= rMin ? 2 + Math.min(1, (dist - rMin) / 30) * 0.5 : -(rMin - dist) / 4);
+      if (eye && colliders.blocked(x, y, z, ex, ey, ez)) score += 2.5;
+      for (const s of this.recentSpawns) if (this.clock - s.t < 6 && Math.hypot(x - s.x, z - s.z) < 5) score -= 3;
+      if (score > best) { best = score; bx = x; by = y; bz = z; }
+    };
     for (let i = 0; i < 30; i++) {
       const a = rnd() * 6.283, r = rMin + rnd() * (rMax - rMin);
       const x = clamp(cx + Math.cos(a) * r, BOUNDS.minX + 3, QUAY_X - 3), z = clamp(cz + Math.sin(a) * r, BOUNDS.minZ + 3, BOUNDS.maxZ - 3);
@@ -420,11 +457,20 @@ export class Enemies {
         if (top > 14) continue;
         y = Math.max(7, top + 4) + rnd() * 3;
       } else if (!this.walkable(x, z)) continue;
-      const dist = Math.hypot(x - cx, z - cz);        // 被边界夹回来之后，实际距离可能比 rMin 近
-      let score = rnd() * 1.5 + (dist >= rMin ? 2 + Math.min(1, (dist - rMin) / 30) * 0.5 : -(rMin - dist) / 4);
-      if (eye && colliders.blocked(x, y, z, ex, ey, ez)) score += 2.5;
-      for (const s of this.recentSpawns) if (this.clock - s.t < 6 && Math.hypot(x - s.x, z - s.z) < 5) score -= 3;
-      if (score > best) { best = score; bx = x; by = y; bz = z; }
+      consider(x, y, z, 0);
+    }
+    // 关卡里手摆的出生点（车间里外）：落在这一圈距离里的也参加评选，并且多给 0.75 分 —— 它们藏在门里、墙后、道具旁，比随机撒的点讲究。
+    // 因为"玩家看不见"有加分，玩家在屋外时，屋里的点自然就成了优先的出怪位置；反过来也一样。
+    if (kind === 'gull') {
+      for (const [x, y, z] of this.site.spawnAir) { const d = Math.hypot(x - cx, z - cz); if (d >= rMin && d <= rMax) consider(x, y, z, 0.75); }
+    } else {
+      for (const [sx, sz] of this.site.spawnGround) {
+        const d = Math.hypot(sx - cx, sz - cz);
+        if (d < rMin || d > rMax) continue;
+        // 每次用的时候在 ±1.2 米内挪一挪，免得同一个点刷出来的敌人总站在同一块砖上；挪完站不住就用原位
+        const jx = sx + (rnd() - 0.5) * 2.4, jz = sz + (rnd() - 0.5) * 2.4, ok = this.walkable(jx, jz);
+        consider(ok ? jx : sx, 1, ok ? jz : sz, 0.75);
+      }
     }
     if (best === -Infinity) return null;
     this.recentSpawns.push({ x: bx, z: bz, t: this.clock });
@@ -576,7 +622,7 @@ export class Enemies {
       this.rally(e.pos, 18, player.pos, e);            // 喊上 18 米内的同伴
     } else if (e.mode !== 'patrol') {
       e.modeT -= dt;
-      if (e.modeT <= 0) { e.mode = 'patrol'; e.home.x = e.pos.x; e.home.z = e.pos.z; }   // 没找到：就地开始巡逻
+      if (e.modeT <= 0) { e.mode = 'patrol'; e.home.copy(e.pos); }   // 没找到：就地开始巡逻（无人机连高度一起记：在屋里放弃的就留在屋里转）
     }
   }
 
@@ -920,11 +966,18 @@ export class Enemies {
     const eye = player.eyePos, ex = eye.x, ey = eye.y, ez = eye.z;
     const toMe = Math.atan2(e.pos.z - pz, e.pos.x - px);
     let best = Infinity, bx = e.pos.x, bz = e.pos.z;
-    for (let i = 0; i < 16; i++) {
-      let a: number, r: number, bonus: number;
-      if (i < 10) { a = rnd() * 6.283; r = Math.sqrt(rnd()) * S.rangeMax; bonus = 0; }                         // 玩家周围随便撒的点
-      else { a = toMe + (rnd() - 0.5) * 2.6; r = S.rangeMin + 1 + rnd() * (S.rangeMax - S.rangeMin - 2); bonus = 1; } // 自己这一侧的一圈点（保底）
-      const qx = px + Math.cos(a) * r, qz = pz + Math.sin(a) * r;
+    const cover = this.site.cover;
+    for (let i = 0; i < 16 + cover.length; i++) {
+      let qx: number, qz: number, r: number, bonus: number;
+      if (i < 16) {
+        let a: number;
+        if (i < 10) { a = rnd() * 6.283; r = Math.sqrt(rnd()) * S.rangeMax; bonus = 0; }                         // 玩家周围随便撒的点
+        else { a = toMe + (rnd() - 0.5) * 2.6; r = S.rangeMin + 1 + rnd() * (S.rangeMax - S.rangeMin - 2); bonus = 1; } // 自己这一侧的一圈点（保底）
+        qx = px + Math.cos(a) * r; qz = pz + Math.sin(a) * r;
+      } else {
+        // 关卡里手摆的掩体点（木箱、吨桶、货架旁边）：减 2 分，同等条件下优先站过去 —— 看上去像是它"知道找掩体"
+        [qx, qz] = cover[i - 16]; r = Math.hypot(qx - px, qz - pz); bonus = -2;
+      }
       if (r < S.rangeMin || r > S.rangeMax || !this.walkable(qx, qz)) continue;
       let score = Math.hypot(qx - e.pos.x, qz - e.pos.z) * 0.9 + bonus + rnd() * 3;
       for (const o of this.list) {
@@ -970,7 +1023,8 @@ export class Enemies {
         e.waitT = 1;
         for (let i = 0; i < 6; i++) {
           const a = rnd() * 6.283, r = Math.sqrt(rnd()) * 7, x = e.home.x + Math.cos(a) * r, z = e.home.z + Math.sin(a) * r;
-          if (this.walkable(x, z)) { this.setGoal(e, x, z, true); break; }
+          // 要求能直着走过去：隔着一堵墙的点虽然离得近，真要走过去得出门绕一大圈，不像是在"随便转转"
+          if (this.world.nav.clearLine(pos.x, pos.z, x, z)) { this.setGoal(e, x, z, true); break; }
         }
       }
     } else if (e.mode !== 'engage') {

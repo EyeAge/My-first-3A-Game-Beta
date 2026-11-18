@@ -2,7 +2,7 @@ import type { GameAudio } from '../audio/audio';
 import type { Input } from '../core/input';
 import type { Port, Relay } from '../world/port';
 import { dirName, type UI } from '../ui/ui';
-import { KIND_NAME, type Enemies, type Kind } from './enemies';
+import { KIND_NAME, type Door, type Enemies, type Kind } from './enemies';
 import type { Player } from './player';
 import type { Stats, Weapon } from './weapon';
 
@@ -44,6 +44,35 @@ const DIRECTOR = {
   spawnAlertRadius: 150, pursuitAlertRadius: 220,
   noiseEvery: 0.3,      // 枪声最多每 0.3 秒"通报"一次（传多远由敌人那边的 SENSE.hearRadius 定，45 米）
 };
+/**
+ * 车间一带手摆的点位。前三组的坐标照参考：参考里车间在它自己的坐标系里（屋子占 x −16…12、z −28…−11），
+ * 我们把车间整体平移了 (−88, +19.5) 摆到地图西侧（见 port.ts），所以这些点用的时候也加上同一个平移量。
+ * 这样写的好处是能和参考的图纸直接对照；哪天车间再挪位置，只改 SHOP_AT 一处。
+ */
+const SHOP_AT = { dx: -88, dz: 19.5 };
+const SHOP = {
+  // 地面出生点。屋里四个：夹层下面、两排货架之间、吊架北侧、工作台前；屋外三个：西墙外的夹道（两个）、东门北侧
+  // （参考在屋外还有第四个点，换算过来落在我们的西围墙外面，用不上）
+  ground: [[-12.4, -24.8], [9.6, -25.3], [-13.4, -19.6], [4.6, -13.8], [-21, -27.2], [-18.6, -22], [13.6, -24]] as [number, number][],
+  // 空中出生点 (x, 高度, z)。前两个在屋里：5 米出头，正好在吊灯（6 米）下面；后三个在屋外：西墙外、东门外、南门外上空
+  air: [[-8, 5.4, -20.5], [5, 5.2, -18], [-20, 10.5, -20], [14.5, 10, -22], [-2, 12.5, -8.5]] as [number, number, number][],
+  // 屋里的掩体点：每个都挨着一件陈设（木箱、吨桶、吊架、货架）
+  cover: [[2.9, -17], [4.2, -15.3], [6.9, -20.6], [-7.6, -17.4], [-8.3, -14.3], [9.6, -21.9], [-13.2, -14.4], [-11.6, -18.6], [0, -25.8], [-12.4, -25.8]] as [number, number][],
+  // 两个门洞（中心、朝外的方向、半宽、门楣高）：东门在东墙 x=12 上，南卷帘门在南墙 z=−11 上，都是 5 米宽、净高 4.5 米
+  doors: [{ x: 12, z: -19.5, nx: 1, nz: 0, half: 2.5, top: 4.5 }, { x: -3.5, z: -11, nx: 0, nz: 1, half: 2.5, top: 4.5 }] as Door[],
+};
+/**
+ * 车间外面的点位。这些是照我们自己的地图摆的（已经是世界坐标）：参考的车间外面是另一番布局，照抄不了。
+ * 掩体点都贴着 port.ts 里摆在那儿的道具，站在背对车间的一侧。
+ */
+const YARD = {
+  ground: [[-99.5, 19], [-82, 17], [-67, -9]] as [number, number][],           // 南面场院两个、东门外空场北侧一个
+  cover: [
+    [-99, 15.4], [-85.2, 12.2], [-79.6, 12.1], [-81.5, 22.9], [-96.3, 24.6], [-77.9, 28.7], [-87.4, 29.5],   // 南面场院：木箱堆、轮胎垛、吨桶、电缆盘、篷布货、油桶、托盘垛
+    [-65.2, -5.2], [-58.8, 7.8], [-68.8, 7], [-60.6, -10.5], [-54, -3],                                      // 东门外空场：两道沙袋、纸箱托盘、木箱、油桶
+  ] as [number, number][],
+};
+
 const RADIO_CUT = [
   '第一处中继已断开。敌方已察觉，机械守卫正在赶来。',
   '第二处中继已断开。敌方正全力围攻，小心应对。',
@@ -69,6 +98,15 @@ export class Mission {
   private regroupT = 0;                          // 下一次"满员时召集"最早在什么时候
 
   constructor(private port: Port, private enemies: Enemies, private ui: UI, private audio: GameAudio, private weapon: Weapon, private player: Player) {
+    // 把场地信息交给敌人模块：哪里算屋里、门在哪、手摆的出生点和掩体点
+    const { dx, dz } = SHOP_AT;
+    enemies.setSite({
+      interior: port.interior,
+      doors: SHOP.doors.map((d) => ({ ...d, x: d.x + dx, z: d.z + dz })),
+      spawnGround: [...SHOP.ground.map(([x, z]): [number, number] => [x + dx, z + dz]), ...YARD.ground],
+      spawnAir: SHOP.air.map(([x, y, z]): [number, number, number] => [x + dx, y, z + dz]),
+      cover: [...SHOP.cover.map(([x, z]): [number, number] => [x + dx, z + dz]), ...YARD.cover],
+    });
     enemies.onKill = (e, weak) => {
       this.stats.kills++;
       this.weapon.addReserve(e.kind === 'guard' ? 20 : 8); // 击毁敌人回收一点弹药
@@ -103,7 +141,17 @@ export class Mission {
     const posts = [...this.port.relays].sort(() => Math.random() - 0.5);
     DIRECTOR.patrol.forEach((kind, i) => {
       const r = posts[i % posts.length];
-      this.enemies.spawnNear(kind, r.pos.x, r.pos.z, 6, 16, this.player);
+      if (this.port.interior.containsPoint(r.pos)) {
+        // 守屋里那处中继的，就放在屋里：从车间的室内出生点里随机挑一个（无人机用空中的两个点，机器狗用地面的四个点）。
+        // 不能像露天那样在中继周围随便撒点 —— 撒出来的点可能在墙外，无人机更是会被放到屋顶上面去
+        const { dx, dz } = SHOP_AT;
+        if (kind === 'gull') { const [x, y, z] = SHOP.air[Math.floor(Math.random() * 2)]; this.enemies.spawn(kind, x + dx, z + dz, { y }); }
+        else {
+          // 那个点万一被后来摆进去的陈设占了，就退一步，在中继周围 2~7 米（都还在屋里）找个能站的地方
+          const [x, z] = SHOP.ground[Math.floor(Math.random() * 4)];
+          this.enemies.spawnNear(kind, x + dx, z + dz, 0, 1.5) ?? this.enemies.spawnNear(kind, r.pos.x, r.pos.z, 2, 7);
+        }
+      } else this.enemies.spawnNear(kind, r.pos.x, r.pos.z, 6, 16, this.player);
     });
   }
 
