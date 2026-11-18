@@ -36,7 +36,14 @@ export const DECALS: Record<string, DecalDef | LegacyDraw> = {
   warning: DECAL_ART.hazard_general,
 };
 
+/** 图集的宽度（像素）。 */
 const SIZE = 2048;
+/**
+ * 图集的高度。原来和宽度一样是 2048，后来不够用了：室外道具的字和贴纸已经排到 98%，再加上集装箱的十几行喷字就放不下，
+ * 而放不下的后果是从头覆盖 —— 最早画进去的那几块牌子会显示成别人的字。所以加高一半，留出余量。
+ * 只加高、不加宽：货架是一层层往下排的，已有的东西位置都不变。
+ */
+const HEIGHT = 3072;
 /** 相邻两块之间留的空隙（像素）。贴图缩小以后相邻的像素会混在一起，没有空隙的话隔壁的颜色会渗过来。 */
 const PAD = 4;
 /** 贴纸默认按设计尺寸的 0.75 倍画进图集；一行字按 0.5 倍（设计高度 128 → 图集里 64 像素高）。图集就这么大，要省着用。 */
@@ -51,12 +58,12 @@ const warned = new Set<string>();
 
 function ensure() {
   if (canvas) return;
-  canvas = document.createElement('canvas'); canvas.width = canvas.height = SIZE;
+  canvas = document.createElement('canvas'); canvas.width = SIZE; canvas.height = HEIGHT;
   ctx = canvas.getContext('2d')!;
   tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8;
 
-  const orm = document.createElement('canvas'); orm.width = orm.height = SIZE / ORM_DIV;
+  const orm = document.createElement('canvas'); orm.width = SIZE / ORM_DIV; orm.height = HEIGHT / ORM_DIV;
   ormCtx = orm.getContext('2d')!;
   ormCtx.fillStyle = ormColor(0.7, 0); ormCtx.fillRect(0, 0, orm.width, orm.height);
   ormTex = new THREE.CanvasTexture(orm);
@@ -85,11 +92,11 @@ function alloc(w: number, h: number): [number, number] {
   let best: Shelf | null = null;
   for (const s of shelves) {
     if (s.h < h || s.x + w + PAD > SIZE) continue;
-    if (s.h > h * 1.25 && floorY + h + PAD <= SIZE) continue; // 这层太高了，放进去浪费；除非已经没地方开新层
+    if (s.h > h * 1.25 && floorY + h + PAD <= HEIGHT) continue; // 这层太高了，放进去浪费；除非已经没地方开新层
     if (!best || s.h < best.h) best = s;
   }
   if (!best) {
-    if (floorY + h + PAD > SIZE) {
+    if (floorY + h + PAD > HEIGHT) {
       if (!warned.has('#full')) { warned.add('#full'); console.warn('[labels] 图集放满了，后面的字会和前面的叠在一起'); }
       floorY = PAD; shelves.length = 0;
     }
@@ -142,7 +149,7 @@ function place(key: string, w: number, h: number, scale: number, bleed: string |
   ormTex.needsUpdate = true;
 
   // 贴图坐标的原点在左下角，而画布的原点在左上角，所以 v 要倒过来
-  const patch: Patch = { uv: [x / SIZE, 1 - (y + ph) / SIZE, (x + pw) / SIZE, 1 - y / SIZE], aspect: pw / ph };
+  const patch: Patch = { uv: [x / SIZE, 1 - (y + ph) / HEIGHT, (x + pw) / SIZE, 1 - y / HEIGHT], aspect: pw / ph };
   cache.set(key, patch);
   return patch;
 }
@@ -207,4 +214,4 @@ export function digit(n: number): Patch {
 export function labelMaterial(): THREE.Material { ensure(); return mat; }
 
 /** 图集用掉了多少（0–1，按已经开出去的货架算）。开发时看一眼，快满了就该把贴纸画小一点。 */
-export function labelAtlasUsage() { return floorY / SIZE; }
+export function labelAtlasUsage() { return floorY / HEIGHT; }
