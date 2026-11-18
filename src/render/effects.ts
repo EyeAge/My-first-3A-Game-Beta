@@ -310,15 +310,11 @@ export class Effects {
    *   alpha  最浓时的不透明度
    *   vx/vy/vz 初速度（比如贴地往外推的尘土）
    *   fire   true = 这不是烟而是一小团火苗：自己发光，颜色从亮黄烧到暗红
-   * 一个约定：fire 的寿命不到 0.1 秒、又给了初速度，就当它是"枪口焰"，朝初速度的方向喷一下（星芒 + 喷焰 + 几颗火星）。
-   * 这是为了让敌人开火的老写法（见 enemies.ts）不用改就能得到像样的枪口焰；新代码请直接调 muzzleFlash。
    */
   puff(pos: THREE.Vector3, o: PuffOpts = {}) {
     const size = o.size ?? 1, life = o.life ?? 2.5, rise = o.rise ?? 0.6, count = o.count ?? 3, vx = o.vx ?? 0, vy = o.vy ?? 0, vz = o.vz ?? 0;
     if (o.color === undefined) _col.setRGB(0.32, 0.32, 0.33); else _col.setHex(o.color);
     if (o.fire) {
-      const speed = Math.hypot(vx, vy, vz);
-      if (life <= 0.1 && speed > 0.01) { this.muzzleFlash(pos, vx / speed, vy / speed, vz / speed, size * 1.8, false); return; }
       // 火苗：把给的颜色往"火焰色"上靠一半再乘成很亮的值。直接用原色的话，纯橙色经过冷却渐变会红得发紫
       const r = (_col.r + 1) * 4, g = (_col.g + 0.6) * 4, b = (_col.b + 0.25) * 4;
       for (let i = 0; i < count; i++) {

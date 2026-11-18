@@ -1169,15 +1169,21 @@ export class Enemies {
     const miss = Math.hypot(mx + dx * nearest - cam.x, my + dy * nearest - cam.y, mz + dz * nearest - cam.z);
     const shown = miss < 1.5 ? Math.max(0.5, nearest - 3) : end;
     effects.tracerThin(_a, _v.set(mx + dx * shown, my + dy * shown, mz + dz * shown));
-    effects.flash(_a, 90, 0.05);
-    effects.puff(_a, { size: 0.5, life: 0.07, color: 0xffb060, rise: 0, count: 1, fire: true, vx: dx * 3, vy: dy * 3, vz: dz * 3 });   // 枪口焰
+    effects.muzzleFlash(_a, dx, dy, dz, 0.9);           // 枪口焰（星芒、喷焰、几颗火星，自带一盏小灯）
+    effects.flash(_a, 22, 0.05, 0xffb060, 7);           // 机器狗的炮更响：再补一盏亮度 22、照 7 米的闪光
     const [vol, pan] = this.spatial(_a);
     audio.houndShot(vol, pan);
     if (hitPlayer) this.onPlayerHit(S.shotDamage, _a);
     else if (wall < 200) {
-      effects.sparks(_b, _hit.nx, _hit.ny, _hit.nz, 5);
-      effects.dust(_b, _hit.nx, _hit.ny, _hit.nz);
-      if (!(_hit.ny > 0.5 && _b.y < 0.05 && _b.x > QUAY_X + 0.8)) decals.add(_b, _hit.nx, _hit.ny, _hit.nz, _hit.ny > 0.5 && _b.y < 0.05 ? 'concrete' : 'metal');
+      // 和玩家的子弹一样：打到什么材质就崩出什么（没标材质的，地面当水泥，其余当金属），并留下对应的弹孔
+      const ground = _hit.ny > 0.5 && _b.y < 0.05;
+      if (ground && _b.x > QUAY_X + 0.8) effects.splash(_v.set(_b.x, -1.7, _b.z), 0.8);   // 码头外的"地面"其实是海面上空：落海
+      else {
+        const surface = _hit.surface ?? (ground ? 'concrete' : 'metal');
+        effects.impact(_b, _hit.nx, _hit.ny, _hit.nz, surface, _v.set(dx, dy, dz));
+        if (surface === 'dirt' || surface === 'rubber') decals.add(_b, _hit.nx, _hit.ny, _hit.nz, 'soot', 0.2, 0.8);
+        else decals.add(_b, _hit.nx, _hit.ny, _hit.nz, surface);
+      }
       const [v2, p2] = this.spatial(_b);
       if (v2 > 0.55) audio.impact(v2 * 0.6, p2);
     }
@@ -1563,8 +1569,7 @@ export class Enemies {
     _a.set(x, y, z);
     const [vol, pan] = this.spatial(_a);
     if (vol > MIN_VOL) this.world.audio.enemyShot(vol, pan);
-    this.world.effects.flash(_a, 70, 0.06);
-    this.world.effects.puff(_a, { size: 0.35, life: 0.06, color: 0xff7a3a, rise: 0, count: 1, fire: true, vx: dx * 3, vy: dy * 3, vz: dz * 3 });   // 炮口焰
+    this.world.effects.muzzleFlash(_a, dx, dy, dz, 0.55);   // 炮口焰，比机器狗的小一号（自带的灯也按比例小：亮度 8.8，照 3.85 米）
   }
 
   private updateBolts(dt: number, player: Player) {
