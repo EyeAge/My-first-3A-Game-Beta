@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { clamp, vnoise } from '../../core/math';
 import { decal as decalPatch, label as labelPatch, type LabelOpts } from '../../render/labels';
-import { SURFACES, type SurfaceName } from '../../render/surfaces';
+import { emissive, SURFACES, type SurfaceName } from '../../render/surfaces';
 import { chamferBox, hex, Kit, type Mat, type PropModel, type Rgb, type Tint, type V3 } from '../kit';
 
 // 场地设施类道具：隔离墩、防撞柱、系缆桩、标志牌、通道牌、高杆灯、铁丝网围栏、大门、岗亭、道闸、冷藏机组、中继柜。
@@ -64,6 +64,19 @@ function toward(target: number, base: number, mul = 1): Rgb {
   return [(t[0] / Math.max(b[0], 1e-4)) * mul, (t[1] / Math.max(b[1], 1e-4)) * mul, (t[2] / Math.max(b[2], 1e-4)) * mul];
 }
 
+interface PrismOpt { sides?: number; rows?: number; open?: boolean; turn?: number; tint?: Tint; cast?: boolean }
+/**
+ * 棱柱（或者棱台）：侧面是一块块平的，棱是硬的。八角灯杆、六角螺母用它。
+ * 做法：先要一个普通圆柱，再把它自带的"圆滑"法线删掉 —— 零件箱发现没有法线，会按每个三角形自己的朝向重算，
+ * 于是每个侧面各有各的朝向，高光在棱上断开，看起来就是棱柱而不是圆柱。
+ * (x, y, z) 是中心；turn 是绕竖轴转的角度；rows 是沿高度分几段（长杆多分几段，烤脏时才有深浅变化）。
+ */
+function prism(k: Kit, mat: Mat, rBottom: number, rTop: number, len: number, x: number, y: number, z: number, o: PrismOpt = {}) {
+  const g = new THREE.CylinderGeometry(rTop, rBottom, len, o.sides ?? 8, o.rows ?? 1, o.open ?? false);
+  g.deleteAttribute('normal');
+  k.add(mat, g, { tint: o.tint, cast: o.cast }, matrixOf([x, y, z], [0, o.turn ?? 0, 0]));
+}
+
 /** 螺栓朝哪边伸出来 → 把"立着的圆柱"转到那个方向要用的旋转。 */
 const STUD_ROT: Record<string, V3> = { y: [0, 0, 0], x: [0, 0, -HALF_PI], '-x': [0, 0, HALF_PI], z: [HALF_PI, 0, 0], '-z': [-HALF_PI, 0, 0] };
 interface StudOpt { sides?: number; hex?: boolean; dir?: 'y' | 'x' | '-x' | 'z' | '-z'; tint?: Tint; raw?: boolean }
@@ -80,6 +93,14 @@ function stud(k: Kit, mat: Mat, r: number, len: number, pos: V3, o: StudOpt = {}
   g.setIndex(index);
   if (o.hex) g.deleteAttribute('normal');
   k.add(mat, g, { tint: o.tint, raw: o.raw }, matrixOf(pos, STUD_ROT[o.dir ?? 'y']));
+}
+
+/**
+ * 按"高度"贴一张具名贴纸，宽度不给就按贴纸自己的长宽比算。
+ * （零件箱的 decal 是按宽度给的；参考里的数字都是高度，这里换算一下，免得每处都要自己算。）
+ */
+function sticker(k: Kit, name: string, h: number, pos: V3, rot?: V3, w?: number) {
+  k.decal(name, w ?? h * decalPatch(name).aspect, pos, rot, h);
 }
 
 /** 字最多可以被横向压窄到原来的几成。喷在牌子上的字常常是瘦高的，压到七成还很自然，再窄就难认了。 */
@@ -405,6 +426,109 @@ export function laneSign(o: LaneSignOpts = {}): PropModel {
   });
 }
 
+// ====================================================================== 高杆灯
+
+/** 投光灯的颜色：偏暖的白。 */
+export const LIGHT_MAST_COLOR = 0xffe3bd;
+/**
+ * 高杆灯 4 个灯头的位置和朝向（模型自己的坐标）：横担两端（z = ±0.55）各两盏，背靠背朝 ±x，往下俯 0.62 弧度（约 36°）。
+ * 灯面本身只是一块发光的面片，不会照亮地面；想要光晕、光锥或者真的点光，按这张表去放。
+ */
+export const LIGHT_MAST_LAMPS: readonly { pos: V3; dir: V3 }[] = [-0.55, 0.55].flatMap((z) => [-1, 1].map((sx) => ({ pos: [sx * 0.34, 13.2, z] as V3, dir: [sx * 0.81, -0.58, 0] as V3 })));
+
+export interface LightMastOpts extends SiteOpts { /** false = 灯灭着（灯面只剩一点点余晖）。默认亮。 */ on?: boolean }
+
+/**
+ * 14 米高杆灯。占地是 0.8 米见方的水泥墩；杆顶的横担沿 z 方向，长 1.9 米。
+ * 杆子是八棱的锥杆，分三节套接：上面一节比下面一节粗一圈、套住 15 厘米，接头处看得出一道台阶。
+ */
+export function lightMast(o: LightMastOpts = {}): PropModel {
+  const on = o.on !== false, v = variantOf(o.seed, 2);
+  return cached(`light_mast|${on}|${v}${tag(o)}`, () => {
+    const k = new Kit('light_mast', v, { interior: o.interior });
+    const lens = emissive(LIGHT_MAST_COLOR, on ? 8 : 0.02);
+    const BASE_Y = 0.35, TOP_Y = 13.3, ARM_Y = TOP_Y + 0.12;
+    /** 杆子在高度 y 处的半径：从底部的 0.168 线性收到顶部的 0.07。 */
+    const radiusAt = (y: number) => 0.168 + ((0.07 - 0.168) * (y - BASE_Y)) / (TOP_Y - BASE_Y);
+
+    // ---- 水泥墩、底法兰、8 颗地脚螺栓、4 片三角加劲板
+    concreteBlock(k, 0.8, 0.32, 0.8, 0, 0.16, 0, { c: 0.03, spot: v, tint: (x, y, z) => { const s = 0.62 + 0.36 * sstep(0, 0.3, y) + 0.1 * vnoise(x * 5, z * 5); return [s, s, s * 0.97]; } });
+    k.box('steel_galv', 0.5, 0.03, 0.5, 0, 0.335, 0, { c: 0.006 });
+    prism(k, 'steel_galv', 0.2, 0.2, 0.02, 0, 0.36, 0, { turn: Math.PI / 8 });
+    for (let i = 0; i < 8; i++) {
+      const a = ((i + 0.5) * Math.PI) / 4, x = Math.cos(a) * 0.215, z = Math.sin(a) * 0.215;
+      stud(k, 'steel_galv', 0.027, 0.024, [x, 0.362, z], { hex: true });
+      stud(k, 'steel_galv', 0.014, 0.07, [x, 0.395, z], { sides: 5 });
+    }
+    for (let i = 0; i < 4; i++) {
+      const a = (i * Math.PI) / 2;
+      k.box('steel_galv', 0.012, 0.2, 0.12, Math.cos(a) * 0.2, 0.45, -Math.sin(a) * 0.2, { plain: true, rot: [0, a + HALF_PI, 0] });
+    }
+
+    // ---- 八棱锥杆，三节。转 22.5° 是为了让一个平面（而不是一条棱）正对 ±x 和 ±z，检修门才有地方贴
+    const sections: [number, number, number, number][] = [[BASE_Y, 4.75, 0, 0.96], [4.6, 9.15, 0.007, 1], [9, TOP_Y, 0.014, 0.92]];
+    for (const [y0, y1, sleeve, shade] of sections) prism(k, 'steel_galv', radiusAt(y0) + sleeve, radiusAt(y1) + sleeve, y1 - y0, 0, (y0 + y1) / 2, 0, { rows: 4, open: true, turn: Math.PI / 8, tint: shade });
+    prism(k, 'steel_galv', 0.09, 0.09, 0.03, 0, TOP_Y, 0, { turn: Math.PI / 8 });
+    // 检修门（离地 1.05 米）+ 门闩 + 高压警示贴。0.924 = cos 22.5°：八边形的"面"到中心的距离是"棱"到中心距离的 0.924 倍
+    const face = radiusAt(1.05) * 0.924;
+    k.box('steel_galv', 0.13, 0.52, 0.012, 0, 1.05, face + 0.005, { c: 0.004, tint: 0.88 });
+    k.box('steel_dark', 0.03, 0.045, 0.012, 0.04, 1.05, face + 0.013, { plain: true });
+    sticker(k, 'hazard_voltage', 0.09, [-0.01, 1.2, face + 0.0125]);
+    // 穿线管：从墩子上钻出来，拐个弯进杆身
+    k.hose('steel_dark', [[-0.3, 0.3, 0.28], [-0.3, 0.52, 0.28], [-0.24, 0.72, 0.2], [-0.1, 0.8, 0.1]], 0.024, { steps: 10, seg: 6 });
+    k.cyl('steel_dark', 0.034, 0.03, -0.3, 0.335, 0.28, { seg: 8 });
+    // 离地 3 米处一圈套箍 + 朝 +x 伸出去的小支架框（歇脚 / 挂梯子用）
+    prism(k, 'steel_galv', radiusAt(3) + 0.012, radiusAt(3) + 0.012, 0.05, 0, 3, 0, { open: true, turn: Math.PI / 8 });
+    const rod = { seg: 5, cap: true };
+    for (const z of [-0.13, 0.13]) { k.tube('steel_galv', [0.1, 3, z], [0.42, 3, z], 0.012, rod); k.tube('steel_galv', [0.42, 3, z], [0.42, 3.09, z], 0.012, rod); }
+    k.tube('steel_galv', [0.42, 3, -0.16], [0.42, 3, 0.16], 0.012, rod);
+    // 脚钉：从 3.45 米到 12.9 米，每 38 厘米一根，左右交替。在十米高的地方，没人看得清它是圆是方，用最省的直角方杆
+    for (let y = 3.45, i = 0; y < 12.9; y += 0.38, i++) {
+      const side = i % 2 ? 1 : -1;
+      k.bar('steel_galv', [0, y, side * radiusAt(y) * 0.8], [0, y, side * (radiusAt(y) + 0.15)], 0.016, 0.016, { plain: true });
+    }
+
+    // ---- 灯架：一根横担（沿 z）、两根灯臂（沿 x）、两根斜撑
+    k.box('steel_galv', 0.1, 0.1, 1.9, 0, ARM_Y, 0, { c: 0.012 });
+    for (const z of [-0.55, 0.55]) k.box('steel_galv', 0.5, 0.07, 0.07, 0, ARM_Y + 0.085, z, { c: 0.01 });
+    for (const side of [-1, 1]) k.bar('steel_galv', [0, TOP_Y - 0.5, side * 0.08], [0, ARM_Y - 0.03, side * 0.7], 0.04, 0.04, { plain: true });
+
+    // ---- 4 只投光灯头
+    const addHead = (x: number, y: number, z: number, yaw: number) => {
+      k.push([x, y, z], [0, yaw, 0]);
+      k.push([0, 0, 0], [0, 0, -0.62]); // 灯头往下俯 0.62 弧度
+      k.box('steel_dark', 0.08, 0.34, 0.46, 0.08, 0, 0, { c: 0.014 });                                // 灯壳
+      // 发光面比灯壳的正面靠前 3 厘米，四周用窄框把这道缝挡住。
+      // 不能让发光面紧贴着灯壳：两个面离得太近时，远处看显卡分不清谁在前面，亮面和黑壳会一闪一闪地打架。
+      k.plane(lens, 0.4, 0.28, [0.15, 0, 0], { rot: [0, HALF_PI, 0], raw: true });
+      for (const s of [-1, 1]) {
+        k.box('steel_dark', 0.032, 0.018, 0.47, 0.136, s * 0.156, 0, { plain: true });
+        k.box('steel_dark', 0.032, 0.33, 0.018, 0.136, 0, s * 0.222, { plain: true });
+      }
+      k.box('steel_dark', 0.09, 0.008, 0.48, 0.17, 0.175, 0, { plain: true, rot: [0, 0, -0.12] });    // 遮光檐
+      for (let i = -3; i <= 3; i++) k.box('steel_dark', 0.045, 0.3, 0.008, 0.02, 0, i * 0.062, { plain: true }); // 背后的散热鳍
+      k.pop();
+      k.box('steel_galv', 0.03, 0.05, 0.56, 0.02, -0.02, 0, { plain: true });                         // U 形支架：一根横梁 + 两片夹板
+      for (const s of [-1, 1]) k.box('steel_galv', 0.1, 0.05, 0.012, 0.05, -0.02, s * 0.275, { plain: true, rot: [0, 0, -0.31] });
+      k.pop();
+    };
+    for (const z of [-0.55, 0.55]) { addHead(0.22, ARM_Y - 0.14, z, 0); addHead(-0.22, ARM_Y - 0.14, z, Math.PI); }
+
+    k.box('steel_dark', 0.16, 0.2, 0.12, 0, TOP_Y - 0.25, -0.14, { c: 0.01 });                         // 镇流器盒
+    k.tube('steel_galv', [0, ARM_Y, 0], [0, 14, 0], 0.012, { r2: 0.003, seg: 5, cap: true }); // 避雷针
+
+    const model = k.finish({
+      size: [0.8, 14, 0.8],
+      boxes: [
+        { min: [-0.4, 0, -0.4], max: [0.4, 0.32, 0.4], surface: 'concrete' },
+        { min: [-0.17, 0.32, -0.17], max: [0.17, 14, 0.17], surface: 'metal', noNav: true },
+      ],
+    });
+    model.group.userData.lamps = LIGHT_MAST_LAMPS.map((l) => ({ pos: [...l.pos], dir: [...l.dir], color: LIGHT_MAST_COLOR }));
+    return model;
+  });
+}
+
 // ====================================================================== 登记表
 
 /**
@@ -413,4 +537,5 @@ export function laneSign(o: LaneSignOpts = {}): PropModel {
 export const SITE: Record<string, (o?: any) => PropModel> = {
   jersey_barrier: jerseyBarrier, bollard_post: bollardPost, bollard_mooring: bollardMooring,
   sign_post: signPost, lane_sign: laneSign,
+  light_mast: lightMast,
 };
