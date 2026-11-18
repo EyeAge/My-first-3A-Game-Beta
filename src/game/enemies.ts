@@ -76,6 +76,9 @@ const GULL = {
   clearance: 2.6,                                 // 飞过箱垛上方时离箱顶多高
   climbMax: 9,                                    // 被墙挡住时最多临时拔高多少
   smoke: 1.4,                                     // 烟团大小的倍率
+  // 进了屋（车间）之后的飞法：屋顶下面挂着一排吊灯（灯盘离地 6 米），所以最高飞到 5.2 米；
+  // 目标点离墙至少 1.6 米；穿门洞时压到 2.6 米（门洞净高 4.5 米）
+  indoorAltMin: 3.2, indoorAltMax: 5.2, indoorWall: 1.6, indoorClearance: 1.2, doorAlt: 2.6,
 };
 /** 云台相机（"眼睛"）和炮口在机身坐标里的位置：[上下, 前后]。 */
 const GULL_CAM = { y: -0.25, z: 0.44 }, GULL_MUZZLE = { y: -0.195, z: 0.28 };
@@ -186,6 +189,8 @@ export interface Gull extends Base {
   top: number; topT: number; climb: number;        // 目标点下方的箱顶高度；被墙挡住时临时拔高多少
   sweep: number; gimbalYaw: number; gimbalPitch: number;
   spin: number;                                    // 坠落时的自旋角速度
+  indoor: boolean;                                 // 现在是不是在屋顶底下（车间里）
+  door: number;                                    // 正要穿过哪个门洞（-1 = 没有）
 }
 
 type EngageState = 'move' | 'aim' | 'cool' | 'tele' | 'burst' | 'wind' | 'lunge' | 'recover';
@@ -395,7 +400,9 @@ export class Enemies {
         atk: 'idle', atkT: 0, shots: 0, lead: 0.5, thrust: 1, lostRotor: -1,
         feeler: Math.floor(rnd() * 3), avoid: new THREE.Vector3(), ceil: 1e9, ceilT: 0, top: 0, topT: 0, climb: 0,
         sweep: rnd() * 6, gimbalYaw: 0, gimbalPitch: 0.4, spin: 0,
+        indoor: false, door: -1,
       };
+      e.indoor = this.underRoof(e.pos);
     } else {
       const spec = kind === 'hound' ? HOUND : GUARD;
       const walker: Walker = {
@@ -580,6 +587,18 @@ export class Enemies {
   }
   /** 从 (x, y, z) 往正下方看，最先碰到的表面有多高（地面是 0）。 */
   private surfaceBelow(x: number, y: number, z: number) { return y - this.ray(x, y, z, 0, -1, 0, y); }
+  /**
+   * 这个点是不是在车间的屋顶底下：水平位置在室内范围里，而且往上看得到屋面（屋顶上方的无人机往上看是天）。
+   * was 是上一次的结论：已经在屋里的，只要还没出室内范围就一直算在屋里 —— 屋面上有几个破洞，
+   * 飞到破洞正下方时往上看也是天，不能因此就当它"出屋了"（那样它会想从破洞里钻出去）。
+   */
+  private underRoof(p: THREE.Vector3, was = false) {
+    const box = this.site.interior;
+    if (!box || p.x <= box.min.x || p.x >= box.max.x || p.z <= box.min.z || p.z >= box.max.z || p.y >= box.max.y) return false;
+    if (was) return true;
+    const reach = box.max.y + 1 - p.y;
+    return this.ray(p.x, p.y, p.z, 0, 1, 0, reach) < reach;
+  }
   /** 地面单位能不能站在这里：寻路网格上这一格是空的（港区最外面 1 米和码头沿在网格里本来就是封死的）。 */
   private walkable(x: number, z: number) { return this.world.nav.isFree(x, z); }
 
@@ -725,12 +744,13 @@ export class Enemies {
       else this.updateWalker(e, dt, t, player);
     }
 
-    // 无人机之间互相推开一点，免得叠在一起
+    // 无人机之间互相推开一点，免得叠在一起。推的是速度而不是位置：直接挪位置的话，挤在屋里时会把同伴按进墙里
+    // （每架自己的"逐轴碰撞"只管自己的速度方向上有没有墙，管不了被别人硬挪过去的那一下）
     for (let i = 0; i < this.list.length; i++) for (let j = i + 1; j < this.list.length; j++) {
       const a = this.list[i], b = this.list[j];
       if (a.kind !== 'gull' || b.kind !== 'gull' || !a.alive || !b.alive) continue;
       const dx = b.pos.x - a.pos.x, dz = b.pos.z - a.pos.z, d = Math.hypot(dx, dz);
-      if (d < 3 && d > 1e-3) { const k = ((3 - d) / d) * 0.5 * Math.min(1, dt * 8); a.pos.x -= dx * k; a.pos.z -= dz * k; b.pos.x += dx * k; b.pos.z += dz * k; }
+      if (d < 3 && d > 1e-3) { const k = ((3 - d) / d) * 9 * dt; a.vel.x -= dx * k; a.vel.z -= dz * k; b.vel.x += dx * k; b.vel.z += dz * k; }
     }
 
     this.updateBolts(dt, player);
@@ -783,10 +803,36 @@ export class Enemies {
       tx = e.home.x + Math.cos(e.orbitA) * e.patrolR; ty = e.home.y; tz = e.home.z + Math.sin(e.orbitA) * e.patrolR;
     }
     tx = clamp(tx, BOUNDS.minX + 2, QUAY_X + 20); tz = clamp(tz, BOUNDS.minZ + 2, BOUNDS.maxZ - 2);
-    // 我们的堆场比参考的高（最高四层箱，十一米多）：目标点正下方有箱垛就把目标抬到箱顶以上，被墙挡住时再临时拔高（climb）
+
+    // ---- 屋里屋外：它要找的对象和自己不在屋顶的同一侧，就得先穿过一个门洞
+    const box = this.site.interior;
+    let door: Door | null = null;
+    if (box) {
+      // "对象"：交战时是玩家（跟丢超过 1.5 秒就是最后见到他的位置），调查 / 搜索时是可疑位置，巡逻时是自己的巡逻中心
+      const subj = e.mode === 'patrol' ? e.home : engage && e.noSeeT <= 1.5 ? player.pos : lk;
+      const subjIn = subj.x > box.min.x && subj.x < box.max.x && subj.z > box.min.z && subj.z < box.max.z && subj.y < box.max.y;
+      if (e.indoor !== subjIn && this.site.doors.length) {
+        door = this.throughDoor(e, subj, _v);
+        tx = _v.x; ty = _v.y; tz = _v.z;
+      } else {
+        e.door = -1;
+        // 都在屋里：目标点夹在四面墙以内（绕飞半径比屋子大，夹住之后它就贴着墙根一圈圈转）
+        if (e.indoor) { tx = clamp(tx, box.min.x + GULL.indoorWall, box.max.x - GULL.indoorWall); tz = clamp(tz, box.min.z + GULL.indoorWall, box.max.z - GULL.indoorWall); }
+      }
+    }
+    // 目标点正下方有东西（箱垛、货架）就把目标抬到它上面。屋外从高处往下看：我们的堆场比参考的高（最高四层箱，十一米多），
+    // 得提前知道前面的箱顶有多高；屋里和穿门时只看自己这个高度以下的 —— 从高处看下来只会看到屋顶
     e.topT -= dt;
-    if (e.topT <= 0) { e.topT = 0.2 + rnd() * 0.1; e.top = this.surfaceBelow(tx, Math.max(pos.y, ty) + 6, tz); }
-    ty = Math.max(ty, e.top + GULL.clearance) + e.climb;
+    if (e.topT <= 0) {
+      e.topT = 0.2 + rnd() * 0.1;
+      e.indoor = this.underRoof(pos, e.indoor);
+      e.top = e.indoor || door ? this.surfaceBelow(tx, pos.y + 0.3, tz) : this.surfaceBelow(tx, Math.max(pos.y, ty) + 6, tz);
+    }
+    if (door) {
+      // 穿门：压在门楣以下。离门口还远（6 米以外）时允许临时拔高，好翻过挡在路上的箱垛和屋顶；到了门口就不许了
+      ty = Math.min(Math.max(ty, e.top + GULL.indoorClearance), door.top - 1) + (Math.hypot(tx - pos.x, tz - pos.z) > 6 ? e.climb : 0);
+    } else if (e.indoor) ty = clamp(Math.max(ty, e.top + GULL.indoorClearance), GULL.indoorAltMin, GULL.indoorAltMax);
+    else ty = Math.max(ty, e.top + GULL.clearance) + e.climb;   // 屋外被墙挡住时临时拔高（climb）
     ty = Math.max(2.2, Math.min(ty, e.ceil));           // 头顶有东西就别往上顶；再低也不低于 2.2 米
 
     // ---- 加速度：像一根带阻尼的弹簧把它往目标点拉（离得越远拉得越狠，速度越大阻力越大）
@@ -900,7 +946,10 @@ export class Enemies {
         const fly = Math.hypot(px - mx, py - my, pz - mz) / GULL.boltSpeed;
         let dx = px + player.vel.x * fly * e.lead - mx, dy = py + player.height * 0.6 - my, dz = pz + player.vel.z * fly * e.lead - mz;
         const dl = Math.hypot(dx, dy, dz) || 1; dx /= dl; dy /= dl; dz /= dl;
-        const s = this.spread(e, GULL.spreadFar, GULL.spreadNear, 0.45) * (hurt ? 1.5 : 1);
+        // 散布是个角度，离得越近落点越集中。绕飞半径本来保证它在 14 米以外开火；进了屋只有七八米，
+        // 不折算的话一照面就百发百中。所以近于 14 米时把角度按比例放大，落点的散开程度和 14 米处一样
+        const near = Math.max(1, GULL.rangeMin + 2) / Math.max(4, Math.hypot(px - mx, pz - mz));
+        const s = this.spread(e, GULL.spreadFar, GULL.spreadNear, 0.45) * (hurt ? 1.5 : 1) * Math.max(1, near);
         dx += (rnd() - 0.5) * 2 * s; dy += (rnd() - 0.5) * 2 * s; dz += (rnd() - 0.5) * 2 * s;
         const nl = Math.hypot(dx, dy, dz) || 1; dx /= nl; dy /= nl; dz /= nl;
         this.fireBolt(mx, my, mz, dx, dy, dz, GULL.boltSpeed, GULL.boltDamage);
@@ -918,6 +967,29 @@ export class Enemies {
         if (rnd() < 0.15) effects.sparks(pos, 0, -1, 0, 2);
       }
     }
+  }
+
+  /**
+   * 无人机要进屋（或者出屋）：挑一个门洞，算出这一刻该朝哪飞，写进 out，并返回选中的门。
+   * 分两步走：先飞到自己这一侧、正对门洞中线 3.5 米远的地方把高度压下来；对准了再朝门另一侧 3.5 米处飞，直着穿过去。
+   * 这里不记"第几步"，每帧都重新看一眼自己对准了没有 —— 被撞歪了、被挤开了，自然就会回去重新对准。
+   */
+  private throughDoor(e: Gull, subj: THREE.Vector3, out: THREE.Vector3): Door {
+    const doors = this.site.doors, pos = e.pos;
+    // 挑门：自己到门口的距离 + 门口到对象的距离，取最短的。已经选定的门算便宜 4 米，免得在两个门之间来回改主意
+    let best = Infinity;
+    doors.forEach((d, i) => {
+      const cost = Math.hypot(d.x - pos.x, d.z - pos.z) + Math.hypot(d.x - subj.x, d.z - subj.z) - (i === e.door ? 4 : 0);
+      if (cost < best) { best = cost; e.door = i; }
+    });
+    const d = doors[e.door], side = e.indoor ? -1 : 1;                       // 自己在门的哪一边：+1 屋外，-1 屋里
+    const ahead = ((pos.x - d.x) * d.nx + (pos.z - d.z) * d.nz) * side;      // 离墙面还有多远（已经穿过去了就是负数）
+    const off = Math.abs((pos.x - d.x) * d.nz - (pos.z - d.z) * d.nx);       // 偏离门洞中线多远
+    // 对准了 = 在中线附近（离门框至少 1.2 米）、比门楣低、离墙不到 6 米。刚穿过墙面的那几米也算，不然会在门洞里掉头
+    const lined = off < d.half - 1.2 && pos.y < d.top - 0.8 && ahead < 6 && ahead > -4;
+    const k = (lined ? -3.5 : 3.5) * side;
+    out.set(d.x + d.nx * k, GULL.doorAlt, d.z + d.nz * k);
+    return d;
   }
 
   // ------------------------------------------------------------------ 6. 地面单位（机器狗、守卫）
