@@ -68,6 +68,7 @@ async function boot() {
   scene.add(decals.mesh);
   const audio = new GameAudio();
   audio.setVolume(settings.volume);
+  audio.prepare(); // 混响尾音、脚步、雨打铁皮这些采样现在就算好（纯计算），免得第一次点击出声时卡一下
 
   await step('正在检查激战制式步枪', 0.78);
   const input = new Input(canvas);
@@ -262,6 +263,9 @@ async function boot() {
     sky.uniforms.uFlash.value = bolt.value;
     rain.update(t, camera, renderer.gl.getDrawingBufferSize(bufSize).y);
     if (port.interior.containsPoint(camera.position) !== indoors) setIndoors(!indoors);
+    // 声音也要知道人在不在屋里：混响、雨声、枪声的尾音都跟着换。它自己会花三分之一秒左右平滑过渡，所以每帧告诉它一次就行
+    audio.setInterior(indoors);
+    audio.update(dt);
 
     if (state === 'playing' || state === 'paused') {
       camera.getWorldDirection(fwd);
