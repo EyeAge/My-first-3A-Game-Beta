@@ -286,6 +286,15 @@ export class Effects {
     tr.mesh.visible = true; tr.mesh.scale.set(0.2, 0.2, 0.01);
   }
 
+  /** 敌方能量弹飞行时掉下来的一粒余光，连起来就是它的尾迹。 */
+  trail(pos: THREE.Vector3) {
+    this.glow.emit(pos.x, pos.y, pos.z, (Math.random() - 0.5) * 0.3, (Math.random() - 0.5) * 0.3, (Math.random() - 0.5) * 0.3, 2.4, 0.5, 0.2, 0.09, 0.16 + Math.random() * 0.1, 0);
+  }
+
+  // ------------------------------------------------------------------ 敌人的死亡动画和开火用到的两个口子
+  // 这一段是后加的，只"加方法"、不动上面任何已有方法的行为：puff() 是能调参数的烟，tracerThin() 是细曳光。
+  // 以后重写粒子的画法时，这两个只要保持参数的含义不变就行（调用方都在 game/enemies.ts 里）。
+
   /**
    * 细曳光：敌人打过来的子弹用它。
    * 上面的 tracer() 把亮条画得有 20 厘米粗，是给玩家自己的子弹用的 —— 它们总是离镜头而去，粗一点远处才看得见。
@@ -298,11 +307,6 @@ export class Effects {
       tr.mesh.scale.x = tr.mesh.scale.y = width;
       tr.wake.scale.x = tr.wake.scale.y = width * 0.6;
     }
-  }
-
-  /** 敌方能量弹飞行时掉下来的一粒余光，连起来就是它的尾迹。 */
-  trail(pos: THREE.Vector3) {
-    this.glow.emit(pos.x, pos.y, pos.z, (Math.random() - 0.5) * 0.3, (Math.random() - 0.5) * 0.3, (Math.random() - 0.5) * 0.3, 2.4, 0.5, 0.2, 0.09, 0.16 + Math.random() * 0.1, 0);
   }
 
   /**
