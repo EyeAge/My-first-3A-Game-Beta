@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { clamp, vnoise } from '../../core/math';
-import { Kit, type Mat, type PropModel, type Rgb, type Tint, type V3 } from '../kit';
+import { decal as decalPatch, label as labelPatch, type LabelOpts } from '../../render/labels';
+import { SURFACES, type SurfaceName } from '../../render/surfaces';
+import { chamferBox, hex, Kit, type Mat, type PropModel, type Rgb, type Tint, type V3 } from '../kit';
 
 // 场地设施类道具：隔离墩、防撞柱、系缆桩、标志牌、通道牌、高杆灯、铁丝网围栏、大门、岗亭、道闸、冷藏机组、中继柜。
 //
@@ -51,6 +53,17 @@ function matrixOf(pos: V3, rot: V3 = [0, 0, 0]) {
   return new THREE.Matrix4().compose(new THREE.Vector3(...pos), new THREE.Quaternion().setFromEuler(new THREE.Euler(...rot)), new THREE.Vector3(1, 1, 1));
 }
 
+const paintColor = (name: SurfaceName) => (SURFACES[name] as { color: number }).color;
+/**
+ * 材质的底色是 base，想让某个零件显示成 target，顶点色该乘多少。
+ * 用它可以让道闸的橙色机箱、红白相间的栏杆、黄色托柱共用同一个"白漆"材质：少一种材质就少一次绘制调用。
+ * base 要选最亮的那个颜色，这样倍数都不超过 1。
+ */
+function toward(target: number, base: number, mul = 1): Rgb {
+  const t = hex(target), b = hex(base);
+  return [(t[0] / Math.max(b[0], 1e-4)) * mul, (t[1] / Math.max(b[1], 1e-4)) * mul, (t[2] / Math.max(b[2], 1e-4)) * mul];
+}
+
 /** 螺栓朝哪边伸出来 → 把"立着的圆柱"转到那个方向要用的旋转。 */
 const STUD_ROT: Record<string, V3> = { y: [0, 0, 0], x: [0, 0, -HALF_PI], '-x': [0, 0, HALF_PI], z: [HALF_PI, 0, 0], '-z': [-HALF_PI, 0, 0] };
 interface StudOpt { sides?: number; hex?: boolean; dir?: 'y' | 'x' | '-x' | 'z' | '-z'; tint?: Tint; raw?: boolean }
@@ -67,6 +80,44 @@ function stud(k: Kit, mat: Mat, r: number, len: number, pos: V3, o: StudOpt = {}
   g.setIndex(index);
   if (o.hex) g.deleteAttribute('normal');
   k.add(mat, g, { tint: o.tint, raw: o.raw }, matrixOf(pos, STUD_ROT[o.dir ?? 'y']));
+}
+
+/** 字最多可以被横向压窄到原来的几成。喷在牌子上的字常常是瘦高的，压到七成还很自然，再窄就难认了。 */
+const MAX_SQUEEZE = 0.7;
+/**
+ * 把一行字放进宽 maxW 的地方，字高尽量取 h。
+ * 零件箱的 label 在字太长时只压宽度、不动高度，长一点的字会被压成一条条细线。
+ * 这里先算一下：如果压到七成还放不下，就把字高也按比例缩小。
+ */
+function fitLabel(k: Kit, text: string, opts: LabelOpts, maxW: number, h: number, pos: V3, rot?: V3) {
+  const aspect = Math.max(labelPatch(text, opts).aspect, 1e-3);
+  k.label(text, opts, maxW, Math.min(h, maxW / (aspect * MAX_SQUEEZE)), pos, rot);
+}
+
+/** 水泥贴图一张铺 3 米；离板缝 30 厘米以内有顺着缝渗出来的污渍，要躲开。 */
+const CONCRETE_TILE = 3, JOINT_MARGIN = 0.3;
+/**
+ * 在一张水泥贴图的"中间地带"里挑一个点，让大小为 size 的零件放在那里不会碰到四边的板缝。
+ * spot 换一个数就换一个地方，这样两个墩子不会取到贴图上完全相同的一块。
+ */
+function tileSpot(spot: number, size: number): V3 {
+  const room = Math.max(0, CONCRETE_TILE - 2 * JOINT_MARGIN - size);
+  // 一个凑合用的"伪随机"：正弦值乘一个大数，取小数部分
+  const pick = (salt: number) => { const v = Math.sin((spot + 1) * 12.9898 * salt) * 43758.5453; return JOINT_MARGIN + size / 2 + room * (v - Math.floor(v)); };
+  return [pick(1), pick(2.3), pick(3.7)];
+}
+interface BlockOpt { c?: number; tint?: Tint; spot?: number }
+/**
+ * 水泥块（倒角盒）。和 k.box('concrete', …) 只差一点：贴图取哪一块由这里定，不是随机的。
+ *
+ * 水泥贴图是照"一块 3 米见方的地坪板"画的，四边有一圈板缝。零件箱默认把每个零件的贴图随机挪开几米，
+ * 一个小小的灯杆墩子就有可能正好压在板缝上 —— 墩子中间凭空多出一道黑线。
+ * 零件箱是按零件"自己的坐标"铺贴图的，所以这里先把盒子挪到板的中间地带、让它在那里铺好贴图，再用变换矩阵挪回原位。
+ */
+function concreteBlock(k: Kit, sx: number, sy: number, sz: number, x: number, y: number, z: number, o: BlockOpt = {}) {
+  const at = tileSpot(o.spot ?? 0, Math.max(sx, sy, sz)), g = chamferBox(sx, sy, sz, o.c ?? 0.015);
+  g.translate(at[0], at[1], at[2]);
+  k.add('concrete', g, { tint: o.tint, shift: false }, matrixOf([x - at[0], y - at[1], z - at[2]]));
 }
 
 /**
@@ -260,6 +311,100 @@ export function bollardMooring(o: SiteOpts = {}): PropModel {
   });
 }
 
+// ====================================================================== 标志牌
+
+/** 主牌上可以贴的 6 种图标（贴纸名）。 */
+export const SIGN_ICONS = ['hazard_general', 'no_entry', 'hazard_voltage', 'berth4', 'arrow', 'hazard_flammable'] as const;
+/** 副牌上的默认文字，按 seed 轮着取。 */
+export const SIGN_TEXTS = ['仅限授权人员', '禁止行人通行', '请穿反光服并佩戴安全帽', '自动作业车辆', '请勿靠近'] as const;
+
+export interface SignPostOpts extends SiteOpts {
+  /** 主牌的图标，不给就按 seed 从 SIGN_ICONS 里轮着取。 */
+  sign?: (typeof SIGN_ICONS)[number];
+  /** 副牌上的一行字，不给就按 seed 从 SIGN_TEXTS 里轮着取。 */
+  text?: string;
+}
+
+/**
+ * 标志牌，高 2.4 米：方管立柱上一块 0.6 米见方的主牌（图标）和一块 0.6 × 0.22 的副牌（一行字），牌面朝 +z。
+ * 警告类图标配黄底，"四号泊位"和箭头配深蓝底，其余配白底。整块牌子按 seed 歪一点点（最多 0.7°），一排牌子就不会齐得像尺子画的。
+ */
+export function signPost(o: SignPostOpts = {}): PropModel {
+  const seed = Math.abs((o.seed ?? 0) | 0), lean = ((seed % 5) - 2) * 0.006;
+  const sign = o.sign && SIGN_ICONS.includes(o.sign) ? o.sign : SIGN_ICONS[seed % SIGN_ICONS.length];
+  const text = o.text || SIGN_TEXTS[seed % SIGN_TEXTS.length];
+  return cached(`sign_post|${sign}|${text}|${seed % 5}${tag(o)}`, () => {
+    const k = new Kit('sign_post', seed % 5, { interior: o.interior });
+    concreteBlock(k, 0.3, 0.07, 0.3, 0, 0.03, 0, { tint: 0.8, spot: seed });
+    k.box('steel_galv', 0.05, 2.38, 0.05, 0, 1.2, 0, { c: 0.006 });
+    k.box('steel_galv', 0.058, 0.012, 0.058, 0, 2.395, 0, { plain: true });  // 管帽
+    k.box('steel_galv', 0.13, 0.012, 0.13, 0, 0.07, 0, { plain: true });     // 底板
+    k.push([0, 0, 0], [0, 0, lean]);
+    // 每块牌 = 一张铝板 + 贴在上面的一层漆膜（比铝板小一圈，四周露出一道铝边）
+    // 底色不另用别的漆材质，而是把白漆的顶点色染过去（见 toward）：整件道具少一次绘制调用
+    const board = (w: number, h: number, y: number, color: SurfaceName) => {
+      k.box('aluminium', w, h, 0.004, 0, y, 0.031, { plain: true });
+      k.box('paint_white', w - 0.02, h - 0.02, 0.002, 0, y, 0.034, { plain: true, tint: toward(paintColor(color), paintColor('paint_white')) });
+    };
+    // 警告类配黄底；"四号泊位"是黄字、箭头是白的，印在白底上看不见，给它们配深蓝底；其余白底
+    board(0.6, 0.6, 2.02, sign.startsWith('hazard') ? 'paint_yellow' : sign === 'berth4' || sign === 'arrow' ? 'paint_blue' : 'paint_white');
+    // 图标放进 0.5 米见方的框里，保持它自己的长宽比（"四号泊位"和箭头是横长的，硬拉成方的会变形）
+    const aspect = decalPatch(sign).aspect, iconW = aspect >= 1 ? 0.5 : 0.5 * aspect;
+    k.decal(sign, iconW, [0, 2.02, 0.0362]);
+    board(0.6, 0.22, 1.56, 'paint_white');
+    fitLabel(k, text, { color: 'black', font: 'sans', distress: 0.15 }, 0.52, 0.07, [0, 1.56, 0.0362]);
+    for (const y of [1.85, 2.2, 1.56]) {                                       // 背后三道抱箍：一条扁铁 + 卡在立柱上的夹块
+      k.box('steel_galv', 0.5, 0.03, 0.012, 0, y, 0.024, { plain: true });
+      k.box('steel_galv', 0.09, 0.04, 0.07, 0, y, -0.002, { c: 0.004 });
+    }
+    for (const [x, y] of [[-0.26, 2.28], [0.26, 2.28], [-0.26, 1.76], [0.26, 1.76]]) stud(k, 'steel_galv', 0.008, 0.004, [x, y, 0.0365], { dir: 'z' }); // 主牌四角的铆钉
+    k.pop();
+    return k.finish({
+      size: [0.6, 2.4, 0.08],
+      boxes: [
+        { min: [-0.03, 0, -0.03], max: [0.03, 2.4, 0.03], surface: 'metal', noNav: true },            // 立柱
+        { min: [-0.3, 1.44, 0.02], max: [0.3, 2.33, 0.04], surface: 'metal', bulletOnly: true },      // 牌面：只挡子弹，人蹭过去不会被一块铁皮卡住
+      ],
+    });
+  });
+}
+
+// ====================================================================== 通道指示牌
+
+export interface LaneSignOpts extends SiteOpts {
+  /** 牌子上的字，默认"一号通道"。 */
+  text?: string;
+  /** 两面都喷字（默认只有朝 +z 的一面有）。 */
+  double?: boolean;
+}
+
+/** 通道指示牌：3.2 米高的镀锌圆杆顶着一块 1.1 × 0.62 米的黄牌，黑色喷字。牌面朝 +z。 */
+export function laneSign(o: LaneSignOpts = {}): PropModel {
+  const text = o.text || '一号通道', double = !!o.double, v = variantOf(o.seed, 2);
+  return cached(`lane_sign|${text}|${double}|${v}${tag(o)}`, () => {
+    const k = new Kit('lane_sign', v, { interior: o.interior });
+    const HEIGHT = 3.2, BOARD_W = 1.1, BOARD_H = 0.62, THICK = 0.03, boardY = HEIGHT - BOARD_H / 2 - 0.05;
+    k.cyl('steel_galv', 0.045, HEIGHT, 0, HEIGHT / 2, 0, { seg: 8 });
+    k.box('steel_dark', 0.3, 0.02, 0.3, 0, 0.01, 0, { c: 0.004 });
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) stud(k, 'steel_galv', 0.012, 0.012, [sx * 0.11, 0.026, sz * 0.11]);
+    // 牌子挂在杆子前面（而不是让杆子从牌子中间穿过去 —— 那样杆子会把字从中间劈开）。两面都要字，就前后各挂一块
+    const ink: LabelOpts = { color: 'black', font: 'stencil', distress: 0.35 }, boardZ = 0.045 + THICK / 2 + 0.004;
+    for (const side of double ? [1, -1] : [1]) {
+      k.box('paint_yellow', BOARD_W, BOARD_H, THICK, 0, boardY, side * boardZ, { c: 0.01 });
+      fitLabel(k, text, ink, BOARD_W - 0.1, 0.4, [0, boardY, side * (boardZ + THICK / 2 + 0.002)], [0, side > 0 ? 0 : Math.PI, 0]);
+    }
+    for (const dy of [-0.2, 0.2]) k.box('steel_galv', 0.16, 0.04, 0.1, 0, boardY + dy, 0, { c: 0.004 }); // 两道抱箍，把牌子夹在杆上
+    const back = double ? -boardZ - THICK / 2 : boardZ - THICK / 2; // 牌面碰撞盒的背面：单面时只包住前面那一块
+    return k.finish({
+      size: [BOARD_W, HEIGHT, 0.3],
+      boxes: [
+        { min: [-0.06, 0, -0.06], max: [0.06, HEIGHT, 0.06], surface: 'metal', noNav: true },
+        { min: [-BOARD_W / 2, boardY - BOARD_H / 2, back], max: [BOARD_W / 2, boardY + BOARD_H / 2, boardZ + THICK / 2], surface: 'metal', bulletOnly: true },
+      ],
+    });
+  });
+}
+
 // ====================================================================== 登记表
 
 /**
@@ -267,4 +412,5 @@ export function bollardMooring(o: SiteOpts = {}): PropModel {
  */
 export const SITE: Record<string, (o?: any) => PropModel> = {
   jersey_barrier: jerseyBarrier, bollard_post: bollardPost, bollard_mooring: bollardMooring,
+  sign_post: signPost, lane_sign: laneSign,
 };
