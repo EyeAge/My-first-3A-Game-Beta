@@ -1,19 +1,21 @@
 import * as THREE from 'three';
+import { mulberry32 } from '../core/math';
 import { reflectionUniforms } from '../render/reflection';
 import { wetness } from '../render/surfaces';
 import { bakeGroundMask, isPuddleAt, puddleDepthAt } from './groundmask';
-import { groundDetailTextures, paintWearTexture, stencilTexture } from './textures';
+import { groundDetailTextures, groundPaintTexture, stencilText } from './textures';
 
 // 港区的地面：一整块湿漉漉的路面。
 //
-// 几何上它只是一个大平面（两个三角形）。板缝、裂缝、修补块、油渍、钢轨、积水、雨点涟漪、倒影，
+// 几何上它只是一个大平面（两个三角形）。板缝、裂缝、修补块、油渍、标线、钢轨、积水、雨点涟漪、倒影，
 // 全部是在一个片元着色器里画出来的。把这些都画在同一个着色器里（而不是贴一层层贴花）有个大好处：
-// 它们互相知道对方 —— 板缝里先存水，油渍会反光，补丁沉下去的地方会积水。
+// 它们互相知道对方 —— 漆会被水淹、水下还看得见漆，板缝里先存水，油渍会反光，补丁会把标线切断。
 //
-// 着色器吃三张自己生成的贴图：
+// 着色器吃四张自己生成的贴图：
 //   掩码（groundmask.ts）  哪里低洼、哪里潮、哪里有油、哪里磨得狠 —— 全场只此一张，不平铺
 //   细节 / 坡度（textures.ts）  石子、斑块、裂缝的原料 —— 平铺
-// 标线暂时还是浮在地面上的一批贴片（文件末尾），下一步再搬进着色器。
+//   喷涂图（本文件下半部分）  模板字、箭头、轮胎擦痕 —— 只盖主干道和码头两条行车走廊
+// 直线类的标线（车道线、斑马线、堆位边框……）不进贴图，直接用数学式子画，凑多近都是锐利的。
 
 export { isPuddleAt, puddleDepthAt } from './groundmask';
 
@@ -27,6 +29,8 @@ const LOOK = {
   aggregate: [0.11, 0.105, 0.095],      // 露出来的浅色石子，加在底色上
   patch: [0.085, 0.085, 0.09],          // 后补的新沥青，比老路面黑
   tar: [0.018, 0.018, 0.02],            // 填缝的沥青胶、裂缝
+  paintYellow: [0.52, 0.34, 0.035],
+  paintWhite: [0.47, 0.47, 0.44],
   railBed: [0.05, 0.04, 0.035],         // 轨道槽里的锈和泥
   railHead: [0.5, 0.5, 0.52],           // 被车轮磨亮的轨头（按金属算）
   waterTint: [0.004, 0.006, 0.0065],    // 深水里那一点点浑浊的青色
@@ -57,6 +61,18 @@ const GRAIN = {
 /** 6 米一块的路面板：板缝的位置整体挪 3 米，让缝避开主干道中线（x = −18）和码头上每 20 米一道的横线。 */
 const SLAB = { size: 6, offsetX: 3, offsetZ: 3 };
 
+/**
+ * 喷涂图的范围。全场 172×200 米，要是整个盖住，2048 像素的图一个像素得有 10 厘米，字都糊了；
+ * 而模板字和轮胎印只出现在两条行车走廊上。所以只存这两条窄带，并排塞进一张 1024×4096 的图里（约 5 厘米一个像素）：
+ * 左边三分之一是主干道，右边三分之二是码头前沿。
+ */
+const PAINT = {
+  width: 1024, height: 4096,
+  z0: -102, zLength: 204,
+  road: { x0: -27, width: 18, u0: 0, uSpan: 1 / 3 },
+  quay: { x0: 26, width: 36, u0: 1 / 3, uSpan: 2 / 3 },
+};
+
 const vec3 = (c: number[]) => `vec3(${c.map((n) => n.toFixed(4)).join(', ')})`;
 const float = (n: number) => n.toFixed(4);
 
@@ -64,9 +80,9 @@ const float = (n: number) => n.toFixed(4);
 const SHADER_HEAD = /* glsl */ `
 varying vec3 vWp;
 uniform float uReflTime, uRain, uWet, uReflOn, uReflLod;
-uniform sampler2D uMask, uDetail, uDetailSlope, tRefl;
-uniform vec4 uMaskRect;
-uniform vec2 uMaskRes, uReflScale;
+uniform sampler2D uMask, uDetail, uDetailSlope, uPaint, tRefl;
+uniform vec4 uMaskRect, uPaintRoad, uPaintQuay;
+uniform vec2 uMaskRes, uPaintRes, uPaintZ, uReflScale;
 uniform mat4 uReflM;
 // 主体算出来的结果，后面几个阶段（粗糙度、法线、倒影）还要用，所以放成全局变量
 float gRough; float gMetal; vec2 gSlope; float gPuddle; float gFilm; float gSoak; float gCrest;
@@ -94,6 +110,55 @@ vec4 gBicubic(sampler2D t, vec2 uv, vec2 res){
 // 算的是这个像素有多大比例落在带子里（两条边各算一次相减），所以边缘自带抗锯齿，
 // 而且带子比一个像素还细时会按比例变淡，而不是闪成一截一截的虚线。
 float gBand(float d, float halfWidth, float px){ return clamp((d + halfWidth) / px + 0.5, 0.0, 1.0) - clamp((d - halfWidth) / px + 0.5, 0.0, 1.0); }
+
+// 禁停区：一个矩形框，里面画 45 度斜线。c 是中心，h 是半边长。
+float gHatchBox(vec2 p, vec2 c, vec2 h, float spacing, float lineWidth, float px){
+  vec2 q = abs(p - c) - h; float sd = max(q.x, q.y);
+  float inside = clamp(-sd / px + 0.5, 0.0, 1.0);
+  float diag = (p.x + p.y) * 0.7071;
+  return max(gBand(sd, 0.075, px), gBand(mod(diag, spacing) - spacing * 0.5, lineWidth * 0.5, px) * inside);
+}
+
+// 所有“直线类”的标线。返回 (黄漆, 白漆) 的覆盖度。p 是世界坐标 xz，px 是 x、z 两个方向上一个像素盖住多少米。
+// 这里的数字对应 port.ts 的布局：主干道中线 x=−18、边线 −25.7 / −10.3；四个路口和出生点前各一条斑马线；
+// 堆位 14 米一列、31.7 米一排；岸桥轨道 x=34 / 58。
+vec2 gPaintLines(vec2 p, vec2 px){
+  float apx = max(px.x, px.y);
+  float yellow = 0.0, white = 0.0;
+  // 离哪条斑马线最近：四个路口（z = ±15.85、±47.55）加出生点前面那条（z = 86）
+  float az = abs(p.y);
+  float crossing = (abs(az - 15.85) < abs(az - 47.55) ? 15.85 : 47.55) * (p.y < 0.0 ? -1.0 : 1.0);
+  float toJunction = abs(p.y - crossing);                 // 到最近路口中心的距离（不含 z=86 那条）
+  if (abs(p.y - 86.0) < toJunction) crossing = 86.0;
+  float along = p.y - crossing;                           // 带符号：正 = 在斑马线南边
+  // 主干道边线（黄）：到了路口断开，给横向通道让出口子
+  yellow += (gBand(p.x + 25.7, 0.08, px.x) + gBand(p.x + 10.3, 0.08, px.x)) * smoothstep(3.5, 3.7, toJunction);
+  // 中线（白，实 3 米空 3 米）：斑马线前后不画
+  white += gBand(p.x + 18.0, 0.09, px.x) * gBand(mod(p.y + 99.0, 6.0) - 3.0, 1.5, px.y) * smoothstep(3.3, 3.5, abs(along));
+  // 斑马线：13 条 0.55 米宽的白条，每条长 4 米
+  float onRoad = step(-24.9, p.x) * step(p.x, -11.1);
+  white += gBand(mod(p.x + 25.15, 1.1) - 0.55, 0.275, px.x) * onRoad * gBand(along, 2.0, px.y);
+  // 停车线：靠右行驶，往北开的车走东侧车道，停在斑马线南边；往南开的走西侧，停在北边
+  white += gBand(along - 3.0, 0.2, px.y) * gBand(p.x + 14.15, 3.55, px.x) + gBand(along + 3.0, 0.2, px.y) * gBand(p.x + 21.85, 3.55, px.x);
+  // 堆位边框（黄）：把 x、z 折叠到“离最近的堆位中心多远”，一个式子画出三十个框。朝主干道的那条边不画（那里已经有边线了）
+  float colX = p.x < -18.0 ? mod(p.x + 65.0, 14.0) - 7.0 : mod(p.x + 13.0, 14.0) - 7.0;
+  float inCols = (step(-65.0, p.x) * step(p.x, -26.3) + step(-9.7, p.x) * step(p.x, 29.0)) * step(az, 79.0);
+  vec2 q = abs(vec2(colX, mod(p.y + 79.25, 31.7) - 15.85)) - vec2(4.15, 12.65);
+  float forecourt = step(abs(p.x + 58.0), 7.0) * step(az, 15.85);   // 车间东门外的门前空场：这个格子不堆箱子，也就没有框
+  yellow += gBand(max(q.x, q.y), 0.05, apx) * inCols * (1.0 - forecourt);
+  // 码头：前沿警戒线、堆场边界线、每 20 米一道的横线、轨道两侧的虚线（实 1 米空 1 米）
+  yellow += gBand(p.x - 60.2, 0.15, px.x) + gBand(p.x - 27.4, 0.1, px.x);
+  yellow += gBand(mod(p.y + 100.0, 20.0) - 10.0, 0.08, px.y) * step(35.3, p.x) * step(p.x, 56.7);
+  yellow += (gBand(abs(p.x - 34.0) - 1.3, 0.05, px.x) + gBand(abs(p.x - 58.0) - 1.3, 0.05, px.x)) * gBand(mod(p.y, 2.0) - 1.0, 0.5, px.y);
+  // 禁停区：车间东门外（门在 x = −76、z ±2.5）、南卷帘门外（门在 z = 8.5、x −94…−89）、两个露天中继跟前、撤离艇的登船口
+  yellow = max(yellow, gHatchBox(p, vec2(-73.7, 0.0), vec2(2.1, 3.2), 1.0, 0.12, apx));
+  yellow = max(yellow, gHatchBox(p, vec2(-91.5, 10.9), vec2(3.2, 2.2), 1.0, 0.12, apx));
+  yellow = max(yellow, gHatchBox(p, vec2(48.0, -8.0), vec2(3.2, 2.6), 1.1, 0.14, apx));
+  yellow = max(yellow, gHatchBox(p, vec2(8.0, 0.0), vec2(2.6, 2.2), 1.0, 0.12, apx));
+  yellow = max(yellow, gHatchBox(p, vec2(57.4, 90.0), vec2(2.2, 5.6), 1.2, 0.16, apx));
+  float inYard = step(az, 98.6);                            // 围墙以外不画
+  return clamp(vec2(yellow, white), 0.0, 1.0) * inYard;
+}
 
 // 一层雨点涟漪。把水面分成 cell 米见方的格子，每格每个周期最多落一滴雨：位置、大小、强弱每一滴都重新随机
 // （哈希里带着“第几滴”），而且有相当一部分周期干脆不落——所以看上去是稀稀拉拉、此起彼伏的，不是一张规则的点阵。
@@ -204,7 +269,37 @@ const SHADER_BODY = /* glsl */ `
   alb = mix(alb, ${vec3(LOOK.tar)}, max(max(tar, seal * 0.4) * 0.94, crack * 0.9));
   alb *= 1.0 - 0.62 * mk.b;                                // 油渍
 
-  float paint = 0.0;                                       // 标线还没搬进来：先当作“这里没有漆”，下面几处用到它的式子就不用改
+  // ---- 喷涂图：模板字和箭头（r 黄 g 白）、轮胎橡胶（b）。两条走廊并排存在一张图里 ----
+  vec4 lane = xz.x < 8.0 ? uPaintRoad : uPaintQuay;        // (走廊西边界 x, 1/宽度, 在图里的起始 u, 占多宽的 u)
+  float ku = (xz.x - lane.x) * lane.y;
+  vec2 kuv = vec2(lane.z + clamp(ku, 0.0, 1.0) * lane.w, (xz.y - uPaintZ.x) * uPaintZ.y);
+  float kIn = step(0.0, ku) * step(ku, 1.0) * step(0.0, kuv.y) * step(kuv.y, 1.0);
+  vec3 mp = texture2D(uPaint, kuv).rgb;
+  float kpx = max(px.x * lane.y * lane.w * uPaintRes.x, px.y * uPaintZ.y * uPaintRes.y);   // 一个屏幕像素跨几个贴图像素
+  if (kpx < 1.0) mp = mix(gBicubic(uPaint, kuv, uPaintRes).rgb, mp, smoothstep(0.5, 1.0, kpx)); // 贴图被放大时改用双三次，消掉像素格
+  mp *= kIn;
+  float kw = clamp(kpx * 0.5, 0.16, 0.5);                  // 漆边的软硬：凑近了看是一道利落的边
+
+  // ---- 漆：直线用式子画，字和箭头查图；然后统一做磨损和崩口 ----
+  vec2 lines = gPaintLines(xz, px);
+  // 崩口用世界坐标的噪声现算（17 / 57 / 181 圈每米三层，细的两层离远了就淡掉），不依赖任何贴图的像素，凑多近都有细节
+  float chipN = 0.5;
+  if (max(max(mp.r, mp.g), max(lines.x, lines.y)) > 0.02) {
+    float cf2 = 1.0 - smoothstep(6.0, 18.0, dist), cf3 = 1.0 - smoothstep(2.5, 7.0, dist);
+    chipN = gNoise(xz * 17.0) * 0.45 + mix(0.5, gNoise(xz * 57.0 + 11.0), cf2) * 0.33 + mix(0.5, gNoise(xz * 181.0 + 5.0), cf3) * 0.22;
+  }
+  float chip = chipN * 0.62 + d1.a * 0.38;
+  float wear = clamp(mk.a * 1.25 - 0.22 + mp.b * 0.6, 0.0, 1.0);        // 磨损掩码，被轮胎擦过的地方更狠
+  float wearT = mix(0.24, 0.55, wear);                                   // 噪声低于这个值的地方漆已经掉了
+  float keep = smoothstep(wearT - 0.045, wearT + 0.045, chip) * (1.0 - max(max(tar, crack), max(mend * 0.9, railBed)));
+  float edgeN = (chipN - 0.5) * 0.55 * (1.0 - kw * 2.0);                 // 把模板字的边缘推得毛一点
+  float paintY = max(lines.x, smoothstep(0.5 - kw, 0.5 + kw, mp.r + edgeN)) * keep;
+  float paintW = max(lines.y, smoothstep(0.5 - kw, 0.5 + kw, mp.g + edgeN)) * keep;
+  alb *= 1.0 - 0.6 * mp.b * (1.0 - 0.5 * conc);            // 轮胎橡胶印：先压暗路面，漆刷在它上面
+  float fade = 0.72 + 0.28 * d1.g;
+  alb = mix(alb, ${vec3(LOOK.paintYellow)} * fade, paintY * 0.94);
+  alb = mix(alb, ${vec3(LOOK.paintWhite)} * fade, paintW * 0.94);
+  float paint = max(paintY, paintW);
   alb = mix(alb, ${vec3(LOOK.railBed)} * (0.6 + 0.8 * grain), railBed);
 
   // ---- 水：一个连续的量 depth（正 = 水下，负 = 岸上）派生出全部状态 ----
@@ -328,13 +423,101 @@ if (uReflOn > 0.5) {
 }
 `;
 
+// ================================================================ 喷涂图：模板字、箭头、轮胎印
+function buildPaintTexture() {
+  const { width, height, z0, zLength, road, quay } = PAINT;
+  const YELLOW = '#ff0000', WHITE = '#00ff00';             // 红通道存黄漆，绿通道存白漆（见 groundPaintTexture）
+  return groundPaintTexture(width, height, (g) => {
+    const rng = mulberry32(90210), rand = (a: number, b: number) => a + rng() * (b - a);
+    /** 把画布坐标换成“世界米”，并把画的范围限制在这条走廊自己的那一块里。 */
+    const enter = (strip: typeof road) => {
+      const sx = (width * strip.uSpan) / strip.width, sz = height / zLength;
+      g.save();
+      g.beginPath(); g.rect(width * strip.u0, 0, width * strip.uSpan, height); g.clip();
+      g.transform(sx, 0, 0, sz, width * strip.u0 - strip.x0 * sx, -z0 * sz);
+    };
+    /** 行车箭头。dir = −1 指北（−z），+1 指南。 */
+    const arrow = (x: number, z: number, dir: number) => {
+      g.save(); g.translate(x, z); g.scale(1.5, 1.5 * dir); g.fillStyle = WHITE;
+      g.beginPath(); g.moveTo(-0.14, -1.6); g.lineTo(-0.14, 0.5); g.lineTo(-0.5, 0.5); g.lineTo(0, 1.7); g.lineTo(0.5, 0.5); g.lineTo(0.14, 0.5); g.lineTo(0.14, -1.6); g.closePath(); g.fill();
+      g.restore();
+    };
+    /** 一辆车留下的一组轮胎印：左右两排轮子，每排是并在一起的双胎，所以是四条线。从 (x, z) 到 (x2, z2)，中间略带弧度。 */
+    const tyres = (x: number, z: number, x2: number, z2: number, bend: number, alpha: number) => {
+      g.strokeStyle = `rgba(0,0,255,${alpha})`; g.lineWidth = 0.26; g.lineCap = 'round';
+      for (const wheel of [-0.95, 0.95]) for (const twin of [-0.16, 0.16]) {
+        g.beginPath(); g.moveTo(x + wheel + twin, z); g.quadraticCurveTo((x + x2) / 2 + bend + wheel + twin, (z + z2) / 2, x2 + wheel + twin, z2); g.stroke();
+      }
+    };
+    /** 一条轮胎擦痕（急刹、原地打方向留下的）。 */
+    const scuff = (x: number, z: number, x2: number, z2: number, widthM: number, alpha: number, cx?: number, cz?: number) => {
+      g.strokeStyle = `rgba(0,0,255,${alpha})`; g.lineWidth = widthM; g.lineCap = 'round';
+      g.beginPath(); g.moveTo(x, z);
+      if (cx === undefined || cz === undefined) g.lineTo(x2, z2); else g.quadraticCurveTo(cx, cz, x2, z2);
+      g.stroke();
+    };
+
+    // ---------------- 主干道（x −27…−9）。靠右行驶：东侧车道（x = −14.15）往北，西侧（−21.85）往南
+    enter(road);
+    for (const z of [74, 37, -27, -76]) arrow(-14.15, z, -1);
+    for (const z of [61, 8, -22, -61]) arrow(-21.85, z, 1);
+    // 路口前的“慢”和限速圈。字头朝着车来的方向的远端，司机开过来看是正的
+    stencilText(g, '慢', -14.15, 56.6, 2.6, 0, WHITE);
+    stencilText(g, '慢', -21.85, -56.6, 2.6, Math.PI, WHITE);
+    for (const [x, z, rot] of [[-14.15, 25, 0], [-21.85, -8.2, Math.PI], [-14.15, -38.5, 0], [-21.85, 40.2, Math.PI]] as const) {
+      stencilText(g, '10', x, z, 1.9, rot, WHITE);
+      g.strokeStyle = WHITE; g.lineWidth = 0.16; g.beginPath(); g.ellipse(x, z, 1.45, 1.95, 0, 0, Math.PI * 2); g.stroke();
+    }
+    // 轮胎印：顺着车道的长拖痕
+    for (let i = 0; i < 64; i++) {
+      const lane = rng() < 0.55 ? -21.85 : -14.15, x = lane + rand(-1.3, 1.3), z = rand(-94, 70), len = rand(8, 34);
+      tyres(x, z, Math.max(-24.4, Math.min(-11.6, x + rand(-0.8, 0.8))), Math.min(z + len, 95), rand(-0.7, 0.7), rand(0.1, 0.32));
+    }
+    // 路口：拐进横向通道的弧形擦痕
+    for (const cz of [-47.55, -15.85, 15.85, 47.55]) for (let i = 0; i < 4; i++) {
+      const lane = rng() < 0.5 ? -21.85 : -14.15, out = rng() < 0.5 ? -26.2 : -9.8, from = cz + (rng() < 0.5 ? -1 : 1) * rand(5, 11);
+      scuff(lane + rand(-1, 1), from, out, cz + rand(-2, 2), 0.3, rand(0.12, 0.32), lane + rand(-0.5, 0.5), cz + rand(-1, 1));
+    }
+    for (let i = 0; i < 46; i++) {
+      const x = rand(-25, -11), z = rand(-95, 95), len = rand(0.6, 3.1), a = Math.PI / 2 + rand(-0.25, 0.25);
+      scuff(x, z, x + Math.cos(a) * len, z + Math.sin(a) * len, rand(0.12, 0.32), rand(0.15, 0.45));
+    }
+    g.restore();
+
+    // ---------------- 码头前沿（x 26…62）
+    enter(quay);
+    // 泊位号：字的底边朝西，从堆场那边走过来看是正的
+    stencilText(g, 'B4', 46, 50, 3.6, Math.PI / 2, YELLOW);
+    stencilText(g, 'B4', 46, -60, 3.6, Math.PI / 2, YELLOW);
+    stencilText(g, '四号泊位', 44.5, 81, 2.0, Math.PI / 2, WHITE);
+    stencilText(g, '四号泊位', 44.5, -81, 2.0, Math.PI / 2, WHITE);
+    for (const cz of [-42, 20]) stencilText(g, '请勿靠近', 36.3, cz, 0.95, Math.PI / 2, YELLOW);   // 两台岸桥的门腿之间
+    // 泊位里程：每 20 米一个数，喷在前沿警戒线内侧
+    for (let z = -80, n = 0; z <= 80; z += 20, n++) stencilText(g, String(400 + n * 5), 56, z + 2.2, 0.9, Math.PI / 2, WHITE);
+    for (let i = 0; i < 44; i++) {
+      const lane = rng() < 0.5 ? 41 : 51, x = lane + rand(-1.6, 1.6), z = rand(-94, 70), len = rand(8, 30);
+      tyres(x, z, x + rand(-1, 1), Math.min(z + len, 95), rand(-0.8, 0.8), rand(0.1, 0.3));
+    }
+    // 从堆场的横向通道拐上码头的弧形擦痕
+    for (const cz of [-47.55, -15.85, 15.85, 47.55]) for (let i = 0; i < 3; i++) {
+      const lane = rng() < 0.5 ? 41 : 51, dir = rng() < 0.5 ? -1 : 1;
+      scuff(27, cz + rand(-2, 2), lane + rand(-1, 1), cz + dir * rand(8, 16), 0.3, rand(0.12, 0.3), lane - rand(2, 5), cz + rand(-1, 1));
+    }
+    for (let i = 0; i < 50; i++) {
+      const x = rand(29, 59), z = rand(-95, 95), len = rand(0.6, 3.1), a = Math.PI / 2 + rand(-0.4, 0.4);
+      scuff(x, z, x + Math.cos(a) * len, z + Math.sin(a) * len, rand(0.12, 0.32), rand(0.15, 0.45));
+    }
+    g.restore();
+  });
+}
+
 // ================================================================ 组装
 export function buildGround(quayX: number) {
   const group = new THREE.Group();
-  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), v1 = new THREE.Vector3(), v2 = new THREE.Vector3(), col = new THREE.Color();
 
   const mask = bakeGroundMask(quayX);
   const detail = groundDetailTextures();
+  const paint = buildPaintTexture();
   const reflection = reflectionUniforms();
   const uniforms = {
     uMask: { value: mask.texture },
@@ -342,6 +525,11 @@ export function buildGround(quayX: number) {
     uMaskRes: { value: new THREE.Vector2(mask.res, mask.res) },
     uDetail: { value: detail.detail },
     uDetailSlope: { value: detail.slope },
+    uPaint: { value: paint },
+    uPaintRes: { value: new THREE.Vector2(PAINT.width, PAINT.height) },
+    uPaintRoad: { value: new THREE.Vector4(PAINT.road.x0, 1 / PAINT.road.width, PAINT.road.u0, PAINT.road.uSpan) },
+    uPaintQuay: { value: new THREE.Vector4(PAINT.quay.x0, 1 / PAINT.quay.width, PAINT.quay.u0, PAINT.quay.uSpan) },
+    uPaintZ: { value: new THREE.Vector2(PAINT.z0, 1 / PAINT.zLength) },
     /** 雨量 0..1：决定涟漪有多密、多强。 */
     uRain: { value: 0.6 },
     /** 全局湿度 0..1：1 是正在下雨的样子，往 0 调地面逐渐变干、水洼消失。和材质库共用同一个对象，全场的湿度一起变。 */
@@ -375,7 +563,7 @@ export function buildGround(quayX: number) {
         // 加早了会被倒影整个盖掉，那样涟漪只有在灯的倒影里才看得出来，暗处的水塘就像没在下雨
         reflectedLight.indirectSpecular += gCrest * (irradiance + iblIrradiance) * ${float(LOOK.crestSkyGain)};`);
   };
-  groundMat.customProgramCacheKey = () => 'wet-ground-3';
+  groundMat.customProgramCacheKey = () => 'wet-ground-4';
 
   const ground = new THREE.Mesh(new THREE.PlaneGeometry(462, 600), groundMat);
   ground.rotation.x = -Math.PI / 2;
@@ -389,38 +577,6 @@ export function buildGround(quayX: number) {
     uniforms.uReflLod.value = Math.log2(Math.max(image?.height ?? 270, 1) / 270);
   };
   group.add(ground);
-
-  // ---------------------------------------------------------------- 标线
-  const marks: { x: number; z: number; w: number; l: number; c: number }[] = [];
-  const WHITE = 0xb9b6ac, YEL = 0xb38d2c;
-  for (let z = -96; z <= 96; z += 6) marks.push({ x: -18, z, w: 0.18, l: 3, c: WHITE });
-  for (const x of [-25.7, -10.3]) marks.push({ x, z: 0, w: 0.16, l: 196, c: YEL });
-  for (const z of [-47.55, -15.85, 15.85, 47.55]) for (let x = -24.6; x <= -11.2; x += 1.1) marks.push({ x, z, w: 0.55, l: 4, c: WHITE });
-  for (let x = -24.6; x <= -11.2; x += 1.1) marks.push({ x, z: 86, w: 0.55, l: 4, c: WHITE });
-  // （原来这里还用两条深色的线冒充岸桥的钢轨；现在钢轨由地面着色器画，轨槽里会存水、轨头会反光）
-  marks.push({ x: quayX - 1.8, z: 0, w: 0.3, l: 198, c: YEL }, { x: 27.4, z: 0, w: 0.2, l: 198, c: YEL });
-  for (let z = -90; z <= 90; z += 20) marks.push({ x: 46, z, w: 22, l: 0.16, c: YEL });
-  const markGeo = new THREE.PlaneGeometry(1, 1); markGeo.rotateX(-Math.PI / 2);
-  // 标线的磨损按世界坐标取，而不是按每条线自己的贴图坐标：不然一条 200 米的长线会把磨损图拉成一道道"木纹"
-  const markMat = new THREE.MeshStandardMaterial({ roughness: 0.5, metalness: 0, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, transparent: true, opacity: 0.78, alphaMap: paintWearTexture(), depthWrite: false });
-  markMat.onBeforeCompile = (sh) => {
-    sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec2 vWxz;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWxz = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xz;');
-    sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nvarying vec2 vWxz;')
-      .replace('#include <alphamap_fragment>', 'diffuseColor.a *= texture2D(alphaMap, vWxz * 0.42).g;');
-  };
-  markMat.customProgramCacheKey = () => 'road-marks';
-  const markMesh = new THREE.InstancedMesh(markGeo, markMat, marks.length);
-  marks.forEach((mk, i) => { markMesh.setMatrixAt(i, m4.compose(v1.set(mk.x, 0.012, mk.z), q.identity(), v2.set(mk.w, 1, mk.l))); markMesh.setColorAt(i, col.setHex(mk.c)); });
-  markMesh.receiveShadow = true;
-  group.add(markMesh);
-  for (const [x, z] of [[46, 50], [46, -60]]) {
-    const st = new THREE.Mesh(new THREE.PlaneGeometry(9, 4.5), new THREE.MeshStandardMaterial({ map: stencilTexture('B4'), transparent: true, roughness: 0.5, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 }));
-    st.rotation.x = -Math.PI / 2; st.rotation.z = -Math.PI / 2; st.position.set(x, 0.014, z);
-    group.add(st);
-  }
 
   return { mesh: ground, group, reflection, uniforms, mask, puddleDepthAt, isPuddleAt };
 }

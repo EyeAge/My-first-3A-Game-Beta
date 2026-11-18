@@ -223,3 +223,45 @@ export function groundDetailTextures(res = 512) {
   };
   return { detail: make(detail), slope: make(slope) };
 }
+
+/**
+ * 地面喷涂图的画布：黑底，用“加法”合成，三个颜色通道各存一样东西、互不覆盖——
+ * 红 = 黄漆，绿 = 白漆，蓝 = 轮胎擦上去的橡胶。画什么由调用的地方决定（paint 回调里拿到的 g 已经设好加法合成）。
+ * 返回的贴图是数据图：不做 sRGB 解码，不上下翻转（画布的第一行就是贴图的 v = 0，换算世界坐标时不用倒着想）。
+ */
+export function groundPaintTexture(width: number, height: number, paint: (g: CanvasRenderingContext2D) => void) {
+  const { c, g } = canvas(width, height);
+  g.fillStyle = '#000'; g.fillRect(0, 0, width, height);
+  g.globalCompositeOperation = 'lighter';
+  paint(g);
+  const t = new THREE.CanvasTexture(c);
+  t.flipY = false;
+  t.colorSpace = THREE.NoColorSpace;
+  t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+  t.minFilter = THREE.LinearMipmapLinearFilter; t.magFilter = THREE.LinearFilter; t.generateMipmaps = true;
+  t.anisotropy = 8;
+  return t;
+}
+
+/**
+ * 在画布上喷一行“镂空模板字”：真的喷漆模板是一整张铁皮，字里面封闭的部分（比如“口”中间那块）
+ * 得靠几条细细的“连接桥”吊着才不会掉下来，喷出来的字上就留下几道没漆的竖缝。这里照这个样子在每个字上盖一条黑竖条。
+ * x、y 是这行字的中心，height 是字高，rotation 是转角（弧度）；单位由画布当前的坐标变换决定。
+ */
+export function stencilText(g: CanvasRenderingContext2D, text: string, x: number, y: number, height: number, rotation: number, style: string) {
+  g.save();
+  g.translate(x, y); g.rotate(rotation); g.scale(height / 100, height / 100);
+  g.font = `900 100px ${FONT}`; g.textAlign = 'left'; g.textBaseline = 'middle';
+  g.fillStyle = style;
+  let pen = -g.measureText(text).width / 2;
+  g.fillText(text, pen, 0);
+  const mode = g.globalCompositeOperation;
+  g.globalCompositeOperation = 'source-over'; g.fillStyle = '#000';
+  for (const ch of text) {
+    const w = g.measureText(ch).width;
+    if (!' I1'.includes(ch)) g.fillRect(pen + w * 0.36, -60, 4.5, 120);
+    pen += w;
+  }
+  g.globalCompositeOperation = mode;
+  g.restore();
+}
