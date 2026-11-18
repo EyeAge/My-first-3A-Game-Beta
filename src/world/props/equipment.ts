@@ -3,7 +3,8 @@ import { label as labelPatch, decal as decalPatch, labelMaterial, type Patch } f
 import { emissive, surface, type SurfaceName } from '../../render/surfaces';
 import { Kit, noise3, type PropModel, type Rgb, type V3 } from '../kit';
 
-// 设备与杂物类道具：发电机、三脚投光灯、垃圾箱、工具车、气瓶架、钢管堆。
+// 设备与杂物类道具：发电机、三脚投光灯、垃圾箱、工具车、气瓶架、钢管堆，
+// 以及布置场地时顺手摆的小东西 —— 轮挡、钢筋料笼、废料斗、钢筋捆、大钢板垛、配电箱、地上的电缆。
 //
 // 这些东西不参与玩法，作用只有一个：让堆场看起来"有人在这里干过活"。
 // 所以每一件都是成组出现的：发电机旁边立着投光灯，中间拖一根电缆；工具车的台面上丢着扳手和抹布。
@@ -621,9 +622,208 @@ export function pipeStack(o: EquipOpts = {}): PropModel {
   });
 }
 
+// ================================================================ 现搭的小物件
+/**
+ * 轮挡：塞在车轮后面防溜车的橡胶楔子，0.32 × 0.19 × 0.2。斜面朝 +x（车轮在那一边），背面贴一片黄色反光板。
+ * 没有碰撞：这么小的东西挡住人只会让人觉得"被空气绊了一下"。
+ */
+export function wheelChock(o: EquipOpts = {}): PropModel {
+  const seed = o.seed ?? 0;
+  return cached('wheel_chock', [seed, o.interior], () => {
+    const k = new Kit('wheel_chock', seed, { interior: o.interior });
+    k.extrude('rubber', [[-0.16, 0], [0.16, 0], [0.16, 0.05], [-0.1, 0.19], [-0.16, 0.19]], 0.2, { soft: 0, tint: k.range(0.85, 1) });
+    k.box('paint_yellow', 0.012, 0.16, 0.18, -0.166, 0.1, 0, { plain: true });
+    // 斜面上三道防滑棱（参考里没有，加上以后斜面不再是一块光板；一共多 36 个三角形）
+    const tilt = Math.atan2(0.14, 0.26); // 斜面和地面的夹角
+    for (const t of [0.25, 0.5, 0.75]) k.box('rubber', 0.014, 0.008, 0.2, -0.1 + 0.26 * t + 0.002, 0.19 - 0.14 * t + 0.003, 0, { plain: true, rot: [0, 0, -tilt], tint: 0.7 });
+    return k.finish({ size: [0.33, 0.19, 0.2], boxes: [] });
+  });
+}
+
+/**
+ * 钢筋料笼（铁丝网周转箱）2.2 × 1.25 × 1.2：方管骨架 + 四面铁丝网，里面竖着斜插一把细钢筋（会高出笼子一大截），角上堆着几段短管。
+ * color 是骨架的漆色，参考里用蓝和橙两种。
+ */
+export function rebarCage(o: EquipOpts & { color?: PaintColor } = {}): PropModel {
+  const seed = o.seed ?? 0;
+  return cached('rebar_cage', [seed, o.color, o.interior], () => {
+    const k = new Kit('rebar_cage', seed, { interior: o.interior });
+    const { mat: frame, shade } = paint(o.color, 'blue');
+    const L = 2.2, W = 1.2, H = 1.25;
+    k.box('steel_dark', L, 0.05, W, 0, 0.13, 0, { plain: true, tint: 0.8 });                                    // 底板
+    for (const s of [-1, 1]) k.box(frame, 0.1, 0.1, W, s * (L / 2 - 0.25), 0.05, 0, { plain: true, tint: shade(0.8) }); // 两条底梁，叉车从这里叉
+    // 四根角柱。比上圈矮 2 毫米：两个顶面要是一样高，重叠的地方会闪
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) k.box(frame, 0.07, H - 0.102, 0.07, sx * (L / 2 - 0.035), 0.1 + (H - 0.102) / 2, sz * (W / 2 - 0.035), { tint: shade(k.range(0.85, 1)) });
+    const meshH = H - 0.25, meshY = 0.15 + meshH / 2; // 铁丝网的高和中心高度
+    for (const s of [-1, 1]) {
+      k.box(frame, L, 0.06, 0.06, 0, H - 0.03, s * (W / 2 - 0.03), { tint: shade(0.95) });   // 上圈（长边）
+      k.box(frame, L, 0.05, 0.05, 0, 0.62, s * (W / 2 - 0.03), { plain: true, tint: shade(0.9) }); // 腰圈
+      k.plane('chainlink', L - 0.14, meshH, [0, meshY, s * (W / 2 - 0.035)]);
+      k.box(frame, 0.06, 0.06, W, s * (L / 2 - 0.03), H - 0.03, 0, { tint: shade(0.95) });   // 上圈（短边）
+      k.plane('chainlink', W - 0.14, meshH, [s * (L / 2 - 0.035), meshY, 0], { rot: [0, HALF, 0] });
+    }
+    // 14 根细钢筋。位置用"乘一个无理数再取小数部分"来排：看起来乱，但不会扎堆，换个 seed 整体挪一挪
+    for (let i = 0; i < 14; i++) {
+      const u = (i * 0.618 + seed * 0.37) % 1, v = (i * 0.414 + seed * 0.11) % 1, len = 1.5 + v * 0.9;
+      k.cyl(i % 3 ? 'steel_worn' : 'steel_rust', 0.014, len, -L / 2 + 0.25 + u * (L - 0.9), 0.16 + (len / 2) * 0.96, -W / 2 + 0.2 + v * (W - 0.4), { seg: 5, rot: [0.1 * (v - 0.5), 0, 0.28 * (u - 0.3)], tint: k.range(0.8, 1) });
+    }
+    for (let i = 0; i < 6; i++) { // 6 段短管，横七竖八堆在 +x 那头
+      const u = (i * 0.37 + seed * 0.2) % 1;
+      k.cyl('steel_rust', 0.035, 0.42, L / 2 - 0.45 + (u - 0.5) * 0.3, 0.22 + i * 0.05, (u - 0.5) * 0.7, { seg: 6, rot: [HALF + u, u * 3, 0.2], tint: k.range(0.7, 1) });
+    }
+    return k.finish({ size: [L, H, W], boxes: [{ min: [-L / 2, 0, -W / 2], max: [L / 2, H, W / 2] }], surface: 'metal' });
+  });
+}
+
+/** 废料斗 1.1 × 0.75 × 0.8：敞口的铁箱子，装着半箱切下来的边角铁块。color 是箱体漆色，参考里用红和蓝。 */
+export function scrapBin(o: EquipOpts & { color?: PaintColor } = {}): PropModel {
+  const seed = o.seed ?? 0;
+  return cached('scrap_bin', [seed, o.color, o.interior], () => {
+    const k = new Kit('scrap_bin', seed, { interior: o.interior });
+    const { mat: body, shade } = paint(o.color, 'red');
+    const L = 1.1, W = 0.8, H = 0.75;
+    for (const s of [-1, 1]) k.box(body, 0.09, 0.1, W, s * 0.36, 0.05, 0, { plain: true, tint: shade(0.8) });
+    k.box(body, L, 0.04, W, 0, 0.12, 0, { plain: true, tint: shade(0.85) });
+    for (const s of [-1, 1]) {
+      k.box(body, L, H - 0.1, 0.03, 0, 0.1 + (H - 0.1) / 2, s * (W / 2 - 0.015), { c: 0.006, tint: shade(k.range(0.88, 1)) });
+      k.box(body, 0.03, H - 0.1, W, s * (L / 2 - 0.015), 0.1 + (H - 0.1) / 2, 0, { c: 0.006, tint: shade(k.range(0.88, 1)) });
+    }
+    // 四根角柱比箱壁高出 4 毫米，免得顶面叠在一起闪
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) k.box(body, 0.06, H + 0.004, 0.06, sx * (L / 2 - 0.02), (H + 0.004) / 2, sz * (W / 2 - 0.02), { c: 0.01, tint: shade(0.9) });
+    // 里面：一层很暗的"料面"封住箱口往下 0.2 米处，上面乱放 12 块铁疙瘩。这样不用真的装满一箱，从上面看也是满的
+    k.box('steel_dark', L - 0.08, 0.04, W - 0.08, 0, H - 0.22, 0, { plain: true, tint: 0.5 });
+    // 铁块的位置：第 i 块取 (i × 0.7549, i × 0.5698) 的小数部分。这两个数是专门挑的（"R2 序列"）——
+    // 这样排出来的点在方形里铺得很匀，既不扎堆也不成行成列，比真随机好看，而且换个 seed 只是整体平移。
+    // （参考用的是 0.618 和 0.37，12 块铁会排成一条斜线，一眼就看出是算出来的。）
+    for (let i = 0; i < 12; i++) {
+      const u = (i * 0.7549 + seed * 0.29) % 1, v = (i * 0.5698 + seed * 0.13) % 1;
+      k.box('steel_worn', 0.16, 0.11, 0.1, (u - 0.5) * (L - 0.3), H - 0.16 + (i % 3) * 0.03, (v - 0.5) * (W - 0.25), { c: 0.012, rot: [v, u * 3, u], tint: k.range(0.6, 1) });
+    }
+    return k.finish({ size: [L, H, W], boxes: [{ min: [-L / 2, 0, -W / 2], max: [L / 2, H, W / 2] }], surface: 'metal' });
+  });
+}
+
+/**
+ * 地上的一捆钢筋：两根枕木上横着 count 根（默认 9 根）3.4 米多长的螺纹钢，码成两层，锈的和磨亮的相间。
+ * 没有碰撞：只有十几厘米高，人直接踩过去。
+ */
+export function rebarBundle(o: EquipOpts & { count?: number } = {}): PropModel {
+  const seed = o.seed ?? 0, count = Math.max(3, Math.min(14, Math.round(o.count ?? 9)));
+  return cached('rebar_bundle', [seed, count, o.interior], () => {
+    const k = new Kit('rebar_bundle', seed, { interior: o.interior });
+    for (const x of [-1.1, 1.1]) k.box('wood_dark', 0.1, 0.08, 0.7, x, 0.04, 0, { c: 0.008, tint: k.range(0.7, 0.95), grain: 'z' });
+    const lower = Math.ceil(count / 2); // 下层的根数；剩下的放上层，落在下层的缝里
+    for (let i = 0; i < count; i++) {
+      const up = i < lower ? 0 : 1, j = up ? i - lower : i, n = up ? count - lower : lower;
+      // 每根长短差一点、头尾错开一点、还带一丝偏角 —— 一捆钢筋从来不是整整齐齐的
+      k.cyl(i % 2 ? 'steel_worn' : 'steel_rust', 0.016, 3.4 + (i % 3) * 0.12, ((i % 3) - 1) * 0.06, 0.1 + up * 0.03, (j - (n - 1) / 2) * 0.045 + up * 0.02, { seg: 5, rot: [0, 0.01 * (i - 4), HALF], tint: k.range(0.75, 1) });
+    }
+    for (let i = 0; i < count; i += 3) k.box('steel_rust', 0.07, 0.05, 0.03, 1.72, 0.11, (i - 4) * 0.02, { plain: true, tint: 0.8 }); // 一端的几个锈疙瘩：扎丝头
+    return k.finish({ size: [3.7, 0.15, 0.7], boxes: [] });
+  });
+}
+
+/**
+ * 码头上的大钢板垛（舱盖板）：每块 10.4 × 0.5 × 4.2 米，layers 层摞在一起（默认 2，最多 6），层与层之间垫着木方。
+ * 长边沿 x。它是全场最大的"道具"，顶面可以站人，整垛一个碰撞盒。
+ */
+export function steelPlateStack(o: EquipOpts & { layers?: number } = {}): PropModel {
+  const seed = o.seed ?? 0, layers = Math.max(1, Math.min(6, Math.round(o.layers ?? 2)));
+  return cached('steel_plate_stack', [seed, layers, o.interior], () => {
+    const k = new Kit('steel_plate_stack', seed, { interior: o.interior });
+    const L = 10.4, W = 4.2, T = 0.5, GAP = 0.1; // 长、宽、每块的厚度、层间垫木的高度
+    const coats: SurfaceName[] = ['paint_grey', 'paint_teal', 'paint_grey', 'steel_rust']; // 一层一个颜色，隔几层有一块没上漆的锈板
+    for (let i = 0; i < layers; i++) {
+      // 上面的每一层都错开一点、歪一点：吊车放下来的东西不可能对得严丝合缝
+      const dx = i ? 0.18 * Math.cos(i * 1.7 + seed) : 0, dz = i ? 0.12 * Math.sin(i * 2.1 + seed) : 0;
+      const yaw = 0.02 * (i % 2 ? -1 : 1.3);
+      const y0 = GAP + i * (T + GAP); // 这一层钢箱体的底面
+      const coat = coats[(i + seed) % coats.length];
+      k.at([dx, 0, dz], [0, yaw, 0], () => {
+        for (const x of [-3.6, 0, 3.6]) k.box('wood_dark', 0.14, GAP, W - 0.2, x, y0 - GAP / 2, 0, { c: 0.01, tint: k.range(0.7, 0.95), grain: 'z' });
+        k.box(coat, L, T - 0.08, W, 0, y0 + (T - 0.08) / 2, 0, { c: 0.03, tint: k.range(0.9, 1) });           // 箱体
+        k.box(coat, L - 0.5, 0.08, W - 0.5, 0, y0 + T - 0.04, 0, { c: 0.02, tint: k.range(0.85, 0.95) });      // 顶上收进去一圈的盖板
+        for (const z of [-1.4, -0.7, 0, 0.7, 1.4]) k.box(coat, L - 0.9, 0.05, 0.09, 0, y0 + T + 0.02, z, { c: 0.01, tint: k.range(0.8, 0.95) }); // 5 道加强筋
+        for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+          k.box('steel_dark', 0.32, 0.12, 0.32, sx * (L / 2 - 0.35), y0 + T - 0.02, sz * (W / 2 - 0.35), { c: 0.02, tint: 0.8 }); // 四个角件（吊点）
+          k.box('paint_yellow', 0.5, T - 0.1, 0.02, sx * (L / 2 - 0.5), y0 + (T - 0.08) / 2, sz * (W / 2 + 0.006), { plain: true }); // 侧面的黄色吊点标记
+        }
+        for (const sx of [-1, 1]) k.box('rubber', 0.04, 0.12, W - 0.4, sx * (L / 2 + 0.01), y0 + 0.1, 0, { plain: true }); // 两端的橡胶密封条
+      });
+    }
+    // 碰撞盒的顶面 = 最上面那块板的板面（加强筋再高出 4.5 厘米，脚会陷进去一点，看不出来）。
+    // 参考把顶面算到了"再往上一层垫木"的高度，人站上去会悬空 10 厘米，这里改掉了。
+    const top = layers * (T + GAP);
+    return k.finish({ size: [L, top + 0.045, W], boxes: [{ min: [-L / 2 - 0.05, 0, -W / 2 - 0.05], max: [L / 2 + 0.05, top, W / 2 + 0.05] }], surface: 'metal' });
+  });
+}
+
+/**
+ * 配电箱 0.7 × 1.05 × 0.5：水泥墩上一只灰铁箱，顶上一片挡雨檐，正面（+z）一条黄黑警示条。
+ * 参考里只有这四个盒子。这里多加了箱门、把手、两个铰链、高压警示贴和一行编号（共约 130 个三角形），
+ * 因为它总是摆在中继旁边，玩家会走到跟前看。
+ */
+export function distributionBox(o: EquipOpts = {}): PropModel {
+  const seed = o.seed ?? 0;
+  return cached('distribution_box', [seed, o.interior], () => {
+    const k = new Kit('distribution_box', seed, { interior: o.interior });
+    k.box('concrete', 0.7, 0.12, 0.5, 0, 0.06, 0, { c: 0.015 });
+    k.box('paint_grey', 0.55, 0.9, 0.3, 0, 0.57, 0, { c: 0.015 });
+    k.box('steel_dark', 0.5, 0.03, 0.34, 0, 1.03, 0, { c: 0.004 });
+    k.box('paint_grey', 0.47, 0.8, 0.006, 0, 0.56, 0.152, { c: 0.003, tint: k.range(0.86, 0.96) });   // 箱门，比箱体凸出 5 毫米
+    k.box('hazard_stripes', 0.3, 0.12, 0.01, 0, 0.8, 0.156, { plain: true });
+    k.box('steel_dark', 0.02, 0.09, 0.016, 0.19, 0.55, 0.163, { plain: true, tint: 0.6 });            // 把手
+    for (const y of [0.3, 0.84]) k.cyl('steel_dark', 0.008, 0.05, -0.243, y, 0.155, { seg: 6, tint: 1.3 }); // 铰链
+    k.decal('hazard_voltage', 0.11, [0, 0.6, 0.1565]);
+    k.label(`配电 P-0${1 + (seed % 4)}`, { color: 'white', font: 'stencil', distress: 0.4 }, 0.26, 0.05, [0, 0.42, 0.1565]);
+    return k.finish({ size: [0.7, 1.05, 0.5], boxes: [{ min: [-0.35, 0, -0.25], max: [0.35, 1.05, 0.25] }], surface: 'metal' });
+  });
+}
+
+/** 电缆路径上的一个点：[x, z] 表示贴在地上；[x, z, y] 表示这一点的高度是 y（比如从桌上垂下来的那一头）。 */
+export type CablePoint = [number, number] | [number, number, number];
+/**
+ * 地上的电缆：沿着给定的点铺一根贴地的圆管。
+ * 直着从 A 拉到 B 的电缆看起来像一根棍子，所以两点之间超过 2.2 米时，每隔 1.6 米左右自动加一个往左或往右摆的点，
+ * 电缆就成了弯弯曲曲躺在地上的样子。摆多少由 sin 算出来：同一条路径每次得到同样的弯。
+ *
+ * 路径点就是模型自己的坐标，不会挪到"占地中心"。所以最省事的用法是把它摆在 (0, 0)、不转，路径点直接写世界坐标。
+ * 没有碰撞，也不投影子。
+ */
+export function groundCable(o: EquipOpts & { points?: CablePoint[]; r?: number; surface?: SurfaceName } = {}): PropModel {
+  const seed = o.seed ?? 0, r = o.r ?? 0.025, mat = o.surface ?? 'rubber';
+  const points = o.points && o.points.length >= 2 ? o.points : ([[-1.6, -0.2], [0, 0.25], [1.6, -0.1]] as CablePoint[]);
+  return cached('ground_cable', [seed, r, mat, points, o.interior], () => {
+    const k = new Kit('ground_cable', seed, { interior: o.interior });
+    const lay = r * 0.9; // 圆管中心离地的高度：比半径小一点，让它往地里陷一丝，不会看着像飘着
+    const path: V3[] = [];
+    for (let i = 0; i < points.length; i++) {
+      const a = points[i];
+      path.push([a[0], a[2] ?? lay, a[1]]);
+      const b = points[i + 1];
+      if (!b || a.length > 2 || b.length > 2) continue; // 指定了高度的那一段不加弯：那是悬空的
+      const dx = b[0] - a[0], dz = b[1] - a[1], dist = Math.hypot(dx, dz);
+      if (dist <= 2.2) continue;
+      const n = Math.floor(dist / 1.6);
+      for (let j = 1; j < n; j++) {
+        const t = j / n, sway = Math.sin((i * 3.1 + j + seed) * 2.3) * Math.min(0.28, dist * 0.04);
+        path.push([a[0] + dx * t - (dz / dist) * sway, lay, a[1] + dz * t + (dx / dist) * sway]); // 沿垂直于走向的方向摆出去
+      }
+    }
+    let total = 0;
+    for (let i = 0; i + 1 < path.length; i++) total += Math.hypot(path[i + 1][0] - path[i][0], path[i + 1][1] - path[i][1], path[i + 1][2] - path[i][2]);
+    // 大约每 18 厘米一段；再长的电缆也不超过 380 段（每段 12 个三角形）
+    k.hose(mat, path, r, { seg: 6, steps: Math.max(8, Math.min(380, Math.ceil(total / 0.18))), cast: false });
+    for (const end of [path[0], path[path.length - 1]]) k.sph(mat, r, end[0], end[1], end[2], { seg: 6, cast: false }); // 两头各堵一个小球，不然能看到管子是空的
+    return k.finish({ boxes: [] });
+  });
+}
+
 // ================================================================ 名字 → 建模函数
 /** 按参考道具表里的名字取建模函数。每个函数都只接受一个参数对象，都可以不给。 */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const EQUIPMENT: Record<string, (o?: any) => PropModel> = {
   generator, floodlight_stand: floodlightStand, dumpster, toolbox_cart: toolboxCart, gas_cylinders: gasCylinders, pipe_stack: pipeStack,
+  wheel_chock: wheelChock, rebar_cage: rebarCage, scrap_bin: scrapBin, rebar_bundle: rebarBundle, steel_plate_stack: steelPlateStack,
+  distribution_box: distributionBox, ground_cable: groundCable,
 };
