@@ -6,7 +6,13 @@ import { KIND_NAME, type Enemies, type Kind } from './enemies';
 import type { Player } from './player';
 import type { Stats, Weapon } from './weapon';
 
-const HOLD = 2.2; // 切断一处中继需要按住 E 的秒数
+// 切断中继的手感（数值照参考）：
+const HOLD = 2.4;        // 要按住交互键多少秒
+const HOLD_DECAY = 1.6;  // 松手以后进度每秒退掉多少（进度是 0~1，所以最多 0.63 秒清零）
+const REACH = 2.2;       // 离柜子多近才够得着（水平距离，米）
+const REACH_UP = 2.5;    // 脚下和柜子脚下的高度差不能超过这么多：站在夹层走道上够不着底下的柜子
+const REACH_FACE = 0.45; // 要大致面朝柜子：视线和"指向柜子的方向"夹角的余弦不小于它（约 63° 以内）
+const REACH_CLOSE = 0.9; // 贴到这么近就不再看朝向
 
 /**
  * 刷怪的全部参数（数量和节奏照参考）。一局的敌人只有这几个来源，没有"按时间自动刷"：
@@ -50,7 +56,8 @@ export class Mission {
   stats: Stats = { shots: 0, hits: 0, kills: 0 };
   won = false;
   prompt: { text: string; progress: number } | null = null;
-  private hold = 0; private holdRelay: Relay | null = null; private lastTick = 0;
+  /** 切断的进度（按住的秒数）、它属于哪只柜子、现在是不是正按着。松手后进度是慢慢退的，所以"属于谁"和"正按着"要分开记。 */
+  private hold = 0; private holdRelay: Relay | null = null; private cutting = false; private lastTick = 0;
   private events: { t: number; fn: () => void }[] = [];
   private lowHpT = 0; private evacHintT = 0;
   /** 排队等着出场的增援：到了时间 t 就刷出来；刷不出来（场上满了、没找到位置）就往后推。 */
@@ -86,7 +93,7 @@ export class Mission {
 
   reset(isRetry: boolean) {
     if (isRetry) this.retries++; else this.retries = 0;
-    this.time = 0; this.cut = 0; this.won = false; this.hold = 0; this.holdRelay = null; this.prompt = null;
+    this.time = 0; this.cut = 0; this.won = false; this.hold = 0; this.holdRelay = null; this.cutting = false; this.prompt = null;
     this.stats = { shots: 0, hits: 0, kills: 0 };
     this.events = []; this.lowHpT = 0; this.evacHintT = 0;
     this.queue = []; this.announce = false; this.pursuitT = 0; this.pursuitLeft = 0; this.spotted = false; this.heardShots = 0; this.noiseT = 0; this.regroupT = 0;
@@ -167,18 +174,20 @@ export class Mission {
     const { player, port } = this;
     for (let i = this.events.length - 1; i >= 0; i--) if (this.events[i].t <= this.time) { const ev = this.events[i]; this.events.splice(i, 1); ev.fn(); }
 
-    // ---- 切断中继：走近、按住 E
-    let near: Relay | null = null;
-    for (const r of port.relays) if (!r.cut && Math.hypot(r.pos.x - player.pos.x, r.pos.z - player.pos.z) < 3) near = r;
-    if (near) {
-      if (input.down('KeyE')) {
-        if (this.holdRelay !== near) { this.holdRelay = near; this.hold = 0; }
-        this.hold += dt;
-        if (this.hold - this.lastTick > 0.22 || this.hold < this.lastTick) { this.lastTick = this.hold; this.audio.relayTick(this.hold / HOLD); }
-        if (this.hold >= HOLD) this.cutRelay(near);
-      } else { this.hold = Math.max(0, this.hold - dt * 2); this.lastTick = 0; }
-      this.prompt = near.cut ? null : { text: `按住 · 切断中继 ${near.short}`, progress: this.hold / HOLD };
-    } else { this.hold = 0; this.holdRelay = null; this.prompt = null; }
+    // ---- 切断中继：走到柜子跟前、面朝它、按住 E。柜子自己会演给玩家看（relay.ts）：按着的时候灯急闪、天线乱转，松手立刻恢复
+    const near = player.alive ? this.relayInReach() : null;
+    if (near && input.down('KeyE')) {
+      if (this.holdRelay !== near) { this.stopCutting(); this.holdRelay = near; this.hold = 0; } // 换了一只柜子：进度从头来
+      if (!this.cutting) { this.cutting = true; near.setCutting(true); }
+      this.hold += dt;
+      if (this.hold - this.lastTick > 0.22 || this.hold < this.lastTick) { this.lastTick = this.hold; this.audio.relayTick(this.hold / HOLD); }
+      if (this.hold >= HOLD) this.cutRelay(near);
+    } else {
+      // 松手或者走开：柜子马上回到正常状态，进度很快退掉（退完之前再按，可以接着刚才的进度）
+      this.stopCutting();
+      this.hold = Math.max(0, this.hold - dt * HOLD_DECAY * HOLD); this.lastTick = 0;
+    }
+    this.prompt = near && !near.cut ? { text: `按住 · 切断中继 ${near.short}`, progress: near === this.holdRelay ? this.hold / HOLD : 0 } : null;
 
     // ---- 撤离
     const de = Math.hypot(port.evacPos.x - player.pos.x, port.evacPos.z - player.pos.z);
@@ -191,9 +200,31 @@ export class Mission {
     if (player.hp < 30 && player.alive && this.time > this.lowHpT) { this.lowHpT = this.time + 25; this.radio('伤势严重！找掩体躲避，稍作恢复。'); }
   }
 
+  /** 玩家现在够得着哪只还没切断的中继柜（够得着几只就取最近的），都够不着返回 null。 */
+  private relayInReach(): Relay | null {
+    const { pos, yaw } = this.player;
+    let best: Relay | null = null, bestDist = REACH;
+    for (const r of this.port.relays) {
+      if (r.cut) continue;
+      const dx = r.pos.x - pos.x, dz = r.pos.z - pos.z, dist = Math.hypot(dx, dz);
+      if (dist > bestDist || Math.abs(r.pos.y - pos.y) > REACH_UP) continue;
+      // 玩家面朝的水平方向是 (−sin yaw, −cos yaw)；和"指向柜子"的单位向量点乘，就是两者夹角的余弦
+      if (dist > REACH_CLOSE && (dx * -Math.sin(yaw) + dz * -Math.cos(yaw)) / dist < REACH_FACE) continue;
+      best = r; bestDist = dist;
+    }
+    return best;
+  }
+
+  /** 不再按着了：让正在被切的那只柜子回到正常状态。 */
+  private stopCutting() {
+    if (!this.cutting) return;
+    this.cutting = false;
+    this.holdRelay?.setCutting(false);
+  }
+
   private cutRelay(r: Relay) {
     r.setCut();
-    this.cut++; this.hold = 0; this.holdRelay = null;
+    this.cut++; this.hold = 0; this.holdRelay = null; this.cutting = false;
     this.audio.relayDone();
     this.ui.feed(`${r.name} 已断开`, true);
     this.weapon.addReserve(90, 180);
