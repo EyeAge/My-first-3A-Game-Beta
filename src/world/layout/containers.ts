@@ -4,7 +4,7 @@ import type { ContainerField, StackItem } from '../containerfield';
 import { reeferUnit } from '../props/site';
 import type { Stage } from './stage';
 
-// 全场的集装箱放在哪：堆场里的四五百只、路上和码头上零散的十几只、货轮甲板上的两三百只。
+// 全场的集装箱放在哪：堆场里的四百多只、路上和码头上零散的二十来只、货轮甲板上的三百多只。
 //
 // 这个文件只管"哪里放什么箱子"。一只箱子长什么样在 container.ts；几百只怎么画得动、碰撞盒怎么登记，在 containerfield.ts。
 //
