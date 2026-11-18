@@ -82,7 +82,7 @@ async function boot() {
   scene.add(enemies.group);
   const ui = new UI(document.getElementById('ui')!, settings, input, auto);
   const mission = new Mission(port, enemies, ui, audio, weapon, player);
-  enemies.onPlayerHit = (dmg, from) => { player.takeDamage(dmg, from, mission.time); audio.hurt(); input.rumble(0.8, 0.5, 160); };
+  enemies.onPlayerHit = (dmg, from) => { if (!player.alive) return; player.takeDamage(dmg, from, mission.time); audio.hurt(); input.rumble(0.8, 0.5, 160); };
 
   // 反射画面里不需要的东西：地面自己、雨（雨丝和地上的小水花都在 rain.group 里）、第一人称枪模、贴花，
   // 车间里面的东西（会反光的湿地面都在屋外，屋里的东西照不进去），
@@ -174,6 +174,9 @@ async function boot() {
   // ------------------------------------------------------------------ 主循环
   const clock = new THREE.Clock();
   let t = 0, hurt = 0;
+  // 阵亡的演出：死后过了多久；画面的饱和度（1 = 正常）和压黑的程度（0 = 正常）。数值照参考：饱和度滑向 0.12，画面压暗到 45%
+  const DEATH_SCREEN_AFTER = 1.5;
+  let deadT = 0, deathSat = 1, deathFade = 0;
   // 闪电：隔半分钟到一分钟，云层里亮一下。它不是一盏灯——只是云自己发亮，再让空气整体亮一瞬
   const bolt = { wait: 22 + Math.random() * 25, t: 9, power: 0, value: 0 };
   const fwd = new THREE.Vector3(), tmp = new THREE.Vector3(), bufSize = new THREE.Vector2();
@@ -202,7 +205,9 @@ async function boot() {
 
     if (state === 'playing') {
       if (input.pressed('Escape') || input.pressed('KeyP')) pause();
+      const hpBefore = player.hp;
       player.update(dt, mission.time, input, settings, port.colliders, weapon.ads);
+      if (player.hp < hpBefore) { audio.hurt(); input.rumble(0.8, 0.5, 160); }   // 移动这一步里掉了血 = 摔伤了（从太高的地方跳下来，见 player.ts）
       // 脚下是不是水洼。积水图只管平面位置，所以要先确认人真的踩在露天的路面上：
       // 站在箱顶、台阶上（脚底高于地面）不算；车间里的地坪和室外一样高，但屋里没有积水，也不算
       const inPuddle = player.onGround && player.pos.y < 0.05 && !indoors && isPuddleAt(player.pos.x, player.pos.z);
@@ -218,7 +223,7 @@ async function boot() {
         // 掉进海里：捞回岸上，扣一点血
         effects.splash(tmp.set(player.pos.x, -1.7, player.pos.z), 2.2);
         player.pos.set(QUAY_X - 4, 0, clamp(player.pos.z, -94, 94)); player.vel.set(0, 0, 0);
-        player.takeDamage(20, null, mission.time); audio.hurt();
+        player.takeDamage(12, null, mission.time); audio.hurt();
         ui.hint('已从水中获救', 3);
       }
       player.applyCamera(camera, t);
@@ -229,7 +234,8 @@ async function boot() {
       const fov = lerp(settings.fov, settings.fov * 0.7, weapon.ads) + (player.sprinting ? 5 : 0);
       if (Math.abs(camera.fov - fov) > 0.01) { camera.fov = damp(camera.fov, fov, 12, dt); camera.updateProjectionMatrix(); }
 
-      if (!player.alive) { setState('dead'); input.releaseLock(); audio.fail(); ui.show('dead', mission.result()); }
+      // 阵亡：先不弹界面 —— 镜头倒地、画面褪色变暗（下面 dead 那一支），1.5 秒后才出"任务失败"
+      if (!player.alive) { setState('dead'); input.releaseLock(); audio.fail(); deadT = 0; }
       else if (mission.won) {
         setState('won'); input.releaseLock(); audio.win();
         ui.radio('激战队员已登船，港区封锁解除。干得漂亮！', 8);
@@ -244,8 +250,19 @@ async function boot() {
     } else if (state === 'paused') {
       if ((input.pressed('Escape') || padA) && !ui.panelOpen) resume();
       else if (input.pressed('Escape') || input.pressed('PadB')) ui.closePanel();
-    } else if (padA && performance.now() - stateAt > 900) { // 留一点间隔，免得阵亡瞬间按着 A 就直接重开
-      startMission(state === 'dead'); // 结算画面按 A 再来一局
+    } else {
+      if (state === 'dead') {
+        // 人倒下了，世界没有停：敌人照常活动（它们会发现目标没了，转去搜索），镜头跟着身体倒在地上
+        const before = deadT;
+        deadT += dt;
+        player.updateDead(dt, port.colliders);
+        player.applyCamera(camera, t);
+        camera.updateMatrixWorld();
+        enemies.update(dt, t, player);
+        if (before <= DEATH_SCREEN_AFTER && deadT > DEATH_SCREEN_AFTER) ui.show('dead', mission.result());
+      }
+      // 结算画面按 A 再来一局。留一点间隔，免得阵亡瞬间按着 A 就直接重开
+      if (padA && performance.now() - stateAt > (state === 'dead' ? DEATH_SCREEN_AFTER * 1000 + 900 : 900)) startMission(state === 'dead');
     }
 
     effects.update(dt, camera.position);
@@ -282,12 +299,14 @@ async function boot() {
       ui.update(dt, frame);
     }
     hurt = damp(hurt, state === 'dead' ? 1 : clamp((40 - player.hp) / 40, 0, 1) * 0.7, 4, dt);
+    deathSat = damp(deathSat, state === 'dead' ? 0.12 : 1, state === 'dead' ? 2.2 : 20, dt);
+    deathFade = damp(deathFade, state === 'dead' ? 0.55 : 0, state === 'dead' ? 1.4 : 20, dt);
     input.endFrame();
   };
   const tick = () => {
     requestAnimationFrame(tick);
     update(Math.min(0.05, clock.getDelta()));
-    renderer.render(hurt, t, { ads: state === 'playing' ? weapon.ads : 0, damage: state === 'playing' ? player.damageFlash * 0.6 : 0, flash: bolt.value });
+    renderer.render(hurt, t, { ads: state === 'playing' ? weapon.ads : 0, damage: state === 'playing' || state === 'dead' ? player.damageFlash * 0.6 : 0, flash: bolt.value, saturation: deathSat, fade: deathFade });
   };
 
   await step('正在准备首帧画面', 0.96);

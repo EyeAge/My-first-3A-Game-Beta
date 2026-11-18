@@ -11,6 +11,11 @@ const GRAVITY = 19, JUMP = 6.3;
 // 脱战回血（数值照参考）：4 秒没挨打就开始回，每秒 25 点 —— 也就是躲进掩体 8 秒能从濒死回到满血。
 // 敌人的火力是按这个节奏设计的：探头打几枪、缩回去等几秒，而不是站在空地上对射。
 const REGEN_DELAY = 4, REGEN_RATE = 25;
+// 摔伤（照参考）：落地速度超过每秒 13 米才受伤，每超出 1 米每秒扣 7 点。
+// 按我们的重力算，从两层箱顶（5.2 米）跳下来刚过线、扣 7 点；三层扣 29 点；四层扣 48 点。一层箱顶随便跳。
+const FALL_SAFE = 13, FALL_DAMAGE = 7;
+// 阵亡时镜头倒地要多久、倒下后眼睛离地多高
+const DEATH_FALL = 0.85, DEATH_EYE = 0.22;
 
 /** 第一人称角色：移动、跳跃、蹲伏、碰撞、受伤与回血。 */
 export class Player {
@@ -31,8 +36,10 @@ export class Player {
   private recoilP = 0; private recoilY = 0;
   private shake = 0;
   private bob = 0;
+  private deadT = 0;           // 阵亡后过了多久（秒）
 
   reset(start: THREE.Vector3) {
+    this.deadT = 0; this.eye = STAND - 0.12;
     this.pos.copy(start); this.vel.set(0, 0, 0);
     this.yaw = 0; this.pitch = 0; this.hp = 100; this.alive = true;
     this.onGround = true; this.inWater = false; this.lastDamageT = -99; this.damageFlash = 0;
@@ -104,28 +111,8 @@ export class Player {
     }
     this.pos.x = Math.max(BOUNDS.minX + HALF, this.pos.x);
     this.pos.z = clamp(this.pos.z, BOUNDS.minZ + HALF, BOUNDS.maxZ - HALF);
-
-    this.vel.y -= GRAVITY * dt;
-    let ny = this.pos.y + this.vel.y * dt;
-    let ground = this.pos.x <= QUAY_X ? 0 : -Infinity; // 码头以东是海，没有地面
-    let under: Box | null = null;                      // 脚下垫着的那个盒子（站在地面上就是 null）
-    const inset = HALF - 0.03;
-    for (let i = 0; i < boxes.length; i++) {
-      const b = boxes[i];
-      if (this.pos.x + inset <= b.minX || this.pos.x - inset >= b.maxX || this.pos.z + inset <= b.minZ || this.pos.z - inset >= b.maxZ) continue;
-      if (b.maxY <= this.pos.y + step + 0.01 && b.maxY > ground) { ground = b.maxY; under = b; }
-      if (this.vel.y > 0 && b.minY >= this.pos.y + h - 0.02 && ny + h > b.minY) { ny = b.minY - h; this.vel.y = 0; }
-    }
-    const wasAir = !this.onGround;
-    if (ny <= ground) {
-      this.landed = wasAir && this.vel.y < -4;
-      // 落地的震动看摔得多重：平地起跳落回来（每秒 6 米多）不震；从一层箱顶跳下来（每秒 10 米）轻轻一震，越高越重
-      if (this.landed && this.vel.y < -7.5) this.addShake(Math.min(0.5, (-this.vel.y - 7.5) * 0.06));
-      ny = ground; this.vel.y = 0; this.onGround = true;
-      this.surface = under ? under.surface ?? 'metal' : 'concrete';
-    } else { this.onGround = false; this.landed = false; }
-    this.pos.y = ny;
-    this.inWater = this.pos.y < -2.4;
+    const impact = this.fall(dt, col);
+    if (impact > FALL_SAFE) this.takeDamage((impact - FALL_SAFE) * FALL_DAMAGE, null, t);
 
     // ---- 镜头细节：蹲起的过渡、脚步晃动
     this.eye = damp(this.eye, this.height - 0.12, 12, dt);
@@ -142,6 +129,57 @@ export class Player {
     if (this.alive && t - this.lastDamageT > REGEN_DELAY && this.hp < 100) this.hp = Math.min(100, this.hp + REGEN_RATE * dt);
   }
 
+  /**
+   * 竖直方向的移动：受重力下落，落到脚下最高的那个表面上；往上跳时头顶有东西就顶住。
+   * 返回这一帧落地时的速度（米每秒，没落地就是 0），调用的人拿它算摔伤。
+   */
+  private fall(dt: number, col: Colliders) {
+    const step = this.onGround ? 0.5 : 0.12, h = this.height, boxes = col.boxes;
+    let impact = 0;
+    this.vel.y -= GRAVITY * dt;
+    let ny = this.pos.y + this.vel.y * dt;
+    let ground = this.pos.x <= QUAY_X ? 0 : -Infinity; // 码头以东是海，没有地面
+    let under: Box | null = null;                      // 脚下垫着的那个盒子（站在地面上就是 null）
+    const inset = HALF - 0.03;
+    for (let i = 0; i < boxes.length; i++) {
+      const b = boxes[i];
+      if (this.pos.x + inset <= b.minX || this.pos.x - inset >= b.maxX || this.pos.z + inset <= b.minZ || this.pos.z - inset >= b.maxZ) continue;
+      if (b.maxY <= this.pos.y + step + 0.01 && b.maxY > ground) { ground = b.maxY; under = b; }
+      if (this.vel.y > 0 && b.minY >= this.pos.y + h - 0.02 && ny + h > b.minY) { ny = b.minY - h; this.vel.y = 0; }
+    }
+    const wasAir = !this.onGround;
+    if (ny <= ground) {
+      if (wasAir) impact = -this.vel.y;
+      this.landed = wasAir && this.vel.y < -4;
+      // 落地的震动看摔得多重：平地起跳落回来（每秒 6 米多）不震；从一层箱顶跳下来（每秒 10 米）轻轻一震，越高越重
+      if (this.landed && this.vel.y < -7.5) this.addShake(Math.min(0.5, (-this.vel.y - 7.5) * 0.06));
+      ny = ground; this.vel.y = 0; this.onGround = true;
+      this.surface = under ? under.surface ?? 'metal' : 'concrete';
+    } else { this.onGround = false; this.landed = false; }
+    this.pos.y = ny;
+    this.inWater = this.pos.y < -2.4;
+    return impact;
+  }
+
+  /**
+   * 阵亡之后每帧调用（代替 update）：人已经不受控制了，身体原地瘫下去 —— 水平方向停住，竖直方向照常下落（死在半空就摔到地上）。
+   * 眼睛的高度跟着"倒地进度"从站立落到贴地；镜头怎么歪在 applyCamera 里。
+   */
+  updateDead(dt: number, col: Colliders) {
+    this.deadT += dt;
+    this.vel.x = this.vel.z = 0; this.horizSpeed = 0; this.stepped = false; this.sprinting = false;
+    this.fall(dt, col);
+    this.landed = false;                                   // 尸体落地不用再放落地的声音和尘土
+    this.recoilP = damp(this.recoilP, 0, 9, dt); this.recoilY = damp(this.recoilY, 0, 9, dt);
+    this.shake = Math.max(0, this.shake - dt * 1.7);
+    this.damageFlash = Math.max(0, this.damageFlash - dt * 1.4);
+    this.bob = damp(this.bob, 0, 8, dt);
+    const k = this.deathFall();
+    this.eye = damp(this.eye, STAND - 0.12 + (DEATH_EYE - (STAND - 0.12)) * k * k, 18, dt);
+  }
+  /** 倒地的进度 0…1：阵亡后 0.85 秒内走完，两头缓、中间快。 */
+  private deathFall() { const x = clamp(this.deadT / DEATH_FALL, 0, 1); return x * x * (3 - 2 * x); }
+
   applyCamera(cam: THREE.PerspectiveCamera, t: number) {
     const bobY = Math.sin(this.stepPhase * Math.PI * 2) * 0.035 * this.bob;
     const bobX = Math.cos(this.stepPhase * Math.PI) * 0.02 * this.bob;
@@ -149,10 +187,12 @@ export class Player {
     // 镜头震动。shake 是"受了多大的惊"（0..1），实际晃多少用它的平方：小震几乎不动，大震才明显。
     // 三个方向各用两个不成倍数的频率叠在一起，晃起来就不是规则的来回摆；歪头（绕前后轴）的幅度最大，最有"被震到"的感觉
     const k = this.shake * this.shake;
+    // 阵亡：镜头往一侧歪倒（最后侧倾 66° 左右，像人侧躺在地上），同时先往上仰一下、再垂下去
+    const d = this.alive ? 0 : this.deathFall();
     cam.rotation.set(
-      this.pitch + this.recoilP + k * 0.03 * (Math.sin(t * 43.1) + 0.6 * Math.sin(t * 71.7 + 1.3)),
+      this.pitch + this.recoilP + k * 0.03 * (Math.sin(t * 43.1) + 0.6 * Math.sin(t * 71.7 + 1.3)) - 0.25 * d + 0.12 * Math.sin(d * Math.PI),
       this.yaw + this.recoilY + k * 0.03 * (Math.sin(t * 37.3 + 2.1) + 0.6 * Math.sin(t * 83.9)),
-      bobX * 0.4 + k * 0.045 * (Math.sin(t * 29.7 + 0.7) + 0.5 * Math.sin(t * 61.3 + 4)), 'YXZ');
+      bobX * 0.4 + k * 0.045 * (Math.sin(t * 29.7 + 0.7) + 0.5 * Math.sin(t * 61.3 + 4)) + 1.15 * d * d, 'YXZ');
   }
 }
 const _eye = new THREE.Vector3();
