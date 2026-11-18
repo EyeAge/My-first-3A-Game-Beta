@@ -15,7 +15,7 @@ import { Stage } from './layout/stage';
 import { layWest, MAST } from './layout/west';
 import { placeOnce, PropField } from './propfield';
 import { CARGO } from './props/cargo';
-import { EQUIPMENT } from './props/equipment';
+import { EQUIPMENT, wheelChock } from './props/equipment';
 import type { RainShelter } from './rain';
 import { buildRelay, type Relay, type RelaySpec } from './relay';
 import { buildWorkshop, placeWorkshop, WORKSHOP } from './workshop';
@@ -396,8 +396,13 @@ export function buildPort(progress: (msg: string) => void): Port {
   const INDOOR_MODELS = { ...CARGO, ...EQUIPMENT };
   for (const p of WORKSHOP_PROPS) {
     const x = p.x + SHOP_DX, z = p.z + SHOP_DZ, y = p.y ?? WORKSHOP.floor, args = { ...p.args, interior: true }; // 不写高度的都站在地坪面上
-    if (p.name === 'forklift') indoor.add(placeOnce(buildForklift(args), x, z, p.yaw, colliders, y));
-    else indoorProps.place(INDOOR_MODELS[p.name](args), x, z, p.yaw, y);
+    if (p.name === 'forklift') {
+      indoor.add(placeOnce(buildForklift(args), x, z, p.yaw, colliders, y));
+      // 停着的叉车，两只后轮后面各塞一只轮挡。后轮在车身后方 1.1 米、左右各 0.46 米（forklift.ts）；
+      // 轮挡的斜面朝它自己的 +x，所以和车同向摆、再往后退 0.36 米，斜面正好顶住轮胎
+      const c = Math.cos(p.yaw), sn = Math.sin(p.yaw);
+      for (const side of [-1, 1]) indoorProps.place(wheelChock({ interior: true, seed: side + 1 }), x - 1.46 * c + side * 0.46 * sn, z + 1.46 * sn + side * 0.46 * c, p.yaw, y);
+    } else indoorProps.place(INDOOR_MODELS[p.name](args), x, z, p.yaw, y);
   }
   indoor.add(indoorProps.buildMerged(colliders));
   // 贴纸和喷字全场共用一个材质（render/labels.ts）。它不分屋里屋外，映出来的永远是天空 —— 屋里地上那两摊发亮的油渍于是泛着一层天蓝色。
