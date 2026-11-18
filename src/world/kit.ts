@@ -3,7 +3,7 @@ import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeom
 import { mergeGeometries, mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { mulberry32, type Rng } from '../core/math';
 import { decal, label, labelMaterial, type LabelOpts, type Patch } from '../render/labels';
-import { surface, type SurfaceName } from '../render/surfaces';
+import { surface, SURFACES, type SurfaceName } from '../render/surfaces';
 import type { Surface } from './colliders';
 
 // 静态模型的"零件箱"。
@@ -42,6 +42,8 @@ interface PartOpt {
   cast?: boolean;
   /** 贴图的纹理顺着哪个轴走（木纹、拉丝）。 */
   grain?: Axis;
+  /** false 表示这个零件的贴图不要随机挪位（需要和相邻零件的花纹对齐时用）。 */
+  shift?: boolean;
 }
 interface XfOpt extends PartOpt { rot?: V3 }
 interface BoxOpt extends XfOpt {
@@ -130,12 +132,18 @@ export function chamferBox(w: number, h: number, d: number, c = 0.008) {
 }
 
 interface Bucket { mat: Mat; cast: boolean; raw: boolean; geos: THREE.BufferGeometry[] }
+
+// 贴图是"没有规律的斑驳"的那些质感（漆、钢、塑料、水泥……）。它们的零件可以随便挪贴图的位置；
+// 波纹板、警示斜纹、花纹钢板这类有固定花纹的不行，一挪相邻两块就对不上了。
+const SHIFTABLE = new Set(['paint', 'galv', 'metal', 'brushed', 'rust', 'polymer', 'plastic', 'concrete', 'armor', 'gunmetal', 'anodized', 'hull', 'tarp', 'cardboard']);
 let matIds = 0;
 const matId = new WeakMap<THREE.Material, number>();
 
 export class Kit {
   private buckets = new Map<string, Bucket>();
   private stack: THREE.Matrix4[] = [new THREE.Matrix4()];
+  /** 已经放进来多少个零件。给每个零件挪贴图位置时当随机数的种子用（不动 rng，免得改变模型的随机序列）。 */
+  private parts = 0;
   /** 这件东西自己的随机数：同一个名字、同一个种子，每次搭出来都一样。 */
   readonly rng: Rng;
 
@@ -174,8 +182,15 @@ export class Kit {
     for (const k of Object.keys(g.attributes)) if (k !== 'position' && k !== 'normal' && !(raw && k === 'uv')) g.deleteAttribute(k);
     g.clearGroups();
     const pos = g.getAttribute('position'), nor = g.getAttribute('normal'), n = pos.count;
+    const part = this.parts++;
     if (!raw || !g.getAttribute('uv')) {
       const uv = new Float32Array(n * 2), grain = o.grain;
+      // 每个零件的贴图坐标都是从零件自己的中心量起的，所以两块一样大的板会采到贴图上的同一块 ——
+      // 同一簇掉漆出现在每块板的同一个位置，一眼就看出是复制的。给每个零件把贴图挪开几米就不会了。
+      let du = 0, dv = 0;
+      if (o.shift !== false && typeof mat === 'string' && SHIFTABLE.has(SURFACES[mat].set)) {
+        du = h3(part, 17, this.seed | 0) * 7.3; dv = h3(part, 53, this.seed | 0) * 7.3;
+      }
       for (let i = 0; i < n; i += 3) {
         // 一个三角形的三个顶点用同一个投影方向（取三个法线的平均），不然三角形会被撕开
         _n.set(nor.getX(i) + nor.getX(i + 1) + nor.getX(i + 2), nor.getY(i) + nor.getY(i + 1) + nor.getY(i + 2), nor.getZ(i) + nor.getZ(i + 1) + nor.getZ(i + 2));
@@ -187,7 +202,7 @@ export class Kit {
           if (face === 'x') { u = z; v = y; } else if (face === 'y') { u = x; v = z; } else { u = x; v = y; }
           // 纹理要顺着 grain 轴走：如果现在是 v 方向顺着它，就把 u、v 对调
           if (grain && grain !== face && ((face === 'x' && grain === 'y') || (face === 'y' && grain === 'z') || (face === 'z' && grain === 'y'))) { const t = u; u = v; v = t; }
-          uv[j * 2] = u; uv[j * 2 + 1] = v;
+          uv[j * 2] = u + du; uv[j * 2 + 1] = v + dv;
         }
       }
       g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
@@ -401,9 +416,10 @@ export class Kit {
     const p = label(text, opts);
     this.patch(p, Math.min(maxW, h * p.aspect), h, pos, rot);
   }
-  /** 一张具名贴纸（危险品标之类），宽 w，高默认等于宽。 */
-  decal(name: string, w: number, pos: V3, rot?: V3, h = w) {
-    this.patch(decal(name), w, h, pos, rot);
+  /** 一张具名贴纸（危险品标之类），宽 w；高不给就按贴纸本身的长宽比算，不会被压扁。 */
+  decal(name: string, w: number, pos: V3, rot?: V3, h?: number) {
+    const p = decal(name);
+    this.patch(p, w, h ?? w / p.aspect, pos, rot);
   }
 
   // ------------------------------------------------------------------ 收尾
