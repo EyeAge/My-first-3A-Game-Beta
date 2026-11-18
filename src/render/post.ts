@@ -46,8 +46,19 @@ export interface PostFrame {
 }
 
 const VERT = /* glsl */ `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
+/**
+ * 保险丝：任何一个着色器算出"非数"（0 除以 0、负数开方……）、负数或无穷大，后面的泛光都会把这一个坏像素扩散成一大片黑块。
+ * 写进 HDR 画面之前先过它：坏的分量变成 0，大得离谱的封顶在 400。
+ *
+ * 为什么不用 max(c, 0.0) 或 mix(c, 0.0, 是不是坏的)：非数和任何数比较都得"假"，max / min 遇到它返回哪一个各家显卡不一样；
+ * 用乘法做的 mix 更不行（非数 × 0 还是非数）。这里只用"比较 + 二选一"：非数两次比较都不成立，一定落到最后的 0。
+ */
+export const SAFE_GLSL = /* glsl */ `
+float slSafe(float x){ return (x > 0.0 && x < 400.0) ? x : (x >= 400.0 ? 400.0 : 0.0); }
+vec3 slSafe(vec3 c){ return vec3(slSafe(c.r), slSafe(c.g), slSafe(c.b)); }`;
 const COMMON = /* glsl */ `
 varying vec2 vUv;
+${SAFE_GLSL}
 // 每个像素一个固定的"随机数"，相邻像素差别很大：用来把采样的条带瑕疵打散成细噪点
 float ign(vec2 p){ return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
 float hash12(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
@@ -184,10 +195,7 @@ uniform sampler2D tColor, tDepth, tDepthHalf, tAO, tVol;
 uniform vec2 uHalfRes; uniform float uNear, uFar, uAoOn, uVolOn, uAoStrength;
 ${EXPOSURE}
 void main(){
-  vec3 col = texture2D(tColor, vUv).rgb;
-  // 保险丝：任何一个着色器算出"非数"或负数，后面的泛光都会把它扩散成一大片黑块。在这里掐掉
-  bvec3 bad = bvec3(!(col.r >= 0.0), !(col.g >= 0.0), !(col.b >= 0.0));
-  col = min(mix(col, vec3(0.0), vec3(bad)), vec3(400.0));
+  vec3 col = slSafe(texture2D(tColor, vUv).rgb);     // 场景里随便哪个材质算坏了一个像素，在这里掐掉
   float d = texture2D(tDepth, vUv).r;
   float z = (uNear * uFar) / (uFar - d * (uFar - uNear));
   // 遮蔽和体积光是半分辨率算的。放大回来时，四个邻居里只相信"深度和我差不多"的，物体边缘才不会糊出一圈
@@ -216,7 +224,7 @@ void main(){
 
 const DOWN = /* glsl */ `${COMMON}
 uniform sampler2D tSrc; uniform vec2 uTexel; uniform float uFirst;
-vec3 s(vec2 o){ return min(max(texture2D(tSrc, vUv + o * uTexel).rgb, vec3(0.0)), vec3(400.0)); }
+vec3 s(vec2 o){ return slSafe(texture2D(tSrc, vUv + o * uTexel).rgb); }
 float kw(vec3 c){ return 1.0 / (1.0 + luma(c) * 0.08); }
 void main(){
   vec3 a = s(vec2(-2.0, 2.0)), b = s(vec2(0.0, 2.0)), c = s(vec2(2.0, 2.0));
