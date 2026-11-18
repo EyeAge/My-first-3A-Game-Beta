@@ -3,17 +3,18 @@ import { mulberry32 } from '../core/math';
 import { decalMaterial } from '../render/decals';
 import type { Colliders } from './colliders';
 
-// 场景贴花：铭牌、喷码、警示贴、锈迹、油渍、裂缝……
+// 场景贴花：围墙上的水渍，地上的油渍、裂缝、井盖、轮胎印。
 // 这些小东西单个都不起眼，但没有它们，场景就只是"一堆干净的方块"。
-// 做法和弹孔一样：一张图集 + 一个实例化网格，上千个贴花只要一次绘制调用。
+// 做法和弹孔一样：一张图集 + 一个实例化网格，几百个贴花只要一次绘制调用。
+// （集装箱身上的喷字和锈水条不在这里，它们是每只箱子模型的一部分，见 container.ts。）
 
 const FONT = '"PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif';
-const COLS = 4, ROWS = 3, S = 256;
-type Cell = 'plate' | 'data' | 'code' | 'tall' | 'rust' | 'grime' | 'check' | 'hazard' | 'oil' | 'crack' | 'manhole' | 'tire';
+// 图集分成 3 × 2 格，每格 256 像素见方。一共五种贴花，右下角那一格空着
+const COLS = 3, ROWS = 2, S = 256;
+type Cell = 'grime' | 'oil' | 'crack' | 'manhole' | 'tire';
 const CELL: Record<Cell, [number, number]> = {
-  plate: [0, 0], data: [1, 0], code: [2, 0], tall: [3, 0],
-  rust: [0, 1], grime: [1, 1], check: [2, 1], hazard: [3, 1],
-  oil: [0, 2], crack: [1, 2], manhole: [2, 2], tire: [3, 2],
+  grime: [0, 0], oil: [1, 0], crack: [2, 0],
+  manhole: [0, 1], tire: [1, 1],
 };
 
 function atlas() {
@@ -23,66 +24,19 @@ function atlas() {
   const cell = (k: Cell, draw: () => void) => { g.save(); g.translate(CELL[k][0] * S, CELL[k][1] * S); g.beginPath(); g.rect(0, 0, S, S); g.clip(); draw(); g.restore(); };
   const text = (s: string, x: number, y: number, size: number, weight = 700, align: CanvasTextAlign = 'left') => { g.font = `${weight} ${size}px ${FONT}`; g.textAlign = align; g.textBaseline = 'middle'; g.fillText(s, x, y); };
 
-  // 安全检验铭牌：一块铆在门上的金属牌
-  cell('plate', () => {
-    g.fillStyle = '#b9bcbb'; g.fillRect(14, 30, 228, 196);
-    g.strokeStyle = '#5c6062'; g.lineWidth = 3; g.strokeRect(20, 36, 216, 184);
-    g.fillStyle = '#4a4d4f'; for (const [x, y] of [[28, 44], [228, 44], [28, 212], [228, 212]]) { g.beginPath(); g.arc(x, y, 4, 0, 6.3); g.fill(); }
-    g.fillStyle = '#1d1f20';
-    text('集装箱安全合格牌照', 128, 62, 19, 800, 'center');
-    g.fillRect(30, 78, 196, 2);
-    const rows = [['批准编号', 'CN/BL-3172/21'], ['制造日期', '2021年06月'], ['箱体编号', 'JZNU 317204 5'], ['最大总重', '30 480 千克'], ['堆码载荷', '192 000 千克'], ['横向试验', '150 千牛'], ['下次检验', '2028年03月']];
-    rows.forEach(([a, b], i) => { text(a, 34, 96 + i * 17.5, 12, 600); text(b, 222, 96 + i * 17.5, 12, 700, 'right'); });
-  });
-  // 箱门上的重量数据：白色喷字
-  cell('data', () => {
-    g.fillStyle = 'rgba(236,234,226,0.9)';
-    const rows = [['最大总重', '30 480 千克'], ['', '67 200 磅'], ['自重', '3 750 千克'], ['', '8 270 磅'], ['净重', '26 730 千克'], ['', '58 930 磅'], ['容积', '67.7 立方米']];
-    rows.forEach(([a, b], i) => { text(a, 16, 34 + i * 31, 22, 700); text(b, 244, 34 + i * 31, 22, 700, 'right'); });
-  });
-  // 箱号
-  cell('code', () => {
-    g.fillStyle = 'rgba(236,234,226,0.92)';
-    text('JZNU', 10, 92, 62, 900); text('317204', 10, 158, 62, 900);
-    g.strokeStyle = 'rgba(236,234,226,0.92)'; g.lineWidth = 5; g.strokeRect(206, 128, 42, 60); text('5', 227, 160, 44, 900, 'center');
-    text('45G1', 246, 92, 34, 800, 'right');
-  });
-  // 超高箱警示贴：黄底黑斜纹
-  cell('tall', () => {
-    g.fillStyle = '#e2b21c'; g.fillRect(8, 70, 240, 116);
-    g.fillStyle = '#161616';
-    for (let x = -40; x < 280; x += 36) { g.beginPath(); g.moveTo(x, 186); g.lineTo(x + 18, 186); g.lineTo(x + 46, 158); g.lineTo(x + 28, 158); g.fill(); g.beginPath(); g.moveTo(x, 98); g.lineTo(x + 18, 98); g.lineTo(x + 46, 70); g.lineTo(x + 28, 70); g.fill(); }
-    text('超高箱 2.9米', 128, 129, 34, 900, 'center');
-  });
-  // 锈迹：从顶上一条锈线往下淌
-  const streaks = (k: Cell, color: string, n: number, alpha: number) => cell(k, () => {
-    for (let i = 0; i < n; i++) {
+  // 水渍：墙顶一条积灰的横线，往下淌出一道道深色的水痕
+  cell('grime', () => {
+    const color = '14,13,12', alpha = 0.6;
+    for (let i = 0; i < 20; i++) {
       const x = 14 + rnd() * 228, len = 60 + rnd() * 190, w = 3 + rnd() * 14;
       const grad = g.createLinearGradient(0, 0, 0, len);
       grad.addColorStop(0, `rgba(${color},${alpha})`); grad.addColorStop(0.4, `rgba(${color},${alpha * 0.5})`); grad.addColorStop(1, `rgba(${color},0)`);
       g.fillStyle = grad;
       g.beginPath(); g.moveTo(x - w / 2, 0); g.lineTo(x + w / 2, 0); g.lineTo(x + w * 0.2 + (rnd() - 0.5) * 6, len); g.lineTo(x - w * 0.2, len); g.fill();
     }
-    // 顶上一条积锈的横线，两端淡出，免得贴花露出方形的边
+    // 顶上那条横线两端淡出，免得贴花露出方形的边
     for (let x = 0; x < S; x += 4) { const e = Math.min(1, x / 40, (S - x) / 40), top = g.createLinearGradient(0, 0, 0, 20);
       top.addColorStop(0, `rgba(${color},${alpha * e})`); top.addColorStop(1, `rgba(${color},0)`); g.fillStyle = top; g.fillRect(x, 0, 4, 20); }
-  });
-  streaks('rust', '122,58,22', 16, 0.8);
-  streaks('grime', '14,13,12', 20, 0.6);
-  // 检验合格贴
-  cell('check', () => {
-    g.fillStyle = '#e9e6dc'; g.fillRect(24, 56, 208, 144);
-    g.fillStyle = '#2c6b3f'; g.fillRect(24, 56, 208, 34);
-    g.fillStyle = '#e9e6dc'; text('港务安全检验', 128, 74, 20, 800, 'center');
-    g.fillStyle = '#1b1b1b'; text('已检验 · 准予作业', 128, 116, 20, 700, 'center'); text('四号泊位 2026年09月', 128, 146, 16, 500, 'center'); text('NO. 0042719', 128, 176, 18, 700, 'center');
-  });
-  // 危险品菱形标
-  cell('hazard', () => {
-    g.translate(128, 128); g.rotate(Math.PI / 4);
-    g.fillStyle = '#c8371f'; g.fillRect(-78, -78, 156, 156);
-    g.strokeStyle = '#f2ece0'; g.lineWidth = 5; g.strokeRect(-68, -68, 136, 136);
-    g.rotate(-Math.PI / 4);
-    g.fillStyle = '#f2ece0'; text('易燃', 0, -8, 40, 900, 'center'); text('3', 0, 62, 30, 900, 'center');
   });
   const blob = (cx: number, cy: number, r: number, jag: number) => { g.beginPath(); for (let i = 0; i <= 20; i++) { const a = (i / 20) * 6.283, k = r * (1 + (rnd() - 0.5) * jag); g.lineTo(cx + Math.cos(a) * k, cy + Math.sin(a) * k); } g.closePath(); g.fill(); };
   // 油渍
