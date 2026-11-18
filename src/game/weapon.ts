@@ -9,7 +9,10 @@ import type { Enemies, World } from './enemies';
 import { buildGun, DEPTH, SIGHT_Y } from './gunmodel';
 import type { Player } from './player';
 
-const MAG = 30, RPM = 660, RELOAD = 2.0;
+// 数值照参考：每分钟 720 发、身体 26 点、弱点 57 点（2.2 倍）、开局备弹 150 发。
+// 换弹全程 2.1 秒，但新弹匣在 64% 处"咔"地插进去的那一刻子弹就算到账了 —— 后面那一小段只是拉枪机的动作，这时被打断也不亏
+const MAG = 30, RPM = 720, RELOAD = 2.1, RELOAD_LOADED = 0.64, RESERVE = 150;
+const DAMAGE = 26, DAMAGE_WEAK = 57;
 // 枪模原点（机匣中段、枪管轴线上）相对相机的位置。开镜时眼睛在机匣尾端后面 6 厘米、正对瞄具光轴
 const HIP = new THREE.Vector3(0.14, -0.13, -0.36), ADS = new THREE.Vector3(0, -SIGHT_Y, -0.16 * DEPTH);
 
@@ -19,7 +22,7 @@ export interface Stats { shots: number; hits: number; kills: number }
 /** M4A1 卡宾枪：第一人称枪模、开火、换弹、近战。 */
 export class Weapon {
   readonly view = new THREE.Group();   // 挂在相机上
-  ammo = MAG; reserve = 120;
+  ammo = MAG; reserve = RESERVE;
   reloading = 0;                        // 剩余换弹时间
   ads = 0;                              // 0 腰射 .. 1 开镜
   spread = 0;
@@ -58,7 +61,7 @@ export class Weapon {
     this.view.add(g);
   }
 
-  reset() { this.lightOn = false; this.torch.intensity = 0; this.ammo = MAG; this.reserve = 120; this.reloading = 0; this.cooldown = 0; this.ads = 0; this.bloom = 0; this.hitMarker = 0; this.heat = 0; this.smokeLeft = 0; }
+  reset() { this.lightOn = false; this.torch.intensity = 0; this.ammo = MAG; this.reserve = RESERVE; this.reloading = 0; this.cooldown = 0; this.ads = 0; this.bloom = 0; this.hitMarker = 0; this.heat = 0; this.smokeLeft = 0; }
   addReserve(n: number, cap = 180) { this.reserve = Math.min(cap, this.reserve + n); }
   get reloadProgress() { return this.reloading > 0 ? 1 - this.reloading / RELOAD : 0; }
 
@@ -76,8 +79,11 @@ export class Weapon {
 
     // ---- 换弹
     if (this.reloading > 0) {
+      const before = this.reloading;
       this.reloading -= dt;
-      if (this.reloading <= 0) { const n = Math.min(MAG - this.ammo, this.reserve); this.ammo += n; this.reserve -= n; }
+      // 弹匣插到位的那一帧（剩余时间刚好越过 36% 那条线）把子弹算进来；这一帧只会发生一次，所以不会重复装填
+      const loadedAt = RELOAD * (1 - RELOAD_LOADED);
+      if (before > loadedAt && this.reloading <= loadedAt) { const n = Math.min(MAG - this.ammo, this.reserve); this.ammo += n; this.reserve -= n; }
     } else if ((input.pressed('KeyR') || (this.ammo === 0 && input.fire)) && this.ammo < MAG && this.reserve > 0) {
       this.reloading = RELOAD; audio.reload();
     }
@@ -121,7 +127,7 @@ export class Weapon {
           this.hitMarker = 1; this.hitWeak = eh.weak;
           if (eh.weak) audio.weak(); else audio.hit();
           effects.impact(_p, -d.x, -d.y, -d.z, 'enemy', d);     // 敌人身上没有现成的法线，就当被打的那一面正对着子弹
-          enemies.damage(eh.enemy, eh.weak ? 58 : 24, eh.weak);
+          enemies.damage(eh.enemy, eh.weak ? DAMAGE_WEAK : DAMAGE, eh.weak);
         } else if (water) {
           effects.impact(_p, 0, 1, 0, 'water');
           const [vol, pan] = enemies.spatial(_p);
