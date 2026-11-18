@@ -139,7 +139,12 @@ export class Weapon {
         }
         audio.shot();
         input.rumble(0.12, 0.45, 45);
-        effects.flash(_m, 45, 0.05, 0xffb060, 9);              // 枪口的闪光照亮周围：亮度 45，照 9 米，0.05 秒熄灭
+        // 枪口的闪光照亮周围：亮度 45，照 9 米，0.05 秒熄灭。
+        // 灯不放在枪口上，而是沿弹道往前挪一点（最多 0.9 米；前面有墙就停在墙前 0.3 米）：
+        // 点光照到的亮度和距离的平方成反比，放在枪口上离枪身只有十几厘米，枪身上每一颗水珠都会被照成一个刺眼的亮点。
+        // 往前挪了，离前面的墙也近了，墙会比"灯在枪口"时亮；所以亮度按（灯到落点 ÷ 枪口到落点）的平方调低，落点处受到的光不变
+        const reach = Math.max(endT - 0.6, 0.35), ahead = clamp(reach - 0.3, 0.05, 0.9), near = (reach - ahead) / reach;
+        effects.flash(_f.copy(_m).addScaledVector(d, ahead), 45 * near * near, 0.05, 0xffb060, 9);
         this.flash.fire(this.ads);
         this.heat = Math.min(1.3, this.heat + 0.05); this.sinceShot = 0;
         const k = 1 - this.ads * 0.45;
@@ -196,6 +201,6 @@ export class Weapon {
     g.quaternion.slerp(_q.setFromEuler(_e), Math.min(1, dt * 18));
   }
 }
-const _sh = new THREE.Vector3();
+const _sh = new THREE.Vector3(), _f = new THREE.Vector3();
 const _d = new THREE.Vector3(), _p = new THREE.Vector3(), _m = new THREE.Vector3(), _r = new THREE.Vector3(), _u = new THREE.Vector3();
 const _e = new THREE.Euler(), _q = new THREE.Quaternion();
