@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { clamp, vnoise } from '../../core/math';
 import { decal as decalPatch, label as labelPatch, type LabelOpts } from '../../render/labels';
 import { emissive, SURFACES, type SurfaceName } from '../../render/surfaces';
-import { chamferBox, hex, Kit, type Mat, type PropModel, type Rgb, type Tint, type V3 } from '../kit';
+import { chamferBox, hex, Kit, type LocalBox, type Mat, type PropModel, type Rgb, type Tint, type V3 } from '../kit';
 
 // 场地设施类道具：隔离墩、防撞柱、系缆桩、标志牌、通道牌、高杆灯、铁丝网围栏、大门、岗亭、道闸、冷藏机组、中继柜。
 //
@@ -76,6 +76,12 @@ function prism(k: Kit, mat: Mat, rBottom: number, rTop: number, len: number, x: 
   g.deleteAttribute('normal');
   k.add(mat, g, { tint: o.tint, cast: o.cast }, matrixOf([x, y, z], [0, o.turn ?? 0, 0]));
 }
+
+/**
+ * "黑洞"：一种不受光照的近黑色。贴在凹进去的地方（风扇筒里面、百叶后面），假装那里深不见底。
+ * 为什么不直接把漆染黑：漆面、塑料这些贴图里的锈迹和灰尘是不跟着染色的，染到最黑也还是一片灰褐色的花纹，不像洞。
+ */
+const voidBlack = () => emissive(0x0a0b0c, 1);
 
 /** 螺栓朝哪边伸出来 → 把"立着的圆柱"转到那个方向要用的旋转。 */
 const STUD_ROT: Record<string, V3> = { y: [0, 0, 0], x: [0, 0, -HALF_PI], '-x': [0, 0, HALF_PI], z: [HALF_PI, 0, 0], '-z': [-HALF_PI, 0, 0] };
@@ -634,6 +640,195 @@ export function slidingGate(o: SlidingGateOpts = {}): PropModel {
   });
 }
 
+// ====================================================================== 岗亭
+
+/** 岗亭门头灯的颜色。 */
+export const GUARD_BOOTH_LAMP_COLOR = 0xffd9a6;
+
+export interface GuardBoothOpts extends SiteOpts {
+  color?: 'white' | 'grey' | 'teal';
+  /** false = 门头灯灭着。默认亮。 */
+  on?: boolean;
+}
+
+/**
+ * 岗亭，2.6 × 2.7 × 2.2 米，门开在 +z 面（偏 +x 一侧）。
+ * 人进不去（碰撞是一整块），但四面都是玻璃，所以里面的桌子、亮着的显示器、键盘、转椅都搭出来了 ——
+ * 从窗外看进去有东西，比一个空壳可信得多。-x 墙外挂着一台空调外机。
+ */
+export function guardBooth(o: GuardBoothOpts = {}): PropModel {
+  const color = o.color === 'grey' || o.color === 'teal' ? o.color : 'white', on = o.on !== false, v = variantOf(o.seed, 2);
+  return cached(`guard_booth|${color}|${on}|${v}${tag(o)}`, () => {
+    const k = new Kit('guard_booth', v, { interior: o.interior });
+    // 屋里的东西另开一只零件箱，用"室内版"材质：它们淋不到雨，不该像外墙那样湿漉漉地反光
+    const inside = new Kit('guard_booth_inside', v, { interior: true });
+    const W = 2.6, D = 2.2, hx = W / 2, hz = D / 2, wob = v * 1.3;
+    /** 几个关键高度：地板面、窗台、窗顶、墙顶。 */
+    const FLOOR = 0.12, SILL = 1.0, HEAD = 2.08, TOP = 2.42;
+    const paint: SurfaceName = `paint_${color}`;
+    // 墙面的明暗：墙脚发暗（溅泥），檐口底下也发暗（常年晒不到、积灰）
+    const wall: Tint = (x, y, z) => {
+      const s = (0.9 + 0.14 * vnoise(x * 2 + wob, y * 2 + z)) * (0.6 + 0.4 * sstep(0.1, 0.7, y)) * (1 - 0.25 * sstep(2.25, 2.45, y));
+      return [s, s * 0.985, s * 0.96];
+    };
+    const panel = { c: 0.006, tint: wall }, glass = { plain: true, cast: false }; // 玻璃不投影：透明的东西投出实心的影子就穿帮了
+
+    // ---- 底座、两根滑橇、四根角柱
+    k.box('steel_dark', W, 0.12, D, 0, 0.06, 0, { c: 0.015 });
+    for (const z of [-0.7, 0.7]) k.box('steel_dark', W + 0.06, 0.06, 0.1, 0, 0.03, z, { c: 0.01 });
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) k.box(paint, 0.09, TOP - FLOOR, 0.09, sx * (hx - 0.045), (TOP + FLOOR) / 2, sz * (hz - 0.045), { c: 0.012, tint: wall });
+
+    // ---- 前后两面墙（沿 x）。每面从下到上：墙裙 → 窗台 → 玻璃 + 窗梃 → 上墙板。+z 那面要给门让出位置
+    const DOOR_L = 0.3, DOOR_R = 1.12;
+    const longWall = (zc: number, out: number) => {
+      const x0 = -hx + 0.09, x1 = out > 0 ? DOOR_L - 0.04 : hx - 0.09, len = x1 - x0, cx = (x0 + x1) / 2;
+      k.box(paint, len, SILL - FLOOR, 0.05, cx, (SILL + FLOOR) / 2, zc, panel);
+      k.box(paint, len, 0.05, 0.075, cx, SILL + 0.01, zc + out * 0.005, { c: 0.008, tint: wall });
+      k.box('glass', len, HEAD - SILL - 0.03, 0.008, cx, (SILL + HEAD) / 2 + 0.01, zc, glass);
+      const mullions = len > 1.6 ? 2 : 1;
+      for (let i = 1; i <= mullions; i++) k.box(paint, 0.04, HEAD - SILL, 0.05, x0 + (len * i) / (mullions + 1), (SILL + HEAD) / 2, zc, panel);
+      for (let i = 1; i < 3; i++) k.box(paint, 0.006, SILL - FLOOR - 0.04, 0.056, x0 + (len * i) / 3, (SILL + FLOOR) / 2, zc, { plain: true, tint: wall }); // 墙裙上两道竖向压痕
+      k.box(paint, W - 0.18, TOP - HEAD, 0.05, 0, (TOP + HEAD) / 2, zc, panel);
+    };
+    longWall(hz - 0.03, 1);
+    longWall(-hz + 0.03, -1);
+    // ---- 左右两面墙（沿 z）
+    for (const s of [-1, 1]) {
+      const xc = s * (hx - 0.03), len = D - 0.18;
+      k.box(paint, 0.05, SILL - FLOOR, len, xc, (SILL + FLOOR) / 2, 0, panel);
+      k.box(paint, 0.075, 0.05, len, xc + s * 0.005, SILL + 0.01, 0, { c: 0.008, tint: wall });
+      k.box('glass', 0.008, HEAD - SILL - 0.03, len, xc, (SILL + HEAD) / 2 + 0.01, 0, glass);
+      k.box(paint, 0.05, HEAD - SILL, 0.04, xc, (SILL + HEAD) / 2, 0, panel);
+      k.box(paint, 0.05, TOP - HEAD, len, xc, (TOP + HEAD) / 2, 0, panel);
+    }
+
+    // ---- 门（+z 面，x 从 0.30 到 1.12）：两根门框柱，门扇 = 下板 + 上冒头 + 两根边梃 + 玻璃
+    const zd = hz - 0.03, doorW = DOOR_R - DOOR_L - 0.02, doorX = (DOOR_L + DOOR_R) / 2;
+    for (const x of [DOOR_L - 0.015, DOOR_R + 0.015]) k.box(paint, 0.05, HEAD - FLOOR, 0.07, x, (HEAD + FLOOR) / 2, zd, panel);
+    k.box(paint, hx - 0.09 - DOOR_R - 0.04, HEAD - FLOOR, 0.05, (hx - 0.09 + DOOR_R + 0.04) / 2, (HEAD + FLOOR) / 2, zd, panel); // 门和墙角之间剩下的一小条墙
+    k.box(paint, doorW, SILL - FLOOR - 0.01, 0.04, doorX, (SILL + FLOOR) / 2, zd + 0.005, panel);
+    k.box(paint, doorW, 0.07, 0.04, doorX, HEAD - 0.04, zd + 0.005, panel);
+    for (const s of [-1, 1]) k.box(paint, 0.07, HEAD - SILL, 0.04, doorX + s * (doorW / 2 - 0.035), (SILL + HEAD) / 2, zd + 0.005, panel);
+    k.box('glass', doorW - 0.12, HEAD - SILL - 0.08, 0.008, doorX, (SILL + HEAD) / 2 - 0.02, zd + 0.005, glass);
+    k.box('steel_galv', doorW - 0.06, 0.22, 0.004, doorX, FLOOR + 0.14, zd + 0.027, { plain: true });                // 镀锌踢脚板
+    k.box('steel_galv', 0.03, 0.14, 0.02, DOOR_L + 0.09, 1.05, zd + 0.035, { c: 0.004 });                             // 把手座
+    k.tube('steel_galv', [DOOR_L + 0.09, 1, zd + 0.06], [DOOR_L + 0.2, 1, zd + 0.06], 0.009, { seg: 6, cap: true });  // 把手
+    for (const y of [0.4, 1.75]) k.cyl('steel_galv', 0.012, 0.1, DOOR_R + 0.002, y, zd + 0.03, { seg: 6 });           // 两个合页
+    k.box('steel_dark', 0.9, 0.03, 0.3, doorX, 0.105, hz + 0.15, { c: 0.006 });                                       // 门外的踏步板
+
+    // ---- 屋顶：外挑的白漆顶板、深色盖板、前后檐的镀锌封边、一根落水管
+    k.box(paint, W + 0.36, 0.1, D + 0.4, 0, TOP + 0.05, 0, { c: 0.02, tint: (x, _y, z) => { const s = 0.72 + 0.2 * vnoise(x * 1.5, z * 1.5 + wob); return [s, s, s * 0.97]; } });
+    k.box('steel_dark', W + 0.3, 0.03, D + 0.34, 0, TOP + 0.112, 0, { c: 0.01 });
+    for (const s of [-1, 1]) k.box('steel_galv', W + 0.36, 0.06, 0.08, 0, TOP - 0.005, s * (hz + 0.23), { c: 0.012 });
+    k.hose('steel_galv', [[-hx - 0.16, TOP - 0.03, hz + 0.23], [-hx - 0.1, TOP - 0.2, hz + 0.1], [-hx - 0.03, TOP - 0.4, hz + 0.03], [-hx - 0.03, 0.2, hz + 0.03], [-hx - 0.1, 0.06, hz + 0.1]], 0.03, { steps: 26, seg: 6 });
+
+    // ---- 空调外机（挂在 -x 墙外）：白箱 + 圆形风口（7 道横格栅、中心小圆盖）+ 两根托架 + 一根爬上墙的管线
+    const acX = -hx - 0.17, fanX = acX - 0.15;
+    k.box(paint, 0.3, 0.52, 0.78, acX, 0.62, -0.25, { c: 0.02, tint: wall });
+    stud(k, voidBlack(), 0.22, 0.016, [fanX - 0.008, 0.62, -0.14], { sides: 16, dir: '-x', raw: true });              // 风口：一个涂黑的浅圆台
+    for (let i = -3; i <= 3; i++) k.box('steel_dark', 0.006, 0.008, Math.sqrt(0.22 ** 2 - (i * 0.06) ** 2) * 2, fanX - 0.02, 0.62 + i * 0.06, -0.14, { plain: true });
+    stud(k, 'steel_dark', 0.05, 0.012, [fanX - 0.022, 0.62, -0.14], { sides: 8, dir: '-x' });
+    for (const z of [-0.55, 0.05]) k.bar('steel_dark', [-hx, 0.32, z], [acX - 0.1, 0.34, z], 0.03, 0.03, { plain: true });
+    k.hose('rubber', [[acX + 0.05, 0.86, 0.14], [acX + 0.06, 1, 0.2], [-hx - 0.02, 1.25, 0.24], [-hx - 0.02, 2.2, 0.24]], 0.014, { steps: 12, seg: 5, cast: false });
+
+    // ---- 门头灯：深色灯壳，底面一片朝下的发光面
+    k.box('steel_dark', 0.2, 0.07, 0.1, doorX, HEAD + 0.19, hz + 0.03, { c: 0.012 });
+    k.plane(emissive(GUARD_BOOTH_LAMP_COLOR, on ? 5 : 0.02), 0.17, 0.05, [doorX, HEAD + 0.149, hz + 0.035], { rot: [HALF_PI, 0, 0], raw: true });
+
+    // ---- 屋里：环氧地坪、靠 -x 墙的木桌、斜放的显示器、键盘、转椅
+    inside.box('floor_epoxy', W - 0.1, 0.016, D - 0.1, 0, FLOOR + 0.008, 0, { plain: true, cast: false });
+    const deskX = -hx + 0.4;
+    inside.box('wood_dark', 0.6, 0.04, D - 0.3, deskX, 0.76, 0, { c: 0.008, grain: 'z' });
+    for (const z of [-0.85, 0.85]) inside.box('steel_dark', 0.5, 0.64, 0.03, deskX, 0.44, z, { c: 0.005 });           // 两块板式桌腿
+    // 显示器朝屋里斜 0.25 弧度。屏幕是一片发光的面片，贴在黑壳正面往外 3 毫米
+    const SCREEN_YAW = 0.25, monX = -hx + 0.3, monZ = -0.3;
+    inside.box('polymer_black', 0.05, 0.32, 0.5, monX, 1.02, monZ, { c: 0.01, rot: [0, SCREEN_YAW, 0] });
+    inside.plane(emissive(0x8fb8e8, 1.6), 0.45, 0.27, [monX + Math.cos(SCREEN_YAW) * 0.028, 1.02, monZ - Math.sin(SCREEN_YAW) * 0.028], { rot: [0, HALF_PI + SCREEN_YAW, 0], raw: true });
+    inside.box('polymer_black', 0.05, 0.1, 0.06, monX - 0.02, 0.83, monZ, { c: 0.008 });                              // 支架
+    inside.box('polymer_black', 0.18, 0.015, 0.22, monX - 0.02, 0.787, monZ, { plain: true });                        // 底座
+    inside.box('polymer_black', 0.14, 0.02, 0.42, -hx + 0.52, 0.79, -0.25, { c: 0.004 });                             // 键盘
+    const chairX = -hx + 1, chairZ = -0.2;
+    inside.box('polymer_black', 0.46, 0.07, 0.46, chairX, 0.5, chairZ, { c: 0.02, rot: [0, 0.3, 0] });                // 座
+    inside.box('polymer_black', 0.07, 0.55, 0.42, chairX + 0.22, 0.86, chairZ + 0.07, { c: 0.02, rot: [0, 0.3, -0.12] }); // 靠背
+    inside.cyl('steel_dark', 0.025, 0.36, chairX, 0.3, chairZ, { seg: 6 });                                           // 气杆
+    for (let i = 0; i < 5; i++) {                                                                                     // 五星脚
+      const a = i * TAU / 5;
+      inside.bar('steel_dark', [chairX, 0.16, chairZ], [chairX + Math.cos(a) * 0.26, 0.14, chairZ + Math.sin(a) * 0.26], 0.03, 0.025, { plain: true });
+    }
+
+    // ---- 字和贴纸
+    fitLabel(k, '门禁控制', { color: 'black', font: 'stencil', distress: 0.2 }, 0.9, 0.1, [-0.45, (TOP + HEAD) / 2, hz - 0.003]);
+    sticker(k, 'berth4', 0.34, [hx - 0.003, 0.56, 0.3], [0, HALF_PI, 0]);
+    sticker(k, 'no_entry', 0.2, [doorX, 0.72, zd + 0.0265]);
+    sticker(k, 'grime_streak', 0.7, [-0.6, 0.55, hz - 0.003], undefined, 0.3);
+    sticker(k, 'rust_run', 0.6, [-hx + 0.003, 0.6, 0.55], [0, -HALF_PI, 0], 0.25);
+
+    const model = k.finish({ size: [W, 2.7, D], grime: 0.6, boxes: [{ min: [-hx, 0, -hz], max: [hx, 2.54, hz], surface: 'metal' }] });
+    model.group.add(...inside.finish({ boxes: [], grime: 0.5 }).group.children);
+    // 门头灯的位置和朝向：灯本身不照亮地面，想在门口补一盏真灯就按这个放
+    model.group.userData.lamps = [{ pos: [doorX, HEAD + 0.14, hz + 0.04], dir: [0, -1, 0.2], color: GUARD_BOOTH_LAMP_COLOR }];
+    return model;
+  });
+}
+
+// ====================================================================== 道闸
+
+export interface GateArmOpts extends SiteOpts { /** 栏杆抬起多少：0 放平，1 抬到头（1.48 弧度，约 85°）。按 0.05 一档取整。 */ open?: number }
+
+/**
+ * 道闸：橙色机箱在 -x 端（x = -2.31），4.62 米长的红白栏杆伸向 +x，另一头搭在黄色托柱上（x = 2.4）。
+ * 机箱顶上一盏琥珀色警示灯，杆头一颗红灯。栏杆放下（open < 0.5）时带一条横着的碰撞盒。
+ */
+export function gateArm(o: GateArmOpts = {}): PropModel {
+  const open = Math.round(clamp(o.open ?? 0, 0, 1) * 20) / 20;
+  return cached(`gate_arm|${open}${tag(o)}`, () => {
+    const k = new Kit('gate_arm', 0, { interior: o.interior });
+    const BOX_X = -2.31, PIVOT_Y = 0.92, REST_X = 2.4;
+    // 橙、红、黄三种漆都从同一个白漆材质染出来（见 toward）
+    const WHITE = paintColor('paint_white'), orange = toward(paintColor('paint_orange'), WHITE), red = toward(paintColor('paint_red'), WHITE), yellow = toward(paintColor('paint_yellow'), WHITE);
+    const scaled = (c: Rgb, s: number): Rgb => [c[0] * s, c[1] * s, c[2] * s];
+
+    // ---- 机箱：水泥垫、橙色箱体（下暗上亮）、深色顶盖、正面的检修门板和锁、警示贴
+    concreteBlock(k, 0.5, 0.06, 0.46, BOX_X, 0.03, 0, { spot: 1 });
+    k.box('paint_white', 0.36, 1, 0.3, BOX_X, 0.56, 0, { c: 0.02, tint: (_x, y) => scaled(orange, 0.6 + 0.4 * sstep(0.05, 0.5, y)) });
+    k.box('steel_dark', 0.4, 0.04, 0.34, BOX_X, 1.075, 0, { c: 0.012 });
+    k.box('paint_white', 0.3, 0.6, 0.012, BOX_X, 0.5, 0.151, { c: 0.004, tint: scaled(orange, 0.9) });
+    stud(k, 'steel_galv', 0.012, 0.016, [BOX_X + 0.1, 0.5, 0.16], { dir: 'z' });
+    sticker(k, 'hazard_general', 0.14, [BOX_X, 0.9, 0.153]);
+    sticker(k, 'caution_stripes', 0.08, [BOX_X, 0.12, 0.153], undefined, 0.34);
+    k.cyl('steel_dark', 0.03, 0.05, BOX_X, 1.12, 0, { seg: 8 });
+    k.cyl(emissive(0xff5a1e, 2.2), 0.026, 0.045, BOX_X, 1.165, 0, { seg: 8, raw: true });                            // 琥珀色警示灯
+
+    // ---- 栏杆：整组绕机箱上的转轴抬起
+    k.push([BOX_X, PIVOT_Y, 0], [0, 0, open * 1.48]);
+    k.cyl('steel_dark', 0.075, 0.36, 0, 0, 0, { axis: 'z', seg: 10 });                                               // 轴筒
+    for (const s of [-1, 1]) k.box('steel_dark', 0.62, 0.11, 0.012, 0.05, 0, s * 0.175, { c: 0.004 });               // 两片夹板
+    k.box('steel_dark', 0.3, 0.16, 0.3, -0.33, -0.02, 0, { c: 0.02 });                                               // 配重块：有它，电机只需要很小的力就能把杆子抬起来
+    const LENGTH = 4.62, START = 0.12, SEGMENTS = 9, step = LENGTH / SEGMENTS;
+    for (let i = 0; i < SEGMENTS; i++) {
+      const h = 0.1 - i * 0.003; // 每节比前一节矮 3 毫米，杆子越往头越细
+      k.box('paint_white', step + 0.001, h, 0.05, START + step * (i + 0.5), 0, 0, { c: 0.008, tint: i % 2 ? 1 : red, shift: false });
+    }
+    k.box('steel_dark', 0.03, 0.11, 0.06, START + LENGTH + 0.012, 0, 0, { c: 0.008 });                               // 杆头的堵头
+    k.box(emissive(0xff2a12, 1.5), 0.05, 0.03, 0.054, START + LENGTH - 0.5, 0.053, 0, { plain: true, raw: true });   // 杆头的红灯
+    k.pop();
+
+    // ---- 托柱：水泥垫、黄色圆柱、顶上的 U 形托
+    concreteBlock(k, 0.3, 0.05, 0.3, REST_X, 0.025, 0, { c: 0.012, spot: 2 });
+    stud(k, 'steel_galv', 0.07, 0.01, [REST_X, 0.055, 0], { sides: 8 });
+    k.cyl('paint_white', 0.04, 0.8, REST_X, 0.45, 0, { seg: 8, tint: yellow });
+    k.box('paint_white', 0.14, 0.02, 0.16, REST_X, 0.855, 0, { c: 0.005, tint: yellow });
+    for (const s of [-1, 1]) k.box('paint_white', 0.14, 0.14, 0.014, REST_X, 0.93, s * 0.073, { c: 0.004, tint: yellow });
+
+    const boxes: LocalBox[] = [
+      { min: [BOX_X - 0.2, 0, -0.17], max: [BOX_X + 0.2, 1.1, 0.17], surface: 'metal' },
+      { min: [REST_X - 0.07, 0, -0.08], max: [REST_X + 0.07, 1, 0.08], surface: 'metal', noNav: true },
+    ];
+    if (open < 0.5) boxes.push({ min: [BOX_X, PIVOT_Y - 0.07, -0.04], max: [REST_X, PIVOT_Y + 0.07, 0.04], surface: 'metal' });
+    return k.finish({ size: [5, 1.2, 0.46], boxes });
+  });
+}
+
 // ====================================================================== 登记表
 
 /**
@@ -645,4 +840,5 @@ export const SITE: Record<string, (o?: any) => PropModel> = {
   sign_post: signPost, lane_sign: laneSign,
   light_mast: lightMast,
   fence_panel: fencePanel, gate_post: gatePost, sliding_gate: slidingGate,
+  guard_booth: guardBooth, gate_arm: gateArm,
 };
