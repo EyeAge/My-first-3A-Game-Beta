@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { QualityProfile } from '../core/settings';
 import { SUN_DIR } from '../world/atmosphere';
 import { PostChain, type PostFrame } from './post';
+import { captureProbe } from './probe';
 import type { PlanarReflection } from './reflection';
 import { followSunShadow, installSoftShadows, setupSunShadow } from './shadows';
 
@@ -52,6 +53,16 @@ export class Renderer {
     this.post ??= new PostChain(this.gl, this.camera, sun);
     this.shadowAt.set(1e9, 0, 0);
     this.resize();
+  }
+
+  /**
+   * 在 pos 处拍一张室内环境探针（做法见 probe.ts）。
+   * 拍之前先把太阳的阴影图挪过去罩住那里：屋里暗不暗全靠阴影，而阴影图平时只跟着玩家走。
+   */
+  captureProbe(pos: THREE.Vector3, prepare?: () => () => void) {
+    if (this.sun.castShadow) followSunShadow(this.sun, SUN_DIR, pos);
+    this.shadowAt.set(1e9, 0, 0); // 下一帧让阴影图重新对准玩家
+    return captureProbe(this.gl, this.scene, pos, prepare);
   }
 
   resize() {

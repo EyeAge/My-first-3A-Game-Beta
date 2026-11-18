@@ -49,7 +49,9 @@ async function boot() {
   const sea = createSea(QUAY_X);
   scene.add(sea.mesh);
   let rain = createRain(profileOf(settings.quality).rain, QUAY_X);
+  rain.setShelter(port.shelter);
   scene.add(rain.group);
+  renderer.interior = port.interior; // 车间里的空气更"浑"：从门洞和屋顶破洞照进来的阳光会显出光柱
 
   await step('正在加载弹道与烟雾', 0.68);
   const effects = new Effects();
@@ -80,10 +82,41 @@ async function boot() {
     renderer.setQuality(p, port.sun);
     port.setLampCount(p.lamps);
     scene.remove(rain.group); rain.dispose();
-    rain = createRain(p.rain, QUAY_X); scene.add(rain.group);
+    rain = createRain(p.rain, QUAY_X); rain.setShelter(port.shelter); scene.add(rain.group);
     effects.setScale(canvas.clientHeight * p.pixelRatio, camera.fov);
   };
   applyQuality();
+
+  // ------------------------------------------------------------------ 车间里的环境光
+  // 屋外的东西，背光面的亮度来自整片天空。屋里看不到天，所以站在屋子中间拍一张"环境探针"（probe.ts），
+  // 让所有标了"室内"的材质改用它：屋顶和墙是暗的，只有门洞、破洞和吊灯是亮的，屋里的东西自然就暗下来。
+  await step('正在测量车间里的光线', 0.9);
+  const interiorEnv = renderer.captureProbe(port.probePos, () => {
+    const hidden = [rain.group, effects.group, decals.mesh].filter((o) => o.visible);
+    for (const o of hidden) o.visible = false;
+    sky.uniforms.uEnv.value = 1; // 天空切到"只当光源"的模式：不画太阳圆盘，免得反射里出现一个刺眼的亮点
+    return () => { for (const o of hidden) o.visible = true; sky.uniforms.uEnv.value = 0; };
+  });
+  scene.traverse((o) => {
+    const m = (o as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
+    for (const mat of Array.isArray(m) ? m : m ? [m] : []) {
+      if (!mat.userData.interior || !(mat as THREE.MeshStandardMaterial).isMeshStandardMaterial) continue;
+      (mat as THREE.MeshStandardMaterial).envMap = interiorEnv;
+      (mat as THREE.MeshStandardMaterial).envMapIntensity = 1; // 屋外是 2（scene.environmentIntensity）
+    }
+  });
+  // 手里的枪也一样：人走进屋，枪身上映出来的就该是屋里而不是天空。每帧看一眼相机在不在室内范围里，变了才切换
+  const gunMats: THREE.MeshStandardMaterial[] = [];
+  weapon.view.traverse((o) => {
+    const m = (o as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
+    for (const mat of Array.isArray(m) ? m : m ? [m] : []) if ((mat as THREE.MeshStandardMaterial).isMeshStandardMaterial && !gunMats.includes(mat as THREE.MeshStandardMaterial)) gunMats.push(mat as THREE.MeshStandardMaterial);
+  });
+  let indoors = false;
+  const setIndoors = (v: boolean) => {
+    indoors = v;
+    for (const m of gunMats) { m.envMap = v ? interiorEnv : null; m.envMapIntensity = 1; } // 设回 null 就是重新用天空（强度由场景统一给）
+  };
+
   window.addEventListener('resize', () => { renderer.resize(); effects.setScale(canvas.clientHeight * profileOf(settings.quality).pixelRatio, camera.fov); });
 
   // ------------------------------------------------------------------ 状态切换
@@ -212,6 +245,7 @@ async function boot() {
     bolt.value = bolt.t < 0.9 ? Math.max(0, bolt.power * Math.exp(-5 * bolt.t) * (0.55 + 0.45 * Math.sin(47 * bolt.t) * Math.sin(13 * bolt.t + 1)) * 0.35) : 0;
     sky.uniforms.uFlash.value = bolt.value;
     rain.update(t, camera, renderer.gl.getDrawingBufferSize(bufSize).y);
+    if (port.interior.containsPoint(camera.position) !== indoors) setIndoors(!indoors);
 
     if (state === 'playing' || state === 'paused') {
       camera.getWorldDirection(fwd);

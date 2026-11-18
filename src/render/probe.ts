@@ -12,7 +12,8 @@ import * as THREE from 'three';
  * prepare 在拍之前调用（比如把天空切到"不画太阳圆盘"的模式），返回一个拍完以后恢复原状的函数。
  */
 export function captureProbe(gl: THREE.WebGLRenderer, scene: THREE.Scene, pos: THREE.Vector3, prepare?: () => () => void): THREE.Texture {
-  const target = new THREE.WebGLCubeRenderTarget(128, { type: THREE.HalfFloatType });
+  // 边长 256：和天空那张环境贴图同一个规格。两张贴图规格一样，材质在它们之间切换（枪从屋外拿进屋里）就不用重新编译着色器
+  const target = new THREE.WebGLCubeRenderTarget(256, { type: THREE.HalfFloatType });
   const cam = new THREE.CubeCamera(0.15, 300, target);
   cam.position.copy(pos);
   const restore = prepare?.();
