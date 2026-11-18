@@ -407,9 +407,9 @@ interface Core { body: THREE.BufferGeometry; metal: THREE.BufferGeometry | null;
 /** 零件箱的种子：规格、花样、做旧三样都算进去，于是每个变体的贴图挪位都不一样，摞在一起的箱子不会在同一个位置掉同一块漆。 */
 const kitSeed = (v: ContainerVariant) => v.seed + Math.round(v.wear * 2) * 10 + (v.size === 20 ? 0 : v.size === 40 ? 100 : 200);
 /**
- * 几张大板的编号：两块侧板各切成十来张、箱顶十来张、前端板一张。编号只是给 addPanel 算贴图位移用的，互相不重复就行。
+ * 几张大板的编号：两块侧板各切成十来张、箱顶十来张、前端板一张、门上的压型板一张。编号只是给 addPanel 算贴图位移用的，互相不重复就行。
  */
-const SLOT = { side: (side: number, i: number) => (side > 0 ? 0 : 40) + i, roof: (i: number) => 80 + i, front: 120 };
+const SLOT = { side: (side: number, i: number) => (side > 0 ? 0 : 40) + i, roof: (i: number) => 80 + i, front: 120, door: 121 };
 /** 侧板切成哪几张。两头各多伸 2 厘米，插进角柱里（角柱的棱是倒过角的，板如果刚好只到角柱的边，倒角那里会露出一条能看穿箱子的细缝）。 */
 const sideSheets = (plan: Plan) => sheets(embed(plan.sideKnots, 0.02), 16); // 16 格 = 4 个波纹周期，1.1 米一张
 /** 箱顶切成哪几张。 */
@@ -429,10 +429,13 @@ const spans = (list: [number, number][][], from: number, to: number) => list.map
  *
  * 位移怎么加上去：零件箱是按几何体"摆放之前"的位置铺贴图的。那就先把板平移 t，让它照这个位置铺，
  * 再用摆放矩阵把板挪回原处 —— 形状一点没动，贴图挪了 t。
+ *
+ * origin 给那些不是在箱子的坐标系里搭的板用：精模的门板是在"门的坐标系"里搭的（原点在铰链上），
+ * 把铰链在箱子里的位置告诉它，算出来的贴图位置才和中模那张直接按箱子坐标搭的门板对得上。
  */
-function addPanel(k: Kit, v: ContainerVariant, slot: number, g: THREE.BufferGeometry, tint: Tint) {
+function addPanel(k: Kit, v: ContainerVariant, slot: number, g: THREE.BufferGeometry, tint: Tint, origin: V3 = [0, 0, 0]) {
   const rng = mulberry32(kitSeed(v) * 977 + slot * 131 + 7);
-  const t: V3 = [rng() * 7.3, rng() * 7.3, rng() * 7.3]; // 最多挪 7.3 米，和零件箱自己挪的幅度一样
+  const t: V3 = [rng() * 7.3 + origin[0], rng() * 7.3 + origin[1], rng() * 7.3 + origin[2]]; // 最多挪 7.3 米，和零件箱自己挪的幅度一样
   k.add(BODY, g.translate(t[0], t[1], t[2]), { tint, shift: false }, new THREE.Matrix4().makeTranslation(-t[0], -t[1], -t[2]));
 }
 
@@ -538,7 +541,7 @@ function buildCore(plan: Plan): Core {
     const along = (d: number) => -side * d;
     k.box(body, 0.034, leafH, LEAF_W + 0.003, 0, mid, along(LEAF_W / 2 - 0.0045), { c: 0.008, ...paint }); // 门板。铰链那一侧多伸 6 毫米压进门角柱，不留缝
     // 门面的横向压型（截面见 doorProfile）。左右两头收回到平的（最外面两排顶点不凸），像真的冲压件那样，凸起是封口的
-    k.add(body, ribbedSheet(doorProfile(v.size), [0.06, 0.085, LEAF_W - 0.095, LEAF_W - 0.07], (y, bulge, d, row) => [row === 0 || row === 3 ? DOOR_RIB.low : bulge, y, along(d)], [1, 0, 0]), paint);
+    addPanel(k, v, SLOT.door, ribbedSheet(doorProfile(v.size), [0.06, 0.085, LEAF_W - 0.095, LEAF_W - 0.07], (y, bulge, d, row) => [row === 0 || row === 3 ? DOOR_RIB.low : bulge, y, along(d)], [1, 0, 0]), shade, [hingeX, 0, side * HINGE_Z]);
     // 胶条：中缝一条竖的，上下各一条横的
     k.box(body, 0.022, leafH + 0.012, 0.018, 0.004, mid, along(LEAF_W + 0.001), { plain: true, tint: RUBBER });
     for (const y of [doorTop + 0.004, DOOR_Y0 - 0.004]) k.box(body, 0.022, 0.016, LEAF_W, 0.004, y, along(LEAF_W / 2), { plain: true, tint: RUBBER });
@@ -794,7 +797,7 @@ function buildMid(plan: Plan) {
     const across = [-wide, -edge + 0.085, -0.099, 0, 0.099, edge - 0.085, wide], raised = [false, true, true, false, true, true, false];
     // doorProfile 里每道凸起是 5 个点，头一个点（凸起之间的平段上）中模用不着：平段两头已经各有一个点了
     const profile: [number, number][] = [[LAP0, DOOR_RIB.low], ...doorProfile(v.size).filter((_, i) => i % 5 !== 0), [LAP1, DOOR_RIB.low]];
-    k.add(BODY, ribbedSheet(profile, across, (y, bulge, z, row) => [hingeX + (raised[row] ? bulge : DOOR_RIB.low), y, z], [1, 0, 0]), paint);
+    addPanel(k, v, SLOT.door, ribbedSheet(profile, across, (y, bulge, z, row) => [hingeX + (raised[row] ? bulge : DOOR_RIB.low), y, z], [1, 0, 0]), shade);
     const at = (z: number, y: number): V3 => [p - 0.006, y, z], out: V3 = [1, 0, 0];
     flat(-HALF_W, HALF_W, 2, 0, RAIL0, at, out);             // 门槛
     flat(-HALF_W, HALF_W, 2, doorTop, H, at, out);           // 门楣
