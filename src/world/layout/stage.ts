@@ -213,8 +213,12 @@ export function cable(s: Stage, points: CablePoint[], r = 0.025, seed = 0) {
 
 /** 灯头的颜色（线性空间，给光晕用）：高杆灯是偏暖的白，投光灯更白一点。 */
 const MAST_FLARE = { r: 1.5, g: 1.15, b: 0.75 }, FLOOD_FLARE = { r: 1.4, g: 1.3, b: 1.1 };
-/** 灯池里那盏聚光灯挂在 9.86 米高时用 150 坎德拉（原来路灯的数）。别的高度按"地面一样亮"折算。 */
-const spotIntensity = (height: number) => 150 * Math.pow(height / 9.86, 1.5);
+/**
+ * 灯池里那盏聚光灯挂在 9.86 米高时用 30 坎德拉，别的高度按"地面一样亮"折算。
+ * 这个数原来是 150（夜景时定的）。现在是日出：地面受到的太阳直射大约是 2，而 150 的灯在正下方是 4.7，
+ * 比太阳还亮两倍多，脚下一片橘黄。30 的话灯下约 0.9：看得出一圈淡淡的暖色，主导画面的仍是太阳和天空。
+ */
+const spotIntensity = (height: number) => 30 * Math.pow(height / 9.86, 1.5);
 
 /**
  * 立一根 14 米高杆灯。横担默认沿 z，4 只灯头背靠背朝 ±x；yaw 转 90° 就朝 ±z。
@@ -254,7 +258,7 @@ export function generatorSet(s: Stage, x: number, z: number, turn: number, color
   const [ax, az] = lamp(FLOODLIGHT_LAMP.pos[0] + FLOODLIGHT_LAMP.dir[0], FLOODLIGHT_LAMP.pos[2] + FLOODLIGHT_LAMP.dir[2]);
   const dir = new THREE.Vector3(ax - px, FLOODLIGHT_LAMP.dir[1], az - pz).normalize();
   // 灯只有两米高、几乎平着照：强度给得小（不然灯架脚下那一小块地会亮得发白），照到 9 米外落地
-  s.lamps.push({ pos: new THREE.Vector3(px, py, pz), target: new THREE.Vector3(px, py, pz).addScaledVector(dir, 9), intensity: 60, angle: 0.8 });
+  s.lamps.push({ pos: new THREE.Vector3(px, py, pz), target: new THREE.Vector3(px, py, pz).addScaledVector(dir, 9), intensity: 14, angle: 0.8 });
   s.cones.push({ pos: new THREE.Vector3(px, py, pz), dir, length: 7, radius: 2.4 });
   for (const head of FLOODLIGHT_HEADS) { const [hx, hz] = lamp(head.pos[0], head.pos[2]); s.flares.push({ x: hx, y: head.pos[1], z: hz, ...FLOOD_FLARE, size: 1.1 }); }
 }
