@@ -42,6 +42,11 @@ const LOOK = {
   waterF0: 0.075,                       // 水面正对着看时反射多少光。真实的水约 0.02，这里故意取高，倒影才够明显
   sunSpecularMax: 40,                   // 太阳在水面上的高光封顶，不然一个像素能亮到把泛光炸成一团
   reflectionMax: 48,                    // 倒影贴图里单个像素的亮度封顶，理由同上
+  // 没有积水、只是潮湿的路面，这两项要低得多。太阳只有 13° 高，迎着它看时潮湿路面上的高光是又宽又长的一条，
+  // 物理上它确实比周围亮几十倍，但画面装不下：整条高光会烧成一片没有细节的白。所以给它一个“软封顶”——
+  // 暗的部分基本不动，越亮压得越狠，最亮也只到 dampSpecularMax。亮度大约 1 就是画面上的白，取 1.6 时高光是亮金色、还看得见路面的纹理
+  dampSpecularMax: 1.6,
+  dampReflectionMax: 3.0,               // 倒影同理：糊掉的太阳圆盘映在潮湿路面上，不封顶的话又是一片白
   crestSkyGain: 0.12,                   // 涟漪波峰额外反射多少天光（乘在环境光上，所以会跟着天光一起变亮变暗）
   envMapIntensity: 1.0,                 // 没开平面反射时，地面反射天空的强度
 };
@@ -486,7 +491,7 @@ if (uReflOn > 0.5) {
   vec3 mirror = textureLod(tRefl, clamp(ruv, lo, hi), lod).rgb * 0.5
               + textureLod(tRefl, clamp(ruv + stretch, lo, hi), lod + 0.6).rgb * 0.25
               + textureLod(tRefl, clamp(ruv - stretch * 0.6, lo, hi), lod + 0.6).rgb * 0.25;
-  mirror = clamp(mirror, vec3(0.0), vec3(${float(LOOK.reflectionMax)}));
+  mirror = clamp(mirror, vec3(0.0), vec3(mix(${float(LOOK.dampReflectionMax)}, ${float(LOOK.reflectionMax)}, gPuddle)));
   // 水和浸透带全用倒影；其余按粗糙度：0.55 以下全用，0.9 以上不用（太糙的表面映不出东西）
   float weight = mix(1.0 - smoothstep(0.55, 0.9, r), 1.0, max(gPuddle, gSoak));
   radiance = mix(radiance, mirror, weight);
@@ -628,12 +633,16 @@ export function buildGround(quayX: number) {
       .replace('#include <lights_physical_fragment>', `#include <lights_physical_fragment>\nmaterial.specularColor = mix(material.specularColor, vec3(${float(LOOK.waterF0)}), max(gPuddle, gSoak * 0.5) * (1.0 - gMetal));`)
       .replace('#include <lights_fragment_maps>', '#include <lights_fragment_maps>\n' + SHADER_REFLECT)
       .replace('#include <lights_fragment_end>', /* glsl */ `#include <lights_fragment_end>
-        reflectedLight.directSpecular = min(reflectedLight.directSpecular, vec3(${float(LOOK.sunSpecularMax)}));
+        // 高光的软封顶：cap / (cap + 亮度) 在亮度远小于 cap 时约等于 1（不动），亮度很大时把结果压到接近 cap。
+        // 三个通道乘同一个数，所以只压亮度、不改颜色：太阳的高光压完还是金色的。分母不小于 cap，不会除零
+        float specCap = mix(${float(LOOK.dampSpecularMax)}, ${float(LOOK.sunSpecularMax)}, gPuddle);
+        vec3 spec = max(reflectedLight.directSpecular, vec3(0.0));
+        reflectedLight.directSpecular = spec * (specCap / (specCap + max(spec.r, max(spec.g, spec.b))));
         // 涟漪波峰映着天光的一道亮边。必须放在这里——倒影已经替换完、光照也结算完之后——再加：
         // 加早了会被倒影整个盖掉，那样涟漪只有在灯的倒影里才看得出来，暗处的水塘就像没在下雨
         reflectedLight.indirectSpecular += gCrest * (irradiance + iblIrradiance) * ${float(LOOK.crestSkyGain)};`);
   };
-  groundMat.customProgramCacheKey = () => 'wet-ground-5';
+  groundMat.customProgramCacheKey = () => 'wet-ground-6';
 
   const ground = new THREE.Mesh(new THREE.PlaneGeometry(462, 600), groundMat);
   ground.rotation.x = -Math.PI / 2;
