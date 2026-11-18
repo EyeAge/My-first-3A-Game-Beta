@@ -4,7 +4,7 @@ import type { DecalDef } from '../render/decalart';
 import { DECALS } from '../render/labels';
 import { emissive } from '../render/surfaces';
 import { hex, Kit, type LocalBox, type Mat, type Tint, type V3 } from './kit';
-import { WORKSHOP } from './workshop';
+import { WORKSHOP, type Workshop } from './workshop';
 
 // 四号泊位维修车间 —— 室内陈设（建筑本体在 workshop.ts）。
 //
@@ -22,6 +22,9 @@ import { WORKSHOP } from './workshop';
 // 放进我们自己的地图时用 placeWorkshopFit() 整体平移，和 placeWorkshop() 传一样的参数。
 //
 // 发光的东西（灯管、屏幕、灯带）都只是"很亮的面片"：它们自己不照亮任何东西，亮的感觉来自后处理的泛光。
+//
+// 油桶、托盘堆、轮胎、叉车这些通用道具不在这里搭（它们在 props/cargo.ts、forklift.ts），
+// 这里只给出该摆在哪：见文件末尾的 WORKSHOP_PROPS。
 
 export interface WorkshopFit {
   /** 全部陈设的网格（已经按材质合并）。 */
@@ -32,10 +35,20 @@ export interface WorkshopFit {
   relayPos: V3;
 }
 
+export interface WorkshopFitOptions {
+  /**
+   * 屋面破洞在地面上的投影，直接传 buildWorkshop().roofHoles（要没经过 placeWorkshop 换算的那一份）。
+   * 每个洞的正下方会贴一块水渍。不传就用下面 DEFAULT_ROOF_HOLES 里记的 8 个洞。
+   */
+  roofHoles?: Workshop['roofHoles'];
+}
+
 // ------------------------------------------------------------------ 尺寸
 const FLOOR = WORKSHOP.floor;   // 室内地坪的高度：0.03
 /** 内衬波纹板朝屋里的那一面，离墙的外表面 13 厘米（墙的分层见 workshop.ts）。往墙上挂东西要贴到这个面上。 */
 const LINING = 0.13;
+/** 水泥墙裙朝屋里的那一面，离墙的外表面 25 厘米；墙裙只到 1.2 米高。 */
+const SKIRT = 0.25;
 const HALF_PI = Math.PI / 2;
 
 // 每多用一种材质，整套陈设就多一个网格、多一次绘制调用。所以只出现一两回的质感不单独开材质，
@@ -74,6 +87,16 @@ const RACKS: [number, number, number][] = [
   ...[-8.4, -5.6, -2.8, 2.8, 5.6, 8.4].map((x): [number, number, number] => [x, NORTH_ROW_Z, Math.round(x * 7 + 90)]),
   ...[2.8, 5.6, 8.4].map((x): [number, number, number] => [x, -23.45, Math.round(x * 5 + 40)]),
 ];
+
+/**
+ * 屋面上被掀掉的 8 块板在地面上的投影（和 workshop.ts 里的 ROOF_HOLES 一一对应：屋面板每列宽 1.43 米，每排的投影长 2.125 米）。
+ * 只在调用方没有传 roofHoles 时用。
+ */
+const DEFAULT_ROOF_HOLES: Workshop['roofHoles'] = ([[4, 1, 1], [11, 1, 1], [5, 2, 1], [15, 2, 1], [8, 3, 1], [13, 1, -1], [7, 2, -1], [17, 3, -1]] as const)
+  .map(([col, row, side]) => {
+    const x = -16.3 + col * 1.43, za = WORKSHOP.ridgeZ + side * 8.5 * (1 - row * 0.25), zb = WORKSHOP.ridgeZ + side * 8.5 * (1 - (row + 1) * 0.25);
+    return { minX: x, maxX: x + 1.43, minZ: Math.min(za, zb), maxZ: Math.max(za, zb) };
+  });
 
 // ------------------------------------------------------------------ 小工具
 type BoxOpt = NonNullable<Parameters<Kit['box']>[7]>;
@@ -665,8 +688,45 @@ function buildRacks(k: Kit, boxes: LocalBox[]) {
   }
 }
 
+// ------------------------------------------------------------------ 地面细节
+function buildFloorDetails(k: Kit, roofHoles: Workshop['roofHoles']) {
+  const flat = (yaw: number): V3 => [-HALF_PI, 0, yaw];   // 把一张竖着的贴纸放平（朝上），再在地上转 yaw
+  const y = FLOOR + 0.004;                                 // 贴纸比地坪高 4 毫米
+
+  // 叉车停车位上垫的一块钢板，和它旁边漏的一摊油
+  slab(k, 'steel_dark', 7.2, FLOOR, -14.6, 8.4, FLOOR + 0.04, -13.6, { c: 0.006 });
+  k.decal('oil_stain', 2.2, [7.6, y, -15.2], flat(0.6));
+  k.decal('oil_stain', 1.6, [-3.8, y, -13.6], flat(2.1));
+  // 南门内的门槛警示线。贴纸本身是 2.4 × 0.6 米的一条，两条接起来正好铺满 5 米宽的门洞
+  for (const x of [-4.7, -2.3]) k.decal('caution_stripes', 2.4, [x, y, -11.9], flat(0));
+  // 屋面每个破洞的正下方一块水渍。水渍贴纸是竖长的（3 : 4），宽 1.65 米时面积和参考里 1.9 米见方的那块一样大；
+  // 转角用"洞在屋面的第几列 × 1.7 弧度"，每块朝向都不同，看不出是同一张图
+  for (const hole of roofHoles) {
+    const column = Math.round((hole.minX + 16.3) / Math.max(0.1, hole.maxX - hole.minX));
+    k.decal('leak_stain', 1.65, [(hole.minX + hole.maxX) / 2 + 0.2, y, (hole.minZ + hole.maxZ) / 2], flat(column * 1.7));
+  }
+
+  // 工作台上拖下来的一根气管：从台面上的快速接头出来，翻过台沿垂到地上，弯弯曲曲拖到车间中间，另一头接着一把风炮
+  const lay = FLOOR + 0.018;   // 管子的半径是 1.8 厘米，贴地时管心就在这个高度
+  k.cyl('steel_galv', 0.014, 0.05, 1.78, BENCH.top + 0.016, -11.78, { axis: 'z', seg: 6, cast: false });
+  k.hose('rubber', [[1.78, BENCH.top + 0.018, -11.8], [1.74, BENCH.top + 0.02, -11.95], [1.68, BENCH.top - 0.02, -12.09], [1.6, 0.6, -12.16], [1.48, 0.22, -12.3], [1.32, lay + 0.01, -12.7],
+    [1.2, lay, -13.2], [2.4, lay, -14], [1, lay, -14.9], [-0.8, lay, -14.4], [-1.6, lay, -15.6]], 0.018, { steps: 72, seg: 6 });
+  k.at([-1.66, FLOOR, -15.72], [0, 1.1, 0], () => {
+    k.cyl('paint_orange', 0.038, 0.17, 0, 0.04, 0, { axis: 'x', seg: 8 });
+    k.cyl('steel_dark', 0.022, 0.06, 0.11, 0.04, 0, { axis: 'x', seg: 6 });
+    k.box('polymer_black', 0.045, 0.036, 0.13, -0.03, 0.02, 0.08, { c: 0.008 });
+  });
+
+  // 乙号中继的电缆：北墙墙裙上一只接线盒，电缆从盒底出来、顺着墙垂到地上，再贴地绕到中继柜跟前。
+  // 参考里它从 x = −2 下来，会从一组货架的托盘中间穿过去；这里挪到两组货架之间的空当（x = −1.15）
+  const skirtZ = WORKSHOP.z0 + SKIRT, r = 0.03, lie = FLOOR + r * 0.95;
+  slab(k, 'steel_galv', -1.27, 0.84, skirtZ, -1.03, 1.16, skirtZ + 0.1, { c: 0.008, tint: 0.75 });
+  k.hose('rubber', [[-1.15, 0.86, skirtZ + 0.05], [-1.15, 0.5, skirtZ + 0.045], [-1.15, 0.16, skirtZ + 0.06], [-1.15, lie + 0.01, skirtZ + 0.24], [-1.16, lie, -27], [-1.2, lie, -26.3],
+    [-1.4, lie, -25.6], [-2.4, lie, -23], [-1.9, lie, -20.3]], r, { steps: 60, seg: 6 });
+}
+
 // ------------------------------------------------------------------ 组装
-export function buildWorkshopFit(): WorkshopFit {
+export function buildWorkshopFit(opts: WorkshopFitOptions = {}): WorkshopFit {
   // 全部放进同一只零件箱：同一种材质的零件（不管是办公室的还是货架的）最后合成一个网格，整套陈设只有二十来次绘制调用。
   // 用的是室内版材质（淋不到雨）。参考里货架用的是室外版，在屋里照样是湿的、照样反射天空，那是它的疏漏。
   const k = new Kit('workshopfit', 7, { interior: true });
@@ -679,6 +739,7 @@ export function buildWorkshopFit(): WorkshopFit {
   buildPowerBox(k);
   buildGantry(k, boxes);
   buildRacks(k, boxes);
+  buildFloorDetails(k, opts.roofHoles ?? DEFAULT_ROOF_HOLES);
 
   // 碰撞盒是上面手工登记的那一份，所以不要零件箱自动量的外包盒（boxes: []）
   const group = k.finish({ boxes: [], grime: 0.9 }).group;
@@ -704,3 +765,63 @@ export function placeWorkshopFit(fit: WorkshopFit, dx: number, dz: number, quart
     relayPos: point(fit.relayPos),
   };
 }
+
+// ------------------------------------------------------------------ 通用道具的摆放清单
+/** 一件通用道具摆在哪。坐标是参考坐标（和上面的陈设同一套），摆的时候要和陈设做同样的平移。 */
+export interface WorkshopProp {
+  /** 道具名：CARGO 表里的名字（props/cargo.ts），或者 'forklift'（forklift.ts 的 buildForklift）。 */
+  name: string;
+  x: number; z: number;
+  /** 绕竖轴的转角（弧度），和 PropField.place 的约定一样。 */
+  yaw: number;
+  /** 底面的高度，不写就是地坪面 0.03。 */
+  y?: number;
+  /** 传给道具函数的参数（都应该再加上 interior: true）。 */
+  args?: Record<string, unknown>;
+  /** 不登记碰撞（叠在别的道具顶上的那几件）。 */
+  noCollide?: boolean;
+  /** 还没有模型的道具（工具车、气瓶架）。 */
+  missing?: boolean;
+}
+
+/**
+ * 车间里的通用道具该摆在哪（照参考的摆法）。这些东西不归这个文件搭，这里只是一份清单，给摆放的代码照着用。
+ * 和参考不一样的只有一处：夹层下面那只绿桶从 z = −27 挪到 −26.9，原位置会蹭到北墙的刚架柱。
+ */
+export const WORKSHOP_PROPS: WorkshopProp[] = [
+  // 北墙两组货架之间的空当：一摞托盘，顶上叠一堆纸箱
+  { name: 'pallet_stack', x: 0, z: -26.9, yaw: 0.1, args: { seed: 3 } },
+  { name: 'cardboard_boxes', x: -0.05, z: -26.9, yaw: 0.5, y: 1.182, args: { seed: 4 }, noCollide: true },
+  // 车间中部偏东
+  { name: 'crate_stack', x: 2.9, z: -15.9, yaw: 0.12, args: { seed: 11 } },
+  { name: 'crate_wood', x: 4.15, z: -16.3, yaw: -0.25, args: { seed: 12 } },
+  { name: 'pallet_stack', x: 2, z: -17.3, yaw: 1.45, args: { seed: 13 } },
+  { name: 'ibc_tote', x: 6.9, z: -19.6, yaw: 0.1, args: { seed: 14 } },
+  { name: 'barrel', x: 7.9, z: -18.5, yaw: 0, args: { seed: 15, color: 'blue' } },
+  { name: 'barrel', x: 6, z: -18.4, yaw: 0.6, args: { seed: 16, color: 'red' } },
+  // 中部偏西
+  { name: 'ibc_tote', x: -7.6, z: -16.4, yaw: -0.08, args: { seed: 17 } },
+  { name: 'barrel', x: -8.6, z: -15.3, yaw: 0, args: { seed: 18 } },
+  { name: 'barrel', x: -7.9, z: -15, yaw: 0.9, args: { seed: 19, color: 'yellow' } },
+  // 东南角：沙袋、叉车、工具车、气瓶架、一只托盘上放着纸箱
+  { name: 'sandbags', x: 10.2, z: -16.4, yaw: HALF_PI + 0.05, args: { seed: 20 } },
+  { name: 'forklift', x: 8.3, z: -13.9, yaw: 2.75, args: { seed: 21 } },
+  { name: 'toolbox_cart', x: 6, z: -12.2, yaw: 0.15, args: { seed: 22 }, missing: true },
+  { name: 'gas_cylinders', x: 10.9, z: -11.9, yaw: 0, args: { seed: 23 }, missing: true },
+  { name: 'pallet', x: 10.6, z: -13.6, yaw: 0.2, args: { seed: 33 } },
+  { name: 'cardboard_boxes', x: 10.6, z: -13.6, yaw: 0.3, y: 0.174, args: { seed: 34 }, noCollide: true },
+  // 西南角
+  { name: 'tarp_cargo', x: -13.2, z: -13.2, yaw: 0.12, args: { seed: 24 } },
+  { name: 'tire_stack', x: -15, z: -15.6, yaw: 0, args: { seed: 25 } },
+  { name: 'tire_stack', x: -14.9, z: -16.6, yaw: 0.4, args: { seed: 26 } },
+  { name: 'jerry_can', x: -9.3, z: -12, yaw: 0.4, args: { seed: 31 } },
+  { name: 'jerry_can', x: -9.7, z: -12.1, yaw: 1.2, args: { seed: 32 } },
+  // 夹层下面
+  { name: 'cardboard_boxes', x: -14.6, z: -26.6, yaw: 0.2, args: { seed: 27 } },
+  { name: 'crate_wood', x: -12.4, z: -26.9, yaw: -0.1, args: { seed: 28 } },
+  { name: 'barrel', x: -10.9, z: -26.9, yaw: 0, args: { seed: 29, color: 'green' } },
+  { name: 'crate_wood', x: -14.7, z: -24.6, yaw: 0.3, args: { seed: 30 } },
+  // 南门内两侧的路锥
+  { name: 'traffic_cone', x: -6.6, z: -12.2, yaw: 0, args: { seed: 35 } },
+  { name: 'traffic_cone', x: -0.4, z: -12.3, yaw: 0, args: { seed: 36 } },
+];
