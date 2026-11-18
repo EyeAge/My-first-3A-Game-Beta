@@ -131,10 +131,9 @@ export class Weapon {
           const ground = this.hit.ny > 0.5 && _p.y < 0.05;
           const surface = this.hit.surface ?? (ground ? 'concrete' : 'metal');
           effects.impact(_p, this.hit.nx, this.hit.ny, this.hit.nz, surface, d);
-          // 弹孔：金属是带亮边的孔，水泥和木头是崩坑（木头上的小一些），沙袋、轮胎只留一小块发黑的印子
-          if (surface === 'metal') decals.add(_p, this.hit.nx, this.hit.ny, this.hit.nz, 'metal');
-          else if (surface === 'dirt' || surface === 'rubber') decals.add(_p, this.hit.nx, this.hit.ny, this.hit.nz, 'scorch', 0.2, 0.8);
-          else decals.add(_p, this.hit.nx, this.hit.ny, this.hit.nz, 'ground', surface === 'wood' ? 0.16 + Math.random() * 0.06 : undefined);
+          // 弹孔：金属是翻着卷边、露出铁皮的孔，水泥是崩坑，木头是带木刺的新茬，沙袋、轮胎只留一小块发黑的印子
+          if (surface === 'dirt' || surface === 'rubber') decals.add(_p, this.hit.nx, this.hit.ny, this.hit.nz, 'soot', 0.2, 0.8);
+          else decals.add(_p, this.hit.nx, this.hit.ny, this.hit.nz, surface);
           const [vol, pan] = enemies.spatial(_p);
           if (vol > 0.55) audio.impact(vol * 0.6, pan);
         }

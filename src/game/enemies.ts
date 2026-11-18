@@ -1177,7 +1177,7 @@ export class Enemies {
     else if (wall < 200) {
       effects.sparks(_b, _hit.nx, _hit.ny, _hit.nz, 5);
       effects.dust(_b, _hit.nx, _hit.ny, _hit.nz);
-      if (!(_hit.ny > 0.5 && _b.y < 0.05 && _b.x > QUAY_X + 0.8)) decals.add(_b, _hit.nx, _hit.ny, _hit.nz, _hit.ny > 0.5 && _b.y < 0.05 ? 'ground' : 'metal');
+      if (!(_hit.ny > 0.5 && _b.y < 0.05 && _b.x > QUAY_X + 0.8)) decals.add(_b, _hit.nx, _hit.ny, _hit.nz, _hit.ny > 0.5 && _b.y < 0.05 ? 'concrete' : 'metal');
       const [v2, p2] = this.spatial(_b);
       if (v2 > 0.55) audio.impact(v2 * 0.6, p2);
     }
@@ -1590,7 +1590,7 @@ export class Enemies {
         if (sea) effects.splash(_b.set(ex, -1.7, ez), 0.8);
         else {
           effects.sparks(_a, _hit.nx, _hit.ny, _hit.nz, 5);
-          decals.add(_a, _hit.nx, _hit.ny, _hit.nz, 'scorch');
+          decals.add(_a, _hit.nx, _hit.ny, _hit.nz, 'soot', 0.45);   // 能量弹不打洞，只烧出一块发黑的印子
           const [vol, pan] = this.spatial(_a);
           if (vol > 0.5) audio.impact(vol, pan);
         }
@@ -1624,7 +1624,7 @@ export class Enemies {
     const [vol, pan] = this.spatial(c);
     if (vol > MIN_VOL) audio.explode(vol, pan);
     const ground = this.surfaceBelow(c.x, c.y + 0.3, c.z);
-    if (c.y - ground < 1.4 * size && c.x < QUAY_X + 0.8) decals.add(_a.set(c.x, ground, c.z), 0, 1, 0, 'scorch');   // 离地近：地上留一块焦痕
+    if (c.y - ground < 1.4 * size && c.x < QUAY_X + 0.8) decals.add(_a.set(c.x, ground, c.z), 0, 1, 0, 'scorch', 2.3 * size, 0.92);   // 离地近：地上留一块焦痕，直径是爆炸规模的 2.3 倍
     for (const o of this.list) {
       if (!o.alive) continue;
       const oy = o.pos.y + (o.kind === 'gull' ? 0 : o.spec.eyeY * 0.6);

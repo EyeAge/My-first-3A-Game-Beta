@@ -64,6 +64,7 @@ async function boot() {
   effects.setInterior(port.interior);    // 车间里的烟看不到天，不该被整片天空照亮
   renderer.overlay = effects.overlay;    // 粒子不和场景一起画：等场景和空气都合成完再盖上去，这样它能查到场景的深度（见 post.ts）
   const decals = new Decals();
+  decals.interior = port.interior;       // 车间里的弹孔，露出来的铁皮不该映出一片天
   scene.add(decals.mesh);
   const audio = new GameAudio();
   audio.setVolume(settings.volume);
@@ -247,7 +248,6 @@ async function boot() {
     }
 
     effects.update(dt, camera.position);
-    decals.update(dt);
     port.update(t, state === 'menu' ? camera.position : player.pos);
     sea.update(t);
     sky.uniforms.uTime.value = t;
