@@ -282,10 +282,16 @@ export class Mission {
     if (this.cut >= 3) { this.pursuitT = DIRECTOR.pursuitFirst; this.pursuitLeft = DIRECTOR.pursuitExtra; }
   }
 
+  /**
+   * 行动评级（算法照参考）：三项加起来 0~5 分，对应六个称号。
+   *   用时：5 分半以内 2 分，8 分钟以内 1 分（参考是 4 分半 / 6 分 40 秒；我们的路线比它长三百多米，各放宽了一分钟左右）；
+   *   命中率：五成以上 2 分，三成以上 1 分；
+   *   一次都没倒下：1 分。
+   */
   rating() {
     const acc = this.stats.shots ? this.stats.hits / this.stats.shots : 0;
-    const score = acc * 45 + Math.max(0, 35 - this.time / 14) + Math.max(0, 20 - this.retries * 10);
-    return score >= 78 ? '完美突击' : score >= 62 ? '精准果断' : score >= 48 ? '火力全开' : score >= 34 ? '稳扎稳打' : '险象环生';
+    const score = (this.time < 330 ? 2 : this.time < 480 ? 1 : 0) + (acc >= 0.5 ? 2 : acc >= 0.3 ? 1 : 0) + (this.retries === 0 ? 1 : 0);
+    return ['险象环生', '火力全开', '稳扎稳打', '干净利落', '精准果断', '完美突击'][score];
   }
   result() {
     return { time: this.time, accuracy: this.stats.shots ? this.stats.hits / this.stats.shots : 0, kills: this.stats.kills, retries: this.retries, cut: this.cut, rating: this.rating() };
