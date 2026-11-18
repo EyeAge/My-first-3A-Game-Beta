@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { clamp, fbm, mulberry32, vnoise } from '../core/math';
+import { clamp, fbm, lerp, mulberry32, vnoise } from '../core/math';
+import { decal, label, labelMaterial, type Patch } from '../render/labels';
 import { surface, type SurfaceName } from '../render/surfaces';
 import { Kit, type LocalBox, type PropModel, type Rgb, type V3 } from './kit';
 
@@ -9,7 +10,7 @@ import { Kit, type LocalBox, type PropModel, type Rgb, type V3 } from './kit';
 // 集装箱是这个游戏里占画面最多的东西，所以值得把它做细。这个文件只管"一只箱子长什么样"，
 // 几百只箱子怎么摆、怎么画得动，在 containerfield.ts 里。
 //
-// 做法上有两个要点：
+// 做法上有三个要点：
 //
 //   1. 波纹是真的几何。侧板、前端板、箱顶都按真实的梯形截面折出来，顶点只放在折线上（一个周期 4 个点），
 //      平的地方不浪费三角形。斜阳一照，每道棱自己就有明暗。
@@ -17,6 +18,9 @@ import { Kit, type LocalBox, type PropModel, type Rgb, type V3 } from './kit';
 //   2. 整只箱子的漆只用一种白色材质。箱子是红是蓝，由"实例颜色"乘上去（见 containerfield.ts）；
 //      哪里脏、哪里锈、哪里被撞瘪掉了漆，全部写在顶点色里 —— 顶点色是一个乘数，1 是原色，0.5 是暗一半。
 //      这样不需要任何一张"箱体贴图"，而每只箱子的锈迹位置都可以不一样（由 seed 决定）。
+//
+//   3. 喷字和污迹是贴在表面外 3 毫米的小面片。侧板上的字不是一张平板，而是沿着波纹截面折出来的带子，
+//      斜着看的时候字会跟着棱起伏。
 //
 // 坐标约定：长边沿 x，箱门在 +x 端，前端板在 -x 端；宽沿 z；底面在 y=0，原点在占地中心。
 
@@ -54,6 +58,8 @@ export const SHIPPING_LINES: readonly { name: string; decal: string; darkInk?: b
   { name: '激战联运', decal: 'logo_d' },
 ];
 
+/** 箱主代号（四个字母 + 六位箱号 + 一位校验码）。每个 seed 固定用其中一个。 */
+const OWNER_CODES = ['SLTU 482915 7', 'HBMU 307144 2', 'NRDU 665201 9', 'OKTU 119873 4', 'VSLU 850362 1', 'TQLU 274590 6'];
 /** seed 只取除以 6 的余数：凹坑和锈条一共 6 套花样。花样太多的话每一套都要单独存一份几何，内存不划算。 */
 export const SEED_VARIANTS = 6;
 
@@ -223,6 +229,8 @@ export function containerVariant(o: ContainerOpts): ContainerVariant {
 interface Dent { side: number; x: number; y: number; radius: number; depth: number }
 /** 从顶梁淌下来的一道锈（写进顶点色的那种）。 */
 interface RustStreak { side: number; x: number; halfWidth: number; strength: number }
+/** 一条锈水或者污水的贴片。 */
+interface Stain { side: number; x: number; height: number; width: number; rust: boolean }
 type Plan = ReturnType<typeof makePlan>;
 
 /**
@@ -287,6 +295,13 @@ function makePlan(v: ContainerVariant) {
   for (let i = 0, n = Math.round((L / 2.2) * (0.5 + wear) * (0.6 + rng())) * 2; i < n; i++) {
     streaks.push({ side: i % 2 ? 1 : -1, x: (rng() * 2 - 1) * (half - 0.3), halfWidth: 0.05 + rng() * 0.12, strength: 0.4 + rng() * 0.6 });
   }
+  // ---- 锈水 / 污水的贴片：六成是锈，四成是黑灰色的污水
+  const stains: Stain[] = [];
+  for (const side of [-1, 1]) for (let i = 0, n = Math.round((1 + rng() * 2) * (0.4 + wear) * (L > 7 ? 1.6 : 1)); i < n; i++) {
+    const rust = rng() < 0.6, height = 0.5 + rng() * 0.7;
+    stains.push({ side, rust, height, width: clamp(height * 0.5, 0.16, 0.5), x: (rng() * 2 - 1) * (half - 0.6) });
+  }
+
   /**
    * 漆面的基础明暗，箱体色的零件都用它：
    *   · 一层一米多宽的深浅起伏（旧箱子起伏更大）和一层十几厘米的细碎起伏；
@@ -322,25 +337,57 @@ function makePlan(v: ContainerVariant) {
   };
 
   const sideKnots = ribKnots(sideFrom, sideTo, SIDE_RIB, sideFrom + 0.02);
+  /** 侧板上某一列（x 是一个折点）在高度 y 处离中线多远：沿着这一列的顶点，在相邻两排之间线性插值。 */
+  const columnZ = (x: number, y: number, side: number) => {
+    const rs = rows(x, side);
+    let j = 0;
+    while (j < rs.length - 2 && y > rs[j + 1]) j++;
+    const t = clamp((y - rs[j]) / (rs[j + 1] - rs[j]), 0, 1);
+    return PANEL_Z - ribDepth(x - (sideFrom + 0.02), SIDE_RIB) - lerp(dentAt(x, rs[j], side), dentAt(x, rs[j + 1], side), t);
+  };
+  /**
+   * 侧板表面在 (x, y) 处离中线多远。贴字的带子要严丝合缝地浮在侧板外面，所以这里不是重新算一遍凹坑的公式，
+   * 而是照着侧板网格的样子算：先找到 x 左右两个折点所在的列，各自沿列插值，再在两列之间插值 —— 侧板的三角形就是这么连的。
+   */
+  const surfaceAt = (x: number, y: number, side: number) => {
+    let i = 0;
+    while (i < sideKnots.length - 2 && x > sideKnots[i + 1][0]) i++;
+    const xa = sideKnots[i][0], xb = sideKnots[i + 1][0], t = clamp((x - xa) / (xb - xa), 0, 1);
+    if (t < 1e-6) return columnZ(xa, y, side);
+    if (t > 1 - 1e-6) return columnZ(xb, y, side);
+    return lerp(columnZ(xa, y, side), columnZ(xb, y, side), t);
+  };
 
-  return { v, spec, L, H, half, top, wear, shift, dents, streaks, rows, dentAt, shade, sidePaint, roofPaint, sideFrom, sideTo, sideKnots };
+  return { v, spec, L, H, half, top, wear, shift, dents, streaks, stains, rows, dentAt, shade, sidePaint, roofPaint, surfaceAt, sideFrom, sideTo, sideKnots };
 }
 
 // ====================================================================== 材质
 
+let marksMaterial: THREE.Material | null = null;
 /**
  * 箱子用到的几种材质。
  *   body   箱体漆：白色、开顶点色。箱子的颜色由实例颜色乘上去，所以几百只箱子、八种颜色只要这一个材质
  *   inside 开门箱的内壁：同一种漆，但标成"室内" —— 箱子里淋不到雨，不该有水珠和湿漉漉的反光
  *   metal  镀锌件（锁杆、铰链销、把手），深色的孔也借用它 —— 它们都不跟着箱体颜色变
  *   wood   箱内的木地板（同样是室内）
+ *   marks  喷字、船公司标、合格牌、锈水条：全场共用的那张文字 / 贴纸图集
  */
 export function containerMaterials() {
+  if (!marksMaterial) {
+    // 图集的材质克隆一份（贴图还是同一张），只多加一条 alphaTest：不透明度低于 2% 的像素直接不画。
+    // 图集里每块图案的透明处都垫着一层 1.2% 的主色（为了缩小时不出黑边）。贴在浅色的东西上看不出来；
+    // 但深红、深蓝的箱子很暗，三米多宽的一块标叠上 1% 的白，会泛出一整块长方形的灰印子，所以把这层垫色丢掉
+    const m = labelMaterial().clone();
+    m.alphaTest = 0.02;
+    m.name = 'container-marks';
+    marksMaterial = m;
+  }
   return {
     body: surface(BODY, { vertexColors: true, color: 0xffffff }),
     inside: surface(BODY, { vertexColors: true, color: 0xffffff, interior: true }),
     metal: surface('steel_galv', { vertexColors: true }),
     wood: surface('wood_pallet', { vertexColors: true, interior: true }),
+    marks: marksMaterial,
   };
 }
 
@@ -534,6 +581,101 @@ export function containerBoxes(size: ContainerSize, doors = 0): LocalBox[] {
   return boxes;
 }
 
+// ====================================================================== 精模：喷字和污迹
+
+/** 一只箱子身上的五行喷字（在全场共用的文字图集里）：箱主代号、箱型代码是镂空的喷字，三行重量是普通的小字。 */
+function markLabels(v: { size: ContainerSize; seed: number }) {
+  const spec = CONTAINER_SIZES[v.size];
+  const stencil = { color: 'white', font: 'stencil', distress: 0.3 } as const, small = { color: 'white', font: 'sans', distress: 0.2 } as const;
+  return {
+    owner: label(OWNER_CODES[v.seed % OWNER_CODES.length], stencil),
+    type: label(spec.typeCode, stencil),
+    gross: label(`最大总重 ${spec.gross} 千克`, small),
+    weights: label(`皮重 ${spec.tare} 千克  净重 ${spec.net} 千克`, small),
+    cube: label(`容积 ${spec.cube} 立方米`, small),
+  };
+}
+/** 贴纸图集里和箱子有关的几张：四家船公司的标、门上的安全合格牌、高箱门顶的警示条、锈水条、污水条。 */
+function markDecals(brand: number) {
+  return {
+    logo: decal(SHIPPING_LINES[brand % SHIPPING_LINES.length].decal),
+    plate: decal('csc_plate'), caution: decal('caution_stripes'), rust: decal('rust_run'), grime: decal('grime_streak'),
+  };
+}
+/**
+ * 把集装箱要用的字和贴纸一次画进图集（18 行字 + 8 张贴纸）。
+ * 图集每添一块新东西，整张 2048×2048 的图就要重新传给显卡一次；如果等到某种箱子第一次走近时才画它的字，
+ * 游戏中途就会一下一下地卡。所以在开场搭场景的时候先全部画完。
+ */
+export function prepareContainerMarks() {
+  for (let brand = 0; brand < SHIPPING_LINES.length; brand++) markDecals(brand);
+  for (const size of [20, 40, 'hc'] as const) for (let seed = 0; seed < SEED_VARIANTS; seed++) markLabels({ size, seed });
+}
+
+function buildMarks(plan: Plan): THREE.BufferGeometry | null {
+  const { v, H, half: p, top } = plan, hc = v.size === 'hc';
+  const mat = containerMaterials().marks, art = markDecals(v.brand);
+  const k = new Kit('container-marks', v.seed);
+  const text = markLabels(v), owner = text.owner, type = text.type, logo = art.logo;
+  const remap = (g: THREE.BufferGeometry, patch: Patch) => {
+    const uv = g.getAttribute('uv'), [u0, v0, u1, v1] = patch.uv;
+    for (let i = 0; i < uv.count; i++) uv.setXY(i, u0 + (u1 - u0) * uv.getX(i), v0 + (v1 - v0) * uv.getY(i));
+    return g;
+  };
+
+  const nearestKnot = (x: number) => plan.sideKnots.reduce((best, kn) => (Math.abs(kn[0] - x) < Math.abs(best - x) ? kn[0] : best), plan.sideKnots[0][0]);
+  /**
+   * 侧板上的一条"带子"：高 h，宽按图案的宽高比算（超过 maxW 就整体缩小）。中心在 (cx, cy)。
+   * 带子沿着波纹截面折，浮在侧板表面外 3 毫米；侧板在哪几列为凹坑加了顶点，带子在那几列也跟着加，所以坑里的字是跟着凹进去的。
+   * cx 按"从外面看"的习惯给：两侧是镜像的，-z 那一侧实际的 x 要反过来，贴图也要左右翻一下，字才是正的。
+   */
+  const strip = (patch: Patch, side: number, cx: number, cy: number, h: number, maxW = Infinity, w = h * patch.aspect) => {
+    if (w > maxW) { h *= maxW / w; w = maxW; }
+    const left = side > 0 ? cx - w / 2 : -(cx + w / 2), from = Math.max(plan.sideFrom, left), to = Math.min(plan.sideTo, left + w);
+    if (to - from < 0.02) return;
+    const y0 = cy - h / 2, y1 = cy + h / 2, [u0, v0, u1, v1] = patch.uv;
+    // 带子两头的那一列不在折点上，它借用离它最近的折点的排
+    const rows = (x: number) => [y0, ...plan.rows(nearestKnot(x), side).filter((y) => y > y0 + 0.01 && y < y1 - 0.01), y1];
+    k.add(mat, ribbedSheet(ribKnots(from, to, SIDE_RIB, plan.sideFrom + 0.02), rows, (x, _rib, y) => [x, y, side * (plan.surfaceAt(x, y, side) + 0.003)], [0, 0, side], (q) => {
+      const s = (q[0] - left) / w;
+      return [u0 + (u1 - u0) * (side > 0 ? s : 1 - s), v0 + ((v1 - v0) * (q[1] - y0)) / h];
+    }), { raw: true, cast: false });
+  };
+  for (const side of [-1, 1]) {
+    const logoH = Math.min(H * 0.4, 1.05), logoW = Math.min(logoH * logo.aspect, v.size === 20 ? 2.2 : 3.4);
+    strip(logo, side, v.size === 20 ? -0.75 : -p * 0.42, H * 0.52, logoW / logo.aspect);          // 船公司标：侧板中间偏前
+    strip(owner, side, p - 0.3 - Math.min(0.14 * owner.aspect, 1.9) / 2, H - 0.32, 0.14, 1.9);   // 箱主代号：右上角，右边对齐到离门端 0.3 米
+    strip(type, side, p - 0.3 - Math.min(0.11 * type.aspect, 0.6) / 2, H - 0.52, 0.11, 0.6);     // 箱型代码：在它下面
+  }
+  // 锈水 / 污水条：顶端贴着上侧梁，往下淌
+  for (const s of plan.stains) strip(s.rust ? art.rust : art.grime, s.side, s.x, top - s.height / 2 - 0.005, s.height, Infinity, s.width);
+
+  // ---- 门上的字：平的面片，贴在压型凸起的顶面外 2.5 毫米
+  const doorTop = H - 0.124, ribs = hc ? 7 : 6, y0 = DOOR_Y0 + 0.085, pitch = (doorTop - 0.085 - y0) / ribs;
+  const ribY = (i: number) => y0 + (i + 0.5) * pitch; // 第 i 道凸起的中心高度（从下往上数）
+  for (const side of [1, -1]) {
+    k.push([p - 0.066, 0, side * HINGE_Z], [0, -side * doorAngle(v.doors, side), 0]);
+    const put = (patch: Patch, h: number, y: number, d: number, maxW: number) => {
+      let w = h * patch.aspect;
+      if (w > maxW) { h *= maxW / w; w = maxW; }
+      k.add(mat, remap(new THREE.PlaneGeometry(w, h), patch), { raw: true, cast: false }, xform([0.0335, y, -side * d], [0, Math.PI / 2, 0]));
+    };
+    if (side < 0) { // -z 那扇（站在门外看是右门）：箱主代号、箱型代码、三行重量
+      put(owner, 0.115, ribY(ribs - 1), LEAF_W / 2, LEAF_W - 0.24);
+      put(type, 0.1, ribY(ribs - 2), LEAF_W / 2 + 0.2, 0.4);
+      put(text.gross, 0.052, ribY(ribs - 3) + 0.062, LEAF_W / 2 - 0.01, 0.44);
+      put(text.weights, 0.045, ribY(ribs - 3), LEAF_W / 2 - 0.01, 0.44);
+      put(text.cube, 0.045, ribY(ribs - 3) - 0.062, LEAF_W / 2 - 0.01, 0.44);
+    } else {        // +z 那扇（左门）：船公司标、安全合格牌；高箱的门顶再贴一条黄黑斜纹（提醒吊车司机这只箱子超高）
+      put(logo, 0.2, ribY(ribs - 1), LEAF_W / 2, LEAF_W - 0.36);
+      put(art.plate, 0.17, ribY(1), LEAF_W / 2 + 0.05, 0.36);
+      if (hc) put(art.caution, 0.1, doorTop - 0.04, LEAF_W / 2, LEAF_W - 0.1);
+    }
+    k.pop();
+  }
+  return (k.finish({ grime: 0 }).group.children[0] as THREE.Mesh | undefined)?.geometry ?? null;
+}
+
 // ====================================================================== 对外：带缓存的几何
 
 export interface ContainerDetail {
@@ -545,10 +687,12 @@ export interface ContainerDetail {
   inside: THREE.BufferGeometry | null;
   /** 木地板，只有开门的箱子有。 */
   wood: THREE.BufferGeometry | null;
+  /** 喷字、船公司标、合格牌、锈水条（贴在表面外 3 毫米的面片）。 */
+  marks: THREE.BufferGeometry | null;
   boxes: LocalBox[];
   triangles: number;
 }
-const plans = new Map<string, Plan>(), details = new Map<string, ContainerDetail>();
+const plans = new Map<string, Plan>(), cores = new Map<string, Core>(), details = new Map<string, ContainerDetail>();
 const coreKey = (v: ContainerVariant) => `${v.size}|${v.seed}|${v.wear}|${v.doors}`;
 function planOf(v: ContainerVariant) {
   const key = coreKey(v);
@@ -558,14 +702,17 @@ function planOf(v: ContainerVariant) {
 }
 const triangles = (g: THREE.BufferGeometry | null) => (g ? (g.index ? g.index.count : g.getAttribute('position').count) / 3 : 0);
 
-/** 一个变体的精模。同样的参数只搭一次。 */
+/** 一个变体的精模。同样的参数只搭一次；只是船公司不同的两个变体，箱体那部分几何是共用的。 */
 export function containerDetail(o: ContainerOpts): ContainerDetail {
-  const v = containerVariant(o), key = coreKey(v);
-  let d = details.get(key);
+  const v = containerVariant(o), key = coreKey(v), full = `${key}|${v.brand}`;
+  let d = details.get(full);
   if (!d) {
-    const core = buildCore(planOf(v));
-    d = { ...core, triangles: triangles(core.body) + triangles(core.metal) + triangles(core.inside) + triangles(core.wood) };
-    details.set(key, d);
+    const plan = planOf(v);
+    let core = cores.get(key);
+    if (!core) cores.set(key, (core = buildCore(plan)));
+    const marks = buildMarks(plan);
+    d = { ...core, marks, triangles: triangles(core.body) + triangles(core.metal) + triangles(core.inside) + triangles(core.wood) + triangles(marks) };
+    details.set(full, d);
   }
   return d;
 }
@@ -591,7 +738,7 @@ export function containerMeshes(d: ContainerDetail, color: THREE.ColorRepresenta
     mesh.castShadow = true;
     group.add(mesh);
   }
-  for (const [geometry, material] of [[d.metal, mats.metal], [d.wood, mats.wood]] as const) {
+  for (const [geometry, material] of [[d.metal, mats.metal], [d.wood, mats.wood], [d.marks, mats.marks]] as const) {
     if (!geometry) continue;
     const mesh = new THREE.Mesh(geometry, material);
     mesh.receiveShadow = true;
