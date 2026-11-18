@@ -1,15 +1,499 @@
 import * as THREE from 'three';
-import { fbm, mulberry32, vnoise } from '../core/math';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { clamp, fbm, mulberry32, vnoise } from '../core/math';
+import { surface, type SurfaceName } from '../render/surfaces';
+import { Kit, type LocalBox, type PropModel, type Rgb, type V3 } from './kit';
 
-// 集装箱：真的波纹板几何 + 分层贴图。
+// 集装箱。
 //
-// 以前的箱子是一个方盒子贴一张"画着波纹"的图，侧光一打就露馅。现在侧板、前端板、箱门都是按真实截面
-// 折出来的梯形波纹，角柱、上下纵梁、角件也是立体的，所以灯光能在每一道棱上勾出明暗。
+// 集装箱是这个游戏里占画面最多的东西，所以值得把它做细。这个文件只管"一只箱子长什么样"，
+// 几百只箱子怎么摆、怎么画得动，在 containerfield.ts 里。
 //
-// 贴图分两层画，最后合成一张：
-//   · 漆面层：灰度的"漆"，会被每个箱子自己的颜色染色（一张图就能出十种颜色的箱子）
-//   · 覆盖层：不该被染色的东西 —— 白色喷字、黄黑警示贴、铁锈、刮掉漆露出的底材
-// 合成后贴图的 alpha 通道记录"这里有多少是漆"，着色器按它决定染不染色。
+// 做法上有两个要点：
+//
+//   1. 波纹是真的几何。侧板、前端板、箱顶都按真实的梯形截面折出来，顶点只放在折线上（一个周期 4 个点），
+//      平的地方不浪费三角形。斜阳一照，每道棱自己就有明暗。
+//
+//   2. 整只箱子的漆只用一种白色材质。箱子是红是蓝，由"实例颜色"乘上去（见 containerfield.ts）；
+//      哪里脏、哪里锈、哪里被撞瘪掉了漆，全部写在顶点色里 —— 顶点色是一个乘数，1 是原色，0.5 是暗一半。
+//      这样不需要任何一张"箱体贴图"，而每只箱子的锈迹位置都可以不一样（由 seed 决定）。
+//
+// 坐标约定：长边沿 x，箱门在 +x 端，前端板在 -x 端；宽沿 z；底面在 y=0，原点在占地中心。
+
+// ====================================================================== 规格和常量
+
+/** 三种规格：20 尺、40 尺、40 尺高箱。 */
+export type ContainerSize = 20 | 40 | 'hc';
+export interface ContainerSpec {
+  /** 长、高（米）。宽三种规格都一样。 */
+  length: number; height: number;
+  /** 喷在箱门上的箱型代码和重量数据。 */
+  typeCode: string; gross: string; tare: string; net: string; cube: string;
+}
+export const CONTAINER_WIDTH = 2.438;
+export const CONTAINER_SIZES: Record<ContainerSize, ContainerSpec> = {
+  20: { length: 6.06, height: 2.59, typeCode: '22G1', gross: '30,480', tare: '2,230', net: '28,250', cube: '33.2' },
+  40: { length: 12.19, height: 2.59, typeCode: '42G1', gross: '32,500', tare: '3,750', net: '28,750', cube: '67.7' },
+  hc: { length: 12.19, height: 2.9, typeCode: '45G1', gross: '32,500', tare: '3,940', net: '28,560', cube: '76.3' },
+};
+
+/** 八种箱体颜色（sRGB 十六进制）。交给 THREE.Color.setHex 时会自动换算到线性空间。 */
+export const CONTAINER_COLORS = {
+  red: 0x7d2219, blue: 0x1f3f66, green: 0x2c5a44, yellow: 0xb98a1c,
+  orange: 0xb3521a, white: 0xb9bbb6, grey: 0x5a6068, teal: 0x1f5d63,
+} as const;
+
+/**
+ * 四家船公司，和它们的标在贴纸图集（render/labels.ts）里的名字。brand 参数就是这个数组的下标。
+ * darkInk：这家的标是藏青色的，只有喷在浅色的箱子上才看得见（摆箱子的时候要避开深色箱体，见 containerfield.ts）。
+ */
+export const SHIPPING_LINES: readonly { name: string; decal: string; darkInk?: boolean }[] = [
+  { name: '激战北航', decal: 'logo_a' },
+  { name: '激战远洋', decal: 'logo_b' },
+  { name: '激战太平洋', decal: 'logo_c', darkInk: true },
+  { name: '激战联运', decal: 'logo_d' },
+];
+
+/** seed 只取除以 6 的余数：凹坑和锈条一共 6 套花样。花样太多的话每一套都要单独存一份几何，内存不划算。 */
+export const SEED_VARIANTS = 6;
+
+const HALF_W = CONTAINER_WIDTH / 2;  // 1.219，半个箱宽
+const PANEL_Z = HALF_W - 0.012;      // 侧板"外平面"（波纹凸出来的那一面）离中线多远
+const PANEL_Y0 = 0.16;               // 侧板和端板的下沿：比下侧梁的顶面（0.17）低 1 厘米，插在梁里，接缝才不漏光
+const HOLE_GAP = 0.004;              // 深色孔的面片浮在表面外 4 毫米。再近的话，四十米外深度缓冲分不清谁在前，两个面会闪烁打架
+
+/**
+ * 箱体漆在材质库里的名字。搭的时候箱体色的零件都按这个名字交给零件箱（零件箱只对"按名字给的"材质做贴图随机挪位）；
+ * 最后真正拿来画的是 containerMaterials().body —— 同一种漆，颜色设成纯白，好让实例颜色原样乘上去。
+ */
+const BODY: SurfaceName = 'paint_white';
+
+// 顶点色用的几个"乘数"。把漆的颜色乘上它，就得到那种脏法的颜色
+const MUD: Rgb = [0.5, 0.44, 0.38];        // 泥：暗一半，并且偏黄褐
+const RUST_TINT: Rgb = [0.62, 0.38, 0.24]; // 淌下来的锈水：红留得多，蓝留得少，所以发红褐
+const BARE: Rgb = [0.66, 0.46, 0.36];      // 撞掉漆以后生的锈
+const HOLE: Rgb = [0.035, 0.035, 0.04];    // 孔洞：几乎全黑
+
+/** 平滑的 0→1 过渡：t 从 a 走到 b 的时候，结果从 0 平滑地升到 1（a 可以比 b 大，那就是反过来）。 */
+const sstep = (a: number, b: number, t: number) => { const u = clamp((t - a) / (b - a), 0, 1); return u * u * (3 - 2 * u); };
+/** 把颜色 c 往 "c 乘以 m" 的方向混合 t 这么多（就地修改）。 */
+const stain = (c: Rgb, m: Rgb, t: number) => { c[0] *= 1 + (m[0] - 1) * t; c[1] *= 1 + (m[1] - 1) * t; c[2] *= 1 + (m[2] - 1) * t; };
+const xform = (pos: V3, rot: V3 = [0, 0, 0]) => new THREE.Matrix4().compose(new THREE.Vector3(...pos), new THREE.Quaternion().setFromEuler(new THREE.Euler(...rot)), new THREE.Vector3(1, 1, 1));
+
+// ====================================================================== 波纹截面
+
+/**
+ * 梯形波纹的一个周期（单位：米）：
+ *
+ *     外平面 flat      内平面
+ *   ‾‾‾‾‾‾‾‾‾‾\      /‾‾ … 下一个周期
+ *              \____/        ↕ depth
+ *          slope    slope
+ *
+ * 先是宽 flat 的外平面，用宽 slope 的斜面降下去 depth 深，走一段内平面，再用同样宽的斜面升回来。
+ */
+interface Corrugation { period: number; depth: number; flat: number; slope: number }
+const SIDE_RIB: Corrugation = { period: 0.278, depth: 0.036, flat: 0.072, slope: 0.068 }; // 侧板：四段差不多一样宽，棱是缓的
+const END_RIB: Corrugation = { period: 0.25, depth: 0.042, flat: 0.07, slope: 0.06 };     // 前端板：更深一点
+const ROOF_RIB: Corrugation = { period: 0.209, depth: 0.02, flat: 0.09, slope: 0.03 };    // 箱顶：浅而密
+
+/** 沿板面走了 t 米（从波纹的起点量起）的地方，板面凹进去多深：0 到 depth。 */
+function ribDepth(t: number, c: Corrugation) {
+  let u = t % c.period;
+  if (u < 0) u += c.period;
+  const inner = c.period - c.flat - 2 * c.slope;
+  if (u <= c.flat) return 0;
+  if (u < c.flat + c.slope) return (c.depth * (u - c.flat)) / c.slope;
+  if (u <= c.flat + c.slope + inner) return c.depth;
+  return c.depth * (1 - (u - c.flat - c.slope - inner) / c.slope);
+}
+/**
+ * from 到 to 这一段板面上所有的"折点"：[位置, 凹深]。
+ * 波纹只在折点处拐弯，折点之间是直的，所以网格的顶点只需要放在折点上。origin 是波纹的起点（第一个外平面从这里开始）。
+ */
+function ribKnots(from: number, to: number, c: Corrugation, origin: number): [number, number][] {
+  const inner = c.period - c.flat - 2 * c.slope;
+  const xs = [from];
+  for (let n = Math.floor((from - origin) / c.period) - 1; n <= Math.ceil((to - origin) / c.period) + 1; n++) {
+    for (const o of [0, c.flat, c.flat + c.slope, c.flat + c.slope + inner]) {
+      const x = origin + n * c.period + o;
+      if (x > from + 1e-4 && x < to - 1e-4) xs.push(x);
+    }
+  }
+  xs.push(to);
+  return xs.map((x) => [x, ribDepth(x - origin, c)]);
+}
+/**
+ * 把一串折点切成几张"板"，每张 n 格（相邻两张共用交界处的那一列折点，所以拼起来没有缝）。
+ * 真的集装箱侧板就是一米来宽的压型钢板一张张焊起来的。这里切开是为了贴图：零件箱会给每个零件的贴图随机挪一个位置，
+ * 一整块 12 米的侧板只算一个零件，2.5 米一铺的漆面贴图就会原样重复五遍 —— 同一块掉漆每隔 2.5 米出现一次；
+ * 切成十来张以后，每张各挪各的，就看不出重复了。接缝落在波纹的折线上，本来就是一道棱，看不出来。
+ */
+function sheets<T>(knots: T[], n: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i + 1 < knots.length; i += n) out.push(knots.slice(i, i + n + 1));
+  return out;
+}
+/** 把一条截面的两头各接长 extra 米（深度照抄端点的）：让板的边插进旁边的梁柱里，接缝处才不漏光。 */
+const embed = (knots: [number, number][], extra: number): [number, number][] => [[knots[0][0] - extra, knots[0][1]], ...knots, [knots[knots.length - 1][0] + extra, knots[knots.length - 1][1]]];
+
+/**
+ * 把"截面折线 × 若干排"铺成一张网格。
+ *   knots  截面上的折点 [位置, 凹深]，每个折点是网格的一"列"
+ *   rows   垂直于截面方向的各排位置。可以是一个固定的列表；也可以是函数，给每一列各自的列表
+ *          （都要从小到大，并且各列的头尾两排相同）—— 侧板上只有凹坑经过的那几列需要多几排顶点
+ *   place  (位置, 凹深, 排的位置, 这一列的第几排) → 顶点坐标
+ *   out    这张板大致朝哪边。三角形的正反面按它统一，调用的人不用操心顶点顺序
+ *   uvOf   可选：按顶点坐标给贴图坐标（文字带子用）
+ *
+ * 相邻两列的排数可以不一样，所以两列之间不是简单地"一格两个三角形"，而是像拉拉链：
+ * 左右两列各有一根手指从下往上爬，每次让下一个点比较低的那一边往上走一步，走一步就连出一个三角形。
+ * 两列排数相同的时候，结果和普通的方格网完全一样。这样连出来的网格没有"丁字缝"（一条长边对着两条短边），不会漏光。
+ */
+function ribbedSheet(knots: [number, number][], rows: number[] | ((u: number) => number[]), place: (u: number, depth: number, v: number, row: number) => V3, out: V3, uvOf?: (p: V3) => [number, number]) {
+  const columns = knots.map(([u, depth]) => {
+    const vs = typeof rows === 'function' ? rows(u) : rows;
+    return { vs, pts: vs.map((v, j) => place(u, depth, v, j)) };
+  });
+  const pos: number[] = [], uv: number[] = [];
+  let facing = 0;
+  const tri = (a: V3, b: V3, c: V3) => {
+    const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2], vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+    facing += (uy * vz - uz * vy) * out[0] + (uz * vx - ux * vz) * out[1] + (ux * vy - uy * vx) * out[2]; // 这个三角形的朝向和 out 一不一致
+    for (const p of [a, b, c]) {
+      pos.push(p[0], p[1], p[2]);
+      if (uvOf) uv.push(...uvOf(p));
+    }
+  };
+  for (let k = 0; k + 1 < columns.length; k++) {
+    const L = columns[k], R = columns[k + 1], m = L.vs.length - 1, n = R.vs.length - 1;
+    for (let i = 0, j = 0; i < m || j < n;) {
+      if (j >= n || (i < m && L.vs[i + 1] <= R.vs[j + 1])) { tri(L.pts[i], R.pts[j], L.pts[i + 1]); i++; }
+      else { tri(L.pts[i], R.pts[j], R.pts[j + 1]); j++; }
+    }
+  }
+  if (facing < 0) { // 朝反了：把每个三角形的后两个顶点对调
+    for (let i = 0; i < pos.length; i += 9) for (let k = 0; k < 3; k++) { const t = pos[i + 3 + k]; pos[i + 3 + k] = pos[i + 6 + k]; pos[i + 6 + k] = t; }
+    for (let i = 0; i < uv.length; i += 6) for (let k = 0; k < 2; k++) { const t = uv[i + 2 + k]; uv[i + 2 + k] = uv[i + 4 + k]; uv[i + 4 + k] = t; }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  if (uvOf) g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  return g; // 不给法线：零件箱会按三角形自己的朝向算，于是每个折面是平的、折线是硬的
+}
+
+/** 长圆孔（两头是半圆的长条）：画在 xy 平面里，朝 +z。角件上的孔、通风口都是它。 */
+function slotShape(w: number, h: number, seg = 2) {
+  const r = Math.min(w, h) / 2, ox = w / 2 - r, oy = h / 2 - r, ring: [number, number][] = [];
+  for (let q = 0; q < 4; q++) for (let s = 0; s <= seg; s++) {
+    const a = ((q + s / seg) * Math.PI) / 2;
+    ring.push([Math.cos(a) * r + (q === 0 || q === 3 ? ox : -ox), Math.sin(a) * r + (q < 2 ? oy : -oy)]);
+  }
+  const pos: number[] = [];
+  ring.forEach((p, i) => { const n = ring[(i + 1) % ring.length]; pos.push(0, 0, 0, p[0], p[1], 0, n[0], n[1], 0); });
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  return g;
+}
+
+// ====================================================================== 一只箱子的"方案"
+
+/** 一个变体：规格、第几套花样（0–5）、做旧程度（0 / 0.5 / 1）、开门程度（0–1，一格 0.1）、哪家船公司（0–3）。 */
+export interface ContainerVariant { size: ContainerSize; seed: number; wear: number; doors: number; brand: number }
+export interface ContainerOpts { size?: ContainerSize; seed?: number; wear?: number; doors?: number; brand?: number }
+
+/** 把随手给的参数规整成有限的几档。档数有限，同一档的箱子才能共用同一份几何。 */
+export function containerVariant(o: ContainerOpts): ContainerVariant {
+  const seed = Math.abs(Math.floor(o.seed ?? 0)) % SEED_VARIANTS;
+  const doors = Math.round(clamp(o.doors ?? 0, 0, 1) * 10) / 10;
+  const brand = Math.abs(Math.floor(o.brand ?? seed)) % SHIPPING_LINES.length;
+  return { size: o.size ?? 40, seed, wear: Math.round(clamp(o.wear ?? 0.5, 0, 1) * 2) / 2, doors, brand };
+}
+
+/** 撞出来的凹坑。 */
+interface Dent { side: number; x: number; y: number; radius: number; depth: number }
+/** 从顶梁淌下来的一道锈（写进顶点色的那种）。 */
+interface RustStreak { side: number; x: number; halfWidth: number; strength: number }
+type Plan = ReturnType<typeof makePlan>;
+
+/**
+ * 动手搭之前先把"方案"定下来：这只箱子哪里有坑、哪里淌锈、每个位置的漆是什么颜色。
+ * 箱体、喷字、远处的简模都要照着同一套数据来做（比如字要跟着坑一起凹进去），所以单独拎出来算一次。
+ */
+function makePlan(v: ContainerVariant) {
+  const spec = CONTAINER_SIZES[v.size], L = spec.length, H = spec.height, half = L / 2, wear = v.wear;
+  const rng = mulberry32(1000 + v.seed * 77 + (v.size === 20 ? 143 : v.size === 40 ? 299 : 481));
+  const shift = v.seed * 9.7;   // 噪声的偏移：每套花样在噪声图上取不同的一块
+  const top = H - 0.06;         // 侧板的上沿
+
+  // ---- 凹坑：做旧越重越多，一般 0–3 个。位置尽量避开喷船公司标的那一段和靠门的那一段
+  const dents: Dent[] = [];
+  const keepOut = [[-half * 0.75, -half * 0.05], [half - 2.2, half]];
+  for (let i = 0, n = Math.round((1 + rng() * 2.4) * (0.4 + wear)); i < n; i++) {
+    const side = rng() < 0.5 ? 1 : -1;
+    let along = 0, tries = 0;
+    do { along = (rng() * 2 - 1) * (half - 0.9); tries++; }
+    while (tries < 8 && keepOut.some(([a, b]) => along > a - 0.4 && along < b + 0.4 && rng() < 0.9));
+    // 两侧的喷字是镜像着排的（从外面看，标都在左边、箱号都在右上角），所以避让的位置也要按侧镜像
+    dents.push({ side, x: side * along, y: 0.45 + rng() * 1.3, radius: 0.22 + rng() * 0.3, depth: 0.025 + rng() * 0.04 });
+  }
+  /**
+   * (x, y) 处被压进去多深。坑的截面是 (1 - q²)²：中间最深，到边缘平滑地归零。竖直方向乘 0.9，坑略微偏高。
+   * 侧板的上下两条边是焊死在侧梁上的，压不动：离边 0.2 米以内，坑深逐渐收到 0。
+   * （不收的话，坑要是靠近底边，侧板的下沿会被整条推进去，和下侧梁之间裂开一道能看穿箱子的缝。）
+   */
+  const dentAt = (x: number, y: number, side: number) => {
+    let d = 0;
+    for (const t of dents) if (t.side === side) {
+      const q = Math.hypot(x - t.x, (y - t.y) * 0.9) / t.radius;
+      if (q < 1) { const k = 1 - q * q; d += t.depth * k * k; }
+    }
+    return d > 0 ? d * sstep(PANEL_Y0, PANEL_Y0 + 0.2, y) * sstep(top, top - 0.2, y) : 0;
+  };
+
+  // ---- 侧板竖向分成哪几排。波纹板本身只要上下两排顶点就够了，中间多出来的三排是给泥污、锈条的渐变留的落脚点。
+  //      凹坑需要更密的顶点才压得圆，但只有坑经过的那几列需要 —— 所以排是"按列"给的：
+  //      某一列如果落在某个坑的范围里，就在坑的高度上下再加七排
+  const sideFrom = -half + 0.085, sideTo = half - 0.135; // 侧板波纹的起止（两头被角柱盖住）
+  const baseRows = [PANEL_Y0, 0.44, 1.25, H - 0.5, top];
+  const rowCache = [new Map<number, number[]>(), new Map<number, number[]>()]; // 两侧各记一张表：同一列会被问很多次
+  const rows = (x: number, side: number) => {
+    const cache = rowCache[side > 0 ? 1 : 0], hit = cache.get(x);
+    if (hit) return hit;
+    const list = baseRows.slice();
+    for (const t of dents) if (t.side === side && Math.abs(x - t.x) < t.radius) {
+      const reach = t.radius / 0.9; // 坑在竖直方向的半径（公式里高度差乘了 0.9）
+      for (const k of [-1, -0.7, -0.35, 0, 0.35, 0.7, 1]) {
+        const y = t.y + reach * k;
+        if (y > PANEL_Y0 + 0.03 && y < top - 0.03 && list.every((r) => Math.abs(r - y) > 0.03)) list.push(y);
+      }
+    }
+    list.sort((a, b) => a - b);
+    cache.set(x, list);
+    return list;
+  };
+
+  // ---- 锈条：从顶梁往下淌，每一道有自己的位置、宽度、浓淡
+  const streaks: RustStreak[] = [];
+  for (let i = 0, n = Math.round((L / 2.2) * (0.5 + wear) * (0.6 + rng())) * 2; i < n; i++) {
+    streaks.push({ side: i % 2 ? 1 : -1, x: (rng() * 2 - 1) * (half - 0.3), halfWidth: 0.05 + rng() * 0.12, strength: 0.4 + rng() * 0.6 });
+  }
+  /**
+   * 漆面的基础明暗，箱体色的零件都用它：
+   *   · 一层一米多宽的深浅起伏（旧箱子起伏更大）和一层十几厘米的细碎起伏；
+   *   · 离地 0.62 米以下逐渐变成泥色 —— 地上溅起来的泥水。
+   */
+  const shade = (x: number, y: number, z: number): Rgb => {
+    let k = 1 + (vnoise(x * 0.9 + shift, y * 1.7 + z * 0.4) - 0.5) * 0.16 * (0.5 + wear);
+    k *= 0.94 + 0.06 * vnoise(x * 6.1 + z * 3.3, y * 5 + shift);
+    const mud = Math.min(1, sstep(0.62, 0.02, y) * (0.45 + 0.5 * wear) * (0.75 + 0.5 * vnoise(x * 2.3 + z, shift)));
+    const c: Rgb = [k, k, k];
+    stain(c, MUD, mud);
+    return c;
+  };
+  /** 侧板的漆：在基础明暗上再加三样 —— 波纹槽里压暗、顶梁淌下来的锈条、凹坑里掉漆发锈。 */
+  const sidePaint = (x: number, y: number, z: number): Rgb => {
+    const side = z > 0 ? 1 : -1, c = shade(x, y, z);
+    // 槽里照不到多少天光，压暗一点（假的"环境光遮蔽"）。凹进去 8 毫米开始暗，34 毫米暗到头
+    const groove = sstep(0.008, 0.034, PANEL_Z - Math.abs(z));
+    c[0] *= 1 - 0.17 * groove; c[1] *= 1 - 0.18 * groove; c[2] *= 1 - 0.18 * groove;
+    const hang = sstep(H - 0.75, top, y); // 锈条只在离箱顶 0.75 米以内，越往上越浓
+    if (hang > 0) for (const s of streaks) if (s.side === side) {
+      const t = Math.abs(x - s.x) / s.halfWidth;
+      if (t < 1) stain(c, RUST_TINT, hang * hang * s.strength * (1 - t * t) * (0.45 + 0.55 * wear));
+    }
+    const dent = dentAt(x, y, side);
+    if (dent > 0.004) stain(c, BARE, Math.min(0.8, dent * 22));
+    return c;
+  };
+  /** 箱顶：单独一套颜色，偏灰、褪色（常年日晒）。groove 是这一点凹进槽里的程度（0–1）：槽里积灰，更暗并且偏黄。 */
+  const roofPaint = (x: number, z: number, groove: number): Rgb => {
+    const fade = 0.78 + 0.3 * vnoise(x * 0.8 + shift, z * 1.1);
+    return [fade * (1 - 0.25 * groove), fade * (1 - 0.3 * groove) * 0.97, fade * (1 - 0.32 * groove) * 0.94];
+  };
+
+  const sideKnots = ribKnots(sideFrom, sideTo, SIDE_RIB, sideFrom + 0.02);
+
+  return { v, spec, L, H, half, top, wear, shift, dents, streaks, rows, dentAt, shade, sidePaint, roofPaint, sideFrom, sideTo, sideKnots };
+}
+
+// ====================================================================== 材质
+
+/**
+ * 箱子用到的两种材质。
+ *   body   箱体漆：白色、开顶点色。箱子的颜色由实例颜色乘上去，所以几百只箱子、八种颜色只要这一个材质
+ *   metal  镀锌件，深色的孔也借用它 —— 它们都不跟着箱体颜色变
+ */
+export function containerMaterials() {
+  return {
+    body: surface(BODY, { vertexColors: true, color: 0xffffff }),
+    metal: surface('steel_galv', { vertexColors: true }),
+  };
+}
+
+// ====================================================================== 精模：箱体
+
+interface Core { body: THREE.BufferGeometry; metal: THREE.BufferGeometry | null; boxes: LocalBox[] }
+
+/** 零件箱的种子：规格、花样、做旧三样都算进去，于是每个变体的贴图挪位都不一样，摞在一起的箱子不会在同一个位置掉同一块漆。 */
+const kitSeed = (v: ContainerVariant) => v.seed + Math.round(v.wear * 2) * 10 + (v.size === 20 ? 0 : v.size === 40 ? 100 : 200);
+/** 零件箱搭完以后，取出某种材质合并成的那一块几何（零件箱给网格起的名字是"模型名:材质名"）。 */
+function partOf(model: PropModel, name: SurfaceName) {
+  const found = (model.group.children as THREE.Mesh[]).filter((c) => c.name.endsWith(`:${name}`)).map((c) => c.geometry);
+  return found.length > 1 ? mergeGeometries(found) : found[0] ?? null; // 同一种材质里有的零件投影、有的不投影时，零件箱会分成两块，这里并回去
+}
+
+function buildCore(plan: Plan): Core {
+  const { v, L, H, half: p, top, shade } = plan;
+  const body = BODY;
+  const k = new Kit('container', kitSeed(v));
+  const paint = { tint: shade };
+  /** 贴一块深色的孔：w × h 的长圆形，贴在 pos，用 rot 转到朝外。 */
+  const hole = (w: number, h: number, pos: V3, rot: V3, shape = slotShape(w, h)) => k.add('steel_galv', shape, { tint: HOLE, cast: false }, xform(pos, rot));
+
+  // ---- 角件：八个角上的铸钢块，吊具和堆码都靠它。每个角件朝外的面上有长圆孔（吊具的转锁从这里插进去）
+  for (const sx of [-1, 1]) for (const up of [0, 1]) for (const sz of [-1, 1]) {
+    const cx = sx * (p - 0.089), cy = up ? H - 0.059 : 0.059, cz = sz * (HALF_W - 0.081);
+    k.box(body, 0.178, 0.118, 0.162, cx, cy, cz, { c: 0.012, ...paint });
+    hole(0.078, 0.052, [cx, cy, sz * (HALF_W + HOLE_GAP)], [0, sz > 0 ? 0 : Math.PI, 0]);
+    hole(0.064, 0.05, [sx * (p + HOLE_GAP), cy, cz], [0, (sx * Math.PI) / 2, 0]);
+    if (up) hole(0.124, 0.064, [cx, H + HOLE_GAP, cz], [-Math.PI / 2, 0, 0]);
+  }
+  // ---- 角柱、上下侧梁
+  for (const sz of [-1, 1]) {
+    k.box(body, 0.085, H - 0.226, 0.15, -p + 0.0465, H / 2, sz * (HALF_W - 0.079), { c: 0.014, ...paint }); // 前角柱：粗
+    k.box(body, 0.14, H - 0.226, 0.056, p - 0.074, H / 2, sz * (HALF_W - 0.032), { c: 0.012, ...paint });   // 门角柱：扁，给门让地方
+    k.box(body, L - 0.2, 0.062, 0.062, -0.02, H - 0.031, sz * (HALF_W - 0.035), { c: 0.008, ...paint });    // 上侧梁
+    k.box(body, L - 0.2, 0.158, 0.05, -0.02, 0.091, sz * (HALF_W - 0.029), { c: 0.008, ...paint });         // 下侧梁
+  }
+  // ---- 前端的上下横梁；门端的门楣、门槛；门楣上那条斜着的挡雨檐
+  k.box(body, 0.062, 0.062, CONTAINER_WIDTH - 0.2, -p + 0.035, H - 0.031, 0, { c: 0.008, ...paint });
+  k.box(body, 0.05, 0.158, CONTAINER_WIDTH - 0.2, -p + 0.029, 0.091, 0, { c: 0.008, ...paint });
+  k.box(body, 0.13, 0.12, CONTAINER_WIDTH - 0.12, p - 0.072, H - 0.06, 0, { c: 0.01, ...paint });
+  k.box(body, 0.13, 0.158, CONTAINER_WIDTH - 0.12, p - 0.072, 0.091, 0, { c: 0.01, ...paint });
+  k.box(body, 0.03, 0.012, CONTAINER_WIDTH - 0.4, p - 0.012, H - 0.125, 0, { c: 0.003, rot: [0, 0, -0.5], ...paint });
+  // ---- 叉槽：只有 20 尺箱有，叉车的货叉从下侧梁上的这两个口子插进去
+  if (v.size === 20) for (const sz of [-1, 1]) for (const x of [-1.025, 1.025]) {
+    hole(0.36, 0.112, [x, 0.075, sz * HALF_W], [0, sz > 0 ? 0 : Math.PI, 0], new THREE.PlaneGeometry(0.36, 0.112)); // 贴在下侧梁外 4 毫米，三条边框比它再凸出一点
+    k.box(body, 0.46, 0.018, 0.012, x, 0.142, sz * (HALF_W - 0.002), { plain: true, ...paint });
+    for (const e of [-1, 1]) k.box(body, 0.018, 0.13, 0.01, x + e * 0.19, 0.078, sz * (HALF_W - 0.003), { plain: true, ...paint });
+  }
+
+  // ---- 两块侧板：波纹截面 × 几排顶点。有坑的地方把顶点往里压。
+  //      板的两头各多伸 2 厘米，插进角柱里面：角柱的棱是倒过角的，板如果刚好只到角柱的边，倒角那里会露出一条能看穿箱子的细缝
+  const sideKnots = plan.sideKnots, sealed = embed(sideKnots, 0.02);
+  for (const side of [-1, 1]) for (const sheet of sheets(sealed, 16)) { // 16 格 = 4 个波纹周期，1.1 米一张
+    k.add(body, ribbedSheet(sheet, (x) => plan.rows(x, side), (x, rib, y) => [x, y, side * (PANEL_Z - rib - plan.dentAt(x, y, side))], [0, 0, side]), { tint: plan.sidePaint });
+  }
+  // ---- 通风器：侧板靠上的小盖板，上面三道细缝。20 尺箱每侧一个，40 尺箱每侧两个
+  for (const sz of [-1, 1]) for (const e of L > 7 ? [-1, 1] : [1]) {
+    const x = sz * e * (p - 0.62), y = H - 0.165;
+    k.box(body, 0.24, 0.1, 0.03, x, y, sz * (PANEL_Z - 0.004), { c: 0.008, ...paint });
+    for (let i = -1; i <= 1; i++) hole(0.18, 0.012, [x, y + i * 0.026, sz * (PANEL_Z + 0.011 + HOLE_GAP)], [0, sz > 0 ? 0 : Math.PI, 0], new THREE.PlaneGeometry(0.18, 0.012));
+  }
+  // ---- 前端板：竖棱沿 z 排开，比侧板的波纹深一点。两边同样插进角柱 2 厘米；
+  //      下沿比侧板多往下伸 6 厘米，藏到前下梁的背后 —— 前下梁只有 5 厘米厚，挡不住波纹凹进去的那一半，不伸下去的话槽底会漏光
+  const endX = -(p - 0.014); // 前端板外平面的 x
+  k.add(body, ribbedSheet(embed(ribKnots(-1.064, 1.064, END_RIB, -1.034), 0.025), [PANEL_Y0 - 0.06, PANEL_Y0, 1.25, top], (z, rib, y) => [endX + rib, y, z], [-1, 0, 0]), {
+    tint: (x, y, z) => { const c = shade(x, y, z), g = sstep(0.008, 0.038, x - endX); return [c[0] * (1 - 0.17 * g), c[1] * (1 - 0.18 * g), c[2] * (1 - 0.18 * g)]; },
+  });
+  // ---- 箱顶：横棱沿 x 排开。20 尺箱在中线多一排顶点并且抬高 6 毫米（顶板略微起拱，好排水）。
+  //      两边压进上侧梁的倒角里 6 毫米，理由同上
+  const roofY = H - 0.008, roofZ = HALF_W - 0.06;
+  for (const sheet of sheets(ribKnots(-p + 0.062, p - 0.13, ROOF_RIB, -p + 0.1), 20)) { // 20 格 = 5 个波纹周期，一米一张
+    k.add(body, ribbedSheet(sheet, L > 7 ? [-roofZ, roofZ] : [-roofZ, 0, roofZ], (x, rib, z) => [x, roofY - rib + (Math.abs(z) < 0.01 ? 0.006 : 0), z], [0, 1, 0]), {
+      tint: (x, y, z) => plan.roofPaint(x, z, sstep(0.004, 0.018, roofY + (Math.abs(z) < 0.01 ? 0.006 : 0) - y)),
+    });
+  }
+  // ---- 箱底：一块朝下的暗板。箱子摞起来、或者被吊在半空的时候，从下面往上看不能看穿
+  k.plane(body, L - 0.06, CONTAINER_WIDTH - 0.06, [0, 0.02, 0], { rot: [Math.PI / 2, 0, 0], tint: 0.3 });
+
+  // 门还没装（下一个提交）：现在从 +x 端能直接看进箱子里
+
+  const model = k.finish({ grime: 0, size: [L, H, CONTAINER_WIDTH], boxes: containerBoxes(v.size) });
+  return { body: partOf(model, BODY)!, metal: partOf(model, 'steel_galv'), boxes: model.boxes };
+}
+
+/** 一只箱子的碰撞盒（箱子自己的坐标）：一个整盒。箱顶踩上去是金属声。 */
+export function containerBoxes(size: ContainerSize): LocalBox[] {
+  const { length, height: H } = CONTAINER_SIZES[size], p = length / 2;
+  return [{ min: [-p, 0, -HALF_W], max: [p, H, HALF_W], surface: 'metal' }];
+}
+
+// ====================================================================== 对外：带缓存的几何
+
+export interface ContainerDetail {
+  /** 箱体漆：唯一要染上箱体颜色的一块。 */
+  body: THREE.BufferGeometry;
+  /** 镀锌件和深色的孔。 */
+  metal: THREE.BufferGeometry | null;
+  boxes: LocalBox[];
+  triangles: number;
+}
+const plans = new Map<string, Plan>(), details = new Map<string, ContainerDetail>();
+const coreKey = (v: ContainerVariant) => `${v.size}|${v.seed}|${v.wear}|${v.doors}`;
+function planOf(v: ContainerVariant) {
+  const key = coreKey(v);
+  let plan = plans.get(key);
+  if (!plan) plans.set(key, (plan = makePlan(v)));
+  return plan;
+}
+const triangles = (g: THREE.BufferGeometry | null) => (g ? (g.index ? g.index.count : g.getAttribute('position').count) / 3 : 0);
+
+/** 一个变体的精模。同样的参数只搭一次。 */
+export function containerDetail(o: ContainerOpts): ContainerDetail {
+  const v = containerVariant(o), key = coreKey(v);
+  let d = details.get(key);
+  if (!d) {
+    const core = buildCore(planOf(v));
+    d = { ...core, triangles: triangles(core.body) + triangles(core.metal) };
+    details.set(key, d);
+  }
+  return d;
+}
+
+/**
+ * 给一块"要染箱体颜色"的几何配上网格。颜色是靠实例颜色乘上去的，所以哪怕只画一只，也用（只有一个实例的）InstancedMesh ——
+ * 这样单只的箱子和成批的箱子始终共用同一个材质。userData.tintable 是给合并场景的代码看的记号：这个网格的颜色来自实例颜色。
+ */
+export function tintedMesh(geometry: THREE.BufferGeometry, material: THREE.Material, color: THREE.ColorRepresentation, count = 1) {
+  const mesh = new THREE.InstancedMesh(geometry, material, count);
+  mesh.setMatrixAt(0, new THREE.Matrix4());
+  mesh.setColorAt(0, new THREE.Color(color)); // 第一次 setColorAt 会把实例颜色的缓冲建出来
+  mesh.receiveShadow = true;
+  mesh.userData.tintable = true;
+  return mesh;
+}
+/** 把一只箱子的几块几何各配上材质，装成一组网格。只有箱体投影：镀锌的小件和深色的孔太小，影子看不出来。 */
+export function containerMeshes(d: ContainerDetail, color: THREE.ColorRepresentation): THREE.Group {
+  const mats = containerMaterials(), group = new THREE.Group();
+  const body = tintedMesh(d.body, mats.body, color);
+  body.castShadow = true;
+  group.add(body);
+  if (d.metal) {
+    const metal = new THREE.Mesh(d.metal, mats.metal);
+    metal.receiveShadow = true;
+    group.add(metal);
+  }
+  return group;
+}
+
+/** 单独搭一只箱子（模型查看器用；游戏里成批的箱子走 ContainerField）。 */
+export function buildContainer(o: ContainerOpts & { color?: number } = {}): PropModel {
+  const v = containerVariant(o), spec = CONTAINER_SIZES[v.size];
+  const group = containerMeshes(containerDetail(v), o.color ?? CONTAINER_COLORS.blue);
+  group.name = `container${v.size}`;
+  return { group, boxes: containerBoxes(v.size), size: [spec.length, spec.height, CONTAINER_WIDTH], name: group.name };
+}
+
+// ======================================================================================================================
+// 旧版，接入后删除。
+//
+// 下面是上一版集装箱的实现（40 尺一种规格、每家船公司一张大贴图）。port.ts 还在用 containerGeometry / sideTextures /
+// doorTextures / frameTextures / tintByAlpha / RIBS / Brand，props.ts 还在用 layers / compose / rustRun / rustPatch /
+// hazardTape / tintByAlpha，所以原样留着，保证能编译。等 port.ts 换成 ContainerField、props.ts 不再画这些贴图以后，
+// 从这一行往下可以整段删掉。
+// ======================================================================================================================
 
 const FONT = '"PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif';
 const MONO = 'ui-monospace, "SF Mono", Menlo, Consolas, monospace';
