@@ -844,12 +844,14 @@ export class Enemies {
       }
     }
     // 目标点正下方有东西（箱垛、货架）就把目标抬到它上面。屋外从高处往下看：我们的堆场比参考的高（最高四层箱，十一米多），
-    // 得提前知道前面的箱顶有多高；屋里和穿门时只看自己这个高度以下的 —— 从高处看下来只会看到屋顶
+    // 得提前知道前面的箱顶有多高。屋里不能从那么高往下看（只会看到屋顶），改从"屋里最高能飞到的高度"往下看，
+    // 这样飞得比货架矮的时候也知道前面的货架顶有多高；从屋外穿门进来时只看自己这个高度以下的
     e.topT -= dt;
     if (e.topT <= 0) {
       e.topT = 0.2 + rnd() * 0.1;
       e.indoor = this.underRoof(pos, e.indoor);
-      e.top = e.indoor || door ? this.surfaceBelow(tx, pos.y + 0.3, tz) : this.surfaceBelow(tx, Math.max(pos.y, ty) + 6, tz);
+      const from = e.indoor ? Math.max(pos.y, GULL.indoorAltMax) + 0.3 : door ? pos.y + 0.3 : Math.max(pos.y, ty) + 6;
+      e.top = this.surfaceBelow(tx, from, tz);
     }
     if (door) {
       // 穿门：压在门楣以下。离门口还远（6 米以外）时允许临时拔高，好翻过挡在路上的箱垛和屋顶；到了门口就不许了
@@ -865,9 +867,12 @@ export class Enemies {
     const flat = Math.hypot(e.vel.x, e.vel.z), frames = dt * 60;   // frames：把"每次加多少"换算成和帧率无关
     e.feeler = (e.feeler + 1) % 3;
     if (e.feeler === 0) {
-      if (flat > 0.6) {
+      // 往哪探：正在飞就探飞行方向；几乎不动（多半是顶在什么东西上了）就探目标的方向
+      const far = Math.hypot(tx - pos.x, tz - pos.z), moving = flat > 0.6;
+      const fx = moving ? e.vel.x / flat : far > 1 ? (tx - pos.x) / far : 0, fz = moving ? e.vel.z / flat : far > 1 ? (tz - pos.z) / far : 0;
+      if (fx || fz) {
         const reach = GULL.feel + flat * 0.5;
-        const d = this.ray(pos.x, pos.y, pos.z, e.vel.x / flat, 0, e.vel.z / flat, reach, _hit);
+        const d = this.ray(pos.x, pos.y, pos.z, fx, 0, fz, reach, _hit);
         if (d < reach) {
           const k = 1 - d / reach;                      // 离墙越近 k 越大
           e.avoid.set(_hit.nx * 26 * k, _hit.ny * 26 * k + 9 * k, _hit.nz * 26 * k);   // 顺着墙面的法线把自己推开，再往上抬一点
@@ -876,8 +881,9 @@ export class Enemies {
         }
       }
     } else if (e.feeler === 1) {
-      const d = this.ray(pos.x, pos.y, pos.z, 0, -1, 0, 2.4);
-      if (d < 2.4) e.avoid.y += (2.4 - d) * 10 * frames;                                // 离下面的东西不到 2.4 米：往上顶
+      // 离下面的东西不到 2.4 米：往上顶。屋里只留 1.2 米 —— 货架顶离吊灯不到两米，顶得太狠会一头扎进吊灯里
+      const keep = e.indoor ? 1.2 : 2.4, d = this.ray(pos.x, pos.y, pos.z, 0, -1, 0, keep);
+      if (d < keep) e.avoid.y += (keep - d) * 10 * frames;
     } else {
       e.ceilT -= dt * 3;
       if (e.ceilT <= 0) { e.ceilT = 0.35; const d = this.ray(pos.x, pos.y, pos.z, 0, 1, 0, 4); e.ceil = d < 4 ? pos.y + d - 1.3 : 1e9; }
@@ -903,6 +909,9 @@ export class Enemies {
       if (d < reach) {
         e.vel.setComponent(axis, -v * 0.25);
         e.avoid.setComponent(axis, e.avoid.getComponent(axis) - s * 8);
+        // 水平方向撞上了：顺着障碍的表面往一侧让（往哪侧跟着绕飞的方向走）。
+        // 不然目标点正好在一根灯杆后面时（东门正对着的就有一根），它会顶着灯杆一动不动
+        if (axis !== 1) { const side = axis === 0 ? 2 : 0; e.avoid.setComponent(side, e.avoid.getComponent(side) + e.orbitDir * 5); }
         if (d < margin) pos.setComponent(axis, pos.getComponent(axis) - s * (margin - d));
       }
     }
