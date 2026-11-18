@@ -8,6 +8,7 @@ import { weathered } from '../render/weathered';
 import { barrierMesh, flares, lightCones } from './props';
 import { buildAnnex } from './annex';
 import { buildForklift } from './forklift';
+import { GATE } from './layout/gate';
 import { placeOnce, PropField } from './propfield';
 import { barrel, cableReel, cardboardBoxes, CARGO, crateStack, crateWood, ibcTote, jerryCan, pallet, palletStack, sandbags, tarpCargo, tireStack, trafficCone } from './props/cargo';
 import { EQUIPMENT } from './props/equipment';
@@ -331,10 +332,19 @@ export function buildPort(progress: (msg: string) => void): Port {
   plane(signTexture(['门禁控制', '仅限授权人员'], { bg: '#b53a24', fg: '#f3ece0' }), 2.0, 1.0, -75.9, 2.6, -33.2, Math.PI / 2);
 
   // ---------------------------------------------------------------- 围墙与岸壁
-  const WALL = 0x4a4d4e;
-  box(-24, 2.2, BOUNDS.minZ - 0.6, 176, 4.4, 1.2, WALL, true);
-  box(-24, 2.2, BOUNDS.maxZ + 0.6, 176, 4.4, 1.2, WALL, true);
+  const WALL = 0x4a4d4e, WALL_W = -112, WALL_E = 64;           // 南北两道围墙从 x −112 砌到 64
+  box((WALL_W + WALL_E) / 2, 2.2, BOUNDS.minZ - 0.6, WALL_E - WALL_W, 4.4, 1.2, WALL, true);
   box(BOUNDS.minX - 0.6, 2.2, 0, 1.2, 4.4, 202, WALL, true);
+  // 南围墙在主干道的尽头开一个门洞（门扇、门柱、岗亭在 layout/gate.ts 里摆），所以分成东西两段；
+  // 洞口两边各砌一个比墙厚、比墙高的门垛，顶上压一块盖板。
+  // 门洞不用另外封：玩家的位置本来就被夹在 BOUNDS 以内（player.ts），走到门口就停住了 —— 看得见外面，子弹也打得出去
+  const PIER = 1.6, southZ = BOUNDS.maxZ + 0.6;
+  for (const [from, to] of [[WALL_W, GATE.x0 - PIER], [GATE.x1 + PIER, WALL_E]]) box((from + to) / 2, 2.2, southZ, to - from, 4.4, 1.2, WALL, true);
+  for (const x of [GATE.x0 - PIER / 2, GATE.x1 + PIER / 2]) {
+    box(x, 2.5, southZ, PIER, 5, 1.5, 0x55585a, true);
+    box(x, 5.1, southZ, PIER + 0.24, 0.2, 1.74, 0x3c3f41);
+  }
+  plane(signTexture(['激战港区 · 南门', '出场车辆请停车交验'], { bg: '#1d3a5c', fg: '#f3ece0' }), 3.2, 1.6, GATE.x0 - PIER - 2.6, 2.9, BOUNDS.maxZ - 0.03, Math.PI);
   box(QUAY_X + 0.4, -1.6, 0, 0.8, 3.2, 600, 0x3c3f40); // 岸壁
   for (let z = -96; z <= 96; z += 12) box(QUAY_X - 0.9, 0.35, z, 0.7, 0.7, 0.7, 0x1e2022, true); // 系缆桩
 
