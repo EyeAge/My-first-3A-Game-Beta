@@ -51,6 +51,8 @@ const WALK = { x0: -15.75, x1: -9.75, z: -23.15, top: 2.6 } as const;
  * 12 级踏步，每级升 0.2 米、进 0.2 米；最后迈上 2.6 米高的顶平台，正好接走道的东端。
  */
 const STAIR = { x: -8.25, z: -23.15, steps: 12, rise: 0.2, run: 0.2, start: -1.5 } as const;
+/** 工作台：台面的左右两端、前沿和后沿（后沿离墙裙 5 厘米）。 */
+const BENCH = { x0: 1.6, x1: 5, front: -12.05, back: -11.3, top: 0.94 } as const;
 
 // ------------------------------------------------------------------ 小工具
 type BoxOpt = NonNullable<Parameters<Kit['box']>[7]>;
@@ -308,6 +310,100 @@ function buildStairs(k: Kit, boxes: LocalBox[]) {
   }
 }
 
+// ------------------------------------------------------------------ 工作台
+function buildWorkbench(k: Kit, boxes: LocalBox[]) {
+  const { x0, x1, front, back, top } = BENCH, mid = (x0 + x1) / 2;
+  const wallZ = WORKSHOP.z1 - LINING;   // 南墙内衬板的表面
+
+  // ---- 台子：厚木台面、6 条钢腿、一层搁板、一个抽屉柜
+  slab(k, 'wood_pallet', x0, top - 0.06, front, x1, top, back, { c: 0.012, grain: 'x', tint: DARK_WOOD });
+  for (const x of [x0 + 0.06, mid, x1 - 0.06]) for (const z of [front + 0.06, back - 0.06]) post(k, 'steel_dark', 0.05, 0.05, x, FLOOR, top - 0.06, z, { bevel: 0.006, ring: 0.25, tint: k.range(0.8, 1) });
+  for (const z of [front + 0.06, back - 0.06]) slab(k, 'steel_dark', x0 + 0.06, top - 0.12, z - 0.02, x1 - 0.06, top - 0.06, z + 0.02, { plain: true });   // 台面下的横档
+  slab(k, 'steel_dark', x0 + 0.04, 0.2, front + 0.06, x1 - 0.04, 0.23, back - 0.04, { c: 0.004 });
+  slab(k, 'paint_grey', x0 + 0.1, 0.55, front + 0.04, x0 + 1.3, top - 0.08, back - 0.05, { c: 0.01 });
+  for (const y of [0.63, 0.78]) {   // 两个抽屉：一道缝、一个拉手
+    k.box('steel_dark', 1.16, 0.006, 0.004, x0 + 0.7, y - 0.075, front + 0.038, { plain: true, tint: 0.4 });
+    k.box('steel_bare', 0.3, 0.018, 0.02, x0 + 0.7, y, front + 0.03, { c: 0.004 });
+  }
+  // 搁板上的东西
+  k.box('cardboard', 0.45, 0.3, 0.36, 3.6, 0.38, -11.68, { c: 0.008, rot: [0, 0.1, 0] });
+  k.box('plastic_blue', 0.4, 0.26, 0.5, 4.38, 0.36, -11.67, { c: 0.02, tint: 0.8 });
+  k.box('paint_red', 0.17, 0.3, 0.3, 3.05, 0.38, -11.7, { c: 0.03, rot: [0, -0.2, 0] });
+  k.cyl('polymer_black', 0.022, 0.04, 3.05, 0.55, -11.62, { seg: 6 });
+
+  // ---- 洞洞板：挂在三根竖着的安装条上（墙裙以上的墙面比墙裙缩进去 12 厘米，板子直接贴"墙"会悬空，所以垫这三根条）
+  slab(k, 'wood_pallet', x0, 1.25, back - 0.02, x1, 2.3, back + 0.01, { plain: true, tint: 0.92 });
+  for (const x of [x0 + 0.3, mid, x1 - 0.3]) slab(k, 'steel_galv', x - 0.025, 1.2, back + 0.01, x + 0.025, 2.54, wallZ + 0.01, { plain: true, tint: 0.8 });
+  // 板上挂的 7 件工具：一根长短粗细不一的钢杆，下半截套一个把手，交替着是螺丝刀（细杆）和扳手、锤子（粗杆加一个头）
+  for (let i = 0; i < 7; i++) {
+    const x = x0 + 0.3 + i * 0.42, z = back - 0.04, r = 0.012 + (i % 2) * 0.006;
+    const y0 = 1.5 + (i % 3) * 0.12, y1 = 2.05 + (i % 2) * 0.1;
+    k.tube('steel_galv', [x, y0, z], [x, y1, z], r, { cast: false, cap: true });
+    k.tube(i % 2 ? 'polymer_black' : i % 3 ? 'paint_red' : 'paint_yellow', [x, y0 - 0.01, z], [x, y0 + 0.17, z], r + 0.009, { seg: 7, cap: true });
+    if (i % 2) k.box('steel_dark', 0.11, 0.04, 0.035, x, y1 - 0.01, z, { c: 0.006 });       // 锤头 / 扳手头
+    k.tube('steel_galv', [x - 0.03, y1 - 0.06, back - 0.02], [x - 0.03, y1 - 0.055, z - 0.03], 0.004, { seg: 4, cast: false });   // 挂钩
+    k.tube('steel_galv', [x + 0.03, y1 - 0.06, back - 0.02], [x + 0.03, y1 - 0.055, z - 0.03], 0.004, { seg: 4, cast: false });
+  }
+
+  // ---- 台面上的零碎
+  // 台钳：底座、固定钳口、活动钳口、丝杠，丝杠头上一根横着的手柄
+  k.at([x1 - 0.5, top, front + 0.2], null, () => {
+    k.box('steel_dark', 0.16, 0.05, 0.3, 0, 0.025, 0, { c: 0.01 });
+    k.box('steel_dark', 0.14, 0.11, 0.07, 0, 0.1, 0.08, { c: 0.012 });
+    k.box('steel_dark', 0.14, 0.11, 0.07, 0, 0.1, -0.04, { c: 0.012 });
+    for (const z of [0.042, -0.002]) k.box('steel_bare', 0.13, 0.03, 0.006, 0, 0.14, z, { plain: true });   // 两片磨亮的钳口铁
+    k.tube('steel_galv', [0, 0.08, -0.06], [0, 0.08, -0.2], 0.014, { seg: 7, cap: true });
+    k.tube('steel_galv', [-0.1, 0.08, -0.19], [0.1, 0.08, -0.19], 0.007, { seg: 5, cap: true });
+    for (const x of [-0.1, 0.1]) k.sph('steel_galv', 0.012, x, 0.08, -0.19, { seg: 6 });
+  });
+  // 红色工具箱：斜放着，顶上一个提手，正面两个搭扣
+  k.at([x0 + 1.9, top, front + 0.35], [0, 0.3, 0], () => {
+    k.box('paint_red', 0.45, 0.22, 0.24, 0, 0.11, 0, { c: 0.02 });
+    k.box('steel_dark', 0.44, 0.006, 0.006, 0, 0.15, 0.121, { plain: true, tint: 0.4 });   // 箱盖的缝
+    for (const x of [-0.13, 0.13]) k.box('steel_galv', 0.04, 0.05, 0.01, x, 0.15, 0.123, { plain: true, cast: false });
+    k.path('steel_dark', [[-0.1, 0.22, 0], [-0.1, 0.25, 0], [0.1, 0.25, 0], [0.1, 0.22, 0]], 0.008, { seg: 5 });
+  });
+  // 两把扳手随手扔在台面上、一个零件盒（里面几颗螺栓）、一罐喷剂、一把油壶
+  for (const [x, z, yaw, len] of [[2.25, -11.82, 0.5, 0.24], [2.48, -11.72, -0.35, 0.19]]) {
+    k.box('steel_bare', len, 0.006, 0.022, x, top + 0.004, z, { plain: true, rot: [0, yaw, 0] });
+    k.cyl('steel_bare', 0.02, 0.007, x + Math.cos(yaw) * len * 0.5, top + 0.0045, z - Math.sin(yaw) * len * 0.5, { seg: 8 });
+  }
+  k.at([3.0, top, -11.5], [0, -0.12, 0], () => {
+    k.box('plastic_blue', 0.3, 0.008, 0.2, 0, 0.004, 0, { plain: true });
+    for (const s of [-1, 1]) { k.box('plastic_blue', 0.3, 0.06, 0.008, 0, 0.03, s * 0.096, { plain: true }); k.box('plastic_blue', 0.008, 0.06, 0.2, s * 0.146, 0.03, 0, { plain: true }); }
+    for (const [x, z] of [[-0.07, 0.02], [0.03, -0.04], [0.08, 0.05], [-0.02, -0.01]]) k.cyl('steel_galv', 0.012, 0.03, x, 0.02, z, { seg: 6, rot: [HALF_PI, 0, x * 9], cast: false });
+  });
+  k.cyl('paint_white', 0.032, 0.17, 4.05, top + 0.085, -11.52, { seg: 10, tint: 1.1 });
+  k.cyl('paint_red', 0.014, 0.03, 4.05, top + 0.185, -11.52, { seg: 6 });
+  k.lathe('paint_yellow', [[0.05, 0], [0.05, 0.1], [0.012, 0.15], [0.006, 0.26]], 3.75, top, -11.45, { seg: 10 });
+
+  // ---- 灯：一块挑出来的灯檐（两头各一根斜撑），下面贴一条暖白的灯带
+  slab(k, 'steel_dark', x0, 2.5, back - 0.3, x1, 2.53, back + 0.01, { c: 0.004 });
+  slab(k, 'steel_dark', x0, 2.44, back - 0.3, x1, 2.5, back - 0.29, { plain: true });
+  for (const x of [x0 + 0.3, x1 - 0.3]) k.bar('steel_dark', [x, 2.5, back - 0.28], [x, 2.22, back + 0.02], 0.02, 0.02, { plain: true });
+  k.box(emissive(0xfff0d0, 3), x1 - x0 - 0.4, 0.03, 0.1, mid, 2.48, back - 0.18, { raw: true, plain: true });
+
+  collide(boxes, x0, 0, front, x1, top, back, { surface: 'wood' });
+}
+
+// ------------------------------------------------------------------ 门边的配电箱
+/**
+ * 参考里有一张"高压危险"的贴纸悬在南门洞旁边的半空（坐标落在门洞里，看起来是写错了）。
+ * 贴纸总得贴在什么东西上：这里在门东侧的墙上装一只配电箱，贴纸贴在箱门上；
+ * 一根线管从箱顶上去，接到卷帘门的电机盒，另一根下到地里。
+ */
+function buildPowerBox(k: Kit) {
+  const wallZ = WORKSHOP.z1 - LINING, face = wallZ - 0.16;
+  slab(k, 'paint_grey', -0.6, 1.42, face, 0, 2.18, wallZ + 0.01, { c: 0.012 });
+  k.box('steel_dark', 0.004, 0.7, 0.004, -0.57, 1.8, face - 0.001, { plain: true, tint: 0.4 });   // 箱门的合页缝
+  k.box('steel_bare', 0.025, 0.09, 0.02, -0.05, 1.8, face - 0.01, { c: 0.004 });                  // 门把手
+  k.decal('hazard_voltage', 0.5, [-0.3, 1.9, face - 0.002], [0, Math.PI, 0]);
+  const pipeZ = wallZ - 0.09;
+  k.path('steel_galv', [[-0.42, 2.18, pipeZ], [-0.42, 5.02, pipeZ], [-0.42, 5.22, pipeZ - 0.2]], 0.016, { seg: 6, cast: false });
+  k.tube('steel_galv', [-0.15, 1.42, face + 0.03], [-0.15, FLOOR, face + 0.03], 0.016, { seg: 6, cast: false });
+  for (const y of [2.9, 4.2]) k.box('steel_galv', 0.07, 0.02, 0.1, -0.42, y, pipeZ + 0.04, { plain: true, cast: false, tint: 0.8 });   // 管卡
+}
+
 // ------------------------------------------------------------------ 组装
 export function buildWorkshopFit(): WorkshopFit {
   // 全部放进同一只零件箱：同一种材质的零件（不管是办公室的还是货架的）最后合成一个网格，整套陈设只有二十来次绘制调用。
@@ -318,6 +414,8 @@ export function buildWorkshopFit(): WorkshopFit {
   buildMezzanine(k, boxes);
   buildCatwalk(k, boxes);
   buildStairs(k, boxes);
+  buildWorkbench(k, boxes);
+  buildPowerBox(k);
 
   // 碰撞盒是上面手工登记的那一份，所以不要零件箱自动量的外包盒（boxes: []）
   const group = k.finish({ boxes: [], grime: 0.9 }).group;
