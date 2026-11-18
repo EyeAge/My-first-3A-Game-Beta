@@ -135,12 +135,16 @@ export class ContainerField {
    * 真的堆场里没有哪一摞是严丝合缝的：吊车放箱子总有几厘米的误差。所以这里每一层都故意错开一点 ——
    * 第二层起沿长边错 ±5 厘米、沿宽度错 ±4 厘米，每只再转一个很小的角度。jitter 是这些误差的倍数，0 就是完全对齐
    * （要让玩家站上去打枪的那种箱顶，对齐了碰撞才准）。
+   *
+   * baseY 是这一摞从多高开始码，默认从地面。两只 20 尺箱并排、上面再横跨一只 40 尺箱的时候，
+   * 那只 40 尺箱就是"从 20 尺箱的顶面开始码的一摞"。
    */
-  stack(x: number, z: number, list: StackItem[], yaw = 0, jitter = 1): number {
+  stack(x: number, z: number, list: StackItem[], yaw = 0, jitter = 1, baseY = 0): number {
     const cos = Math.cos(yaw), sin = Math.sin(yaw);
-    let y = 0;
-    list.forEach((it, layer) => {
+    let y = baseY;
+    list.forEach((it, index) => {
       const spec = CONTAINER_SIZES[it.size];
+      const layer = index + (baseY > 0 ? 1 : 0); // 0 = 落在地上的那一只：它只转不挪；压在别的箱子上的才会错位
       const dx = (it.dx ?? 0) + (layer ? this.range(-0.05, 0.05) * jitter : 0);
       const dz = (it.dz ?? 0) + (layer ? this.range(-0.04, 0.04) * jitter : 0);
       // 转角：箱子两头最多歪出去 6–7 厘米。同样的角度，12 米的箱子两头歪出去的距离是 6 米箱子的两倍，
