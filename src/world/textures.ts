@@ -38,25 +38,6 @@ function grime(g: CanvasRenderingContext2D, w: number, h: number, seed: number, 
   g.putImageData(img, 0, 0);
 }
 
-/** 波纹板法线贴图：直接由梯形波的斜率算出来，让灯光能勾出一道道棱。 */
-export function corrugationNormal(ribs = 46) {
-  const W = 1024, H = 4;
-  const { c, g } = canvas(W, H);
-  const img = g.createImageData(W, H);
-  for (let x = 0; x < W; x++) {
-    const p = ((x / W) * ribs) % 1;
-    // 梯形波：平-下坡-平-上坡
-    const slope = p > 0.2 && p < 0.3 ? -1 : p > 0.7 && p < 0.8 ? 1 : 0;
-    const nx = -slope * 0.75, nz = Math.sqrt(1 - nx * nx);
-    for (let y = 0; y < H; y++) {
-      const i = (y * W + x) * 4;
-      img.data[i] = (nx * 0.5 + 0.5) * 255; img.data[i + 1] = 128; img.data[i + 2] = (nz * 0.5 + 0.5) * 255; img.data[i + 3] = 255;
-    }
-  }
-  g.putImageData(img, 0, 0);
-  return finish(c, false, true);
-}
-
 /**
  * 沥青路面：颜色图 + 法线图。
  *
