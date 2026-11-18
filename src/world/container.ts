@@ -10,7 +10,7 @@ import { Kit, type LocalBox, type PropModel, type Rgb, type V3 } from './kit';
 // 集装箱是这个游戏里占画面最多的东西，所以值得把它做细。这个文件只管"一只箱子长什么样"，
 // 几百只箱子怎么摆、怎么画得动，在 containerfield.ts 里。
 //
-// 做法上有三个要点：
+// 做法上有四个要点：
 //
 //   1. 波纹是真的几何。侧板、前端板、箱顶都按真实的梯形截面折出来，顶点只放在折线上（一个周期 4 个点），
 //      平的地方不浪费三角形。斜阳一照，每道棱自己就有明暗。
@@ -21,6 +21,9 @@ import { Kit, type LocalBox, type PropModel, type Rgb, type V3 } from './kit';
 //
 //   3. 喷字和污迹是贴在表面外 3 毫米的小面片。侧板上的字不是一张平板，而是沿着波纹截面折出来的带子，
 //      斜着看的时候字会跟着棱起伏。
+//
+//   4. 同一只箱子有两份几何：精模（detail，20 尺箱六千、40 尺箱七千多个三角形）和简模（lod，两百个三角形以内的平板盒子）。
+//      离得远的箱子用简模，颜色和脏污照样有，只是没有起伏和小零件。
 //
 // 坐标约定：长边沿 x，箱门在 +x 端，前端板在 -x 端；宽沿 z；底面在 y=0，原点在占地中心。
 
@@ -676,6 +679,43 @@ function buildMarks(plan: Plan): THREE.BufferGeometry | null {
   return (k.finish({ grime: 0 }).group.children[0] as THREE.Mesh | undefined)?.geometry ?? null;
 }
 
+// ====================================================================== 简模
+
+/**
+ * 远处用的简模：一个平板盒子，两百个三角形以内。
+ * 没有波纹、没有门上的小零件，但顶点色照样写（泥污、锈条、箱顶褪色），所以远看颜色和精模是接得上的。
+ * 各个面都放在精模对应面的"波纹中线"上 —— 它同时还替精模投影子（见 containerfield.ts），不能比精模鼓出来太多。
+ */
+function buildLod(plan: Plan) {
+  const { L, H, half: p, shade, wear } = plan;
+  const k = new Kit('container-lod', kitSeed(plan.v)), body = BODY;
+  const z = PANEL_Z - SIDE_RIB.depth / 2, x0 = -(p - 0.035), x1 = p - 0.049, cols = L > 7 ? 10 : 6, colW = (x1 - x0) / cols;
+  // 波纹槽里的压暗，精模是一道一道的，这里只能取平均：斜面和内平面合起来占一个周期的将近一半
+  const grooves = (c: Corrugation) => (c.slope + (c.period - c.flat - 2 * c.slope)) / c.period;
+  const sideGroove = grooves(SIDE_RIB);
+  const sideTint = (x: number, y: number, zz: number): Rgb => {
+    const side = zz > 0 ? 1 : -1, c = shade(x, y, zz);
+    c[0] *= 1 - 0.17 * sideGroove; c[1] *= 1 - 0.18 * sideGroove; c[2] *= 1 - 0.18 * sideGroove;
+    // 锈条比顶点的间距窄得多，会从两列顶点之间漏掉。所以把每一道摊宽到一列的宽度，浓度按比例调淡，总量不变
+    const hang = sstep(H - 0.75, H, y);
+    if (hang > 0) for (const s of plan.streaks) if (s.side === side) {
+      const wide = Math.max(s.halfWidth, colW), t = Math.abs(x - s.x) / wide;
+      if (t < 1) stain(c, RUST_TINT, hang * hang * s.strength * (1 - t * t) * (0.45 + 0.55 * wear) * (s.halfWidth / wide));
+    }
+    return c;
+  };
+  // 侧面和箱顶也切成两格一张（理由见 sheets()）：简模是平板，漆面贴图每 2.5 米重复一次的样子比精模更显眼
+  for (const side of [-1, 1]) for (const sheet of sheets(flatKnots(x0, x1, cols), 2)) k.add(body, ribbedSheet(sheet, [0, 0.3, 0.62, H - 0.7, H], (x, _d, y) => [x, y, side * z], [0, 0, side]), { tint: sideTint });
+  const roofGroove = grooves(ROOF_RIB), endGroove = grooves(END_RIB);
+  for (const sheet of sheets(flatKnots(x0, x1, L > 7 ? 8 : 4), 2)) k.add(body, ribbedSheet(sheet, [-z, z], (x, _d, zz) => [x, H, zz], [0, 1, 0]), { tint: (x, _y, zz) => plan.roofPaint(x, zz, roofGroove) });
+  k.add(body, ribbedSheet(flatKnots(-z, z, 2), [0, H / 2, H], (zz, _d, y) => [x0, y, zz], [-1, 0, 0]), {
+    tint: (x, y, zz) => { const c = shade(x, y, zz); return [c[0] * (1 - 0.17 * endGroove), c[1] * (1 - 0.18 * endGroove), c[2] * (1 - 0.18 * endGroove)]; },
+  });
+  k.add(body, ribbedSheet(flatKnots(-z, z, 2), [0, 0.3, 0.62, H], (zz, _d, y) => [x1, y, zz], [1, 0, 0]), { tint: (x, y, zz) => { const c = shade(x, y, zz); return [c[0] * 0.94, c[1] * 0.94, c[2] * 0.94]; } });
+  k.plane(body, x1 - x0, 2 * z, [(x0 + x1) / 2, 0, 0], { rot: [Math.PI / 2, 0, 0], tint: 0.3 });
+  return (k.finish({ grime: 0 }).group.children[0] as THREE.Mesh).geometry;
+}
+
 // ====================================================================== 对外：带缓存的几何
 
 export interface ContainerDetail {
@@ -692,7 +732,7 @@ export interface ContainerDetail {
   boxes: LocalBox[];
   triangles: number;
 }
-const plans = new Map<string, Plan>(), cores = new Map<string, Core>(), details = new Map<string, ContainerDetail>();
+const plans = new Map<string, Plan>(), cores = new Map<string, Core>(), details = new Map<string, ContainerDetail>(), lods = new Map<string, THREE.BufferGeometry>(), lodLogos = new Map<string, THREE.BufferGeometry>();
 const coreKey = (v: ContainerVariant) => `${v.size}|${v.seed}|${v.wear}|${v.doors}`;
 function planOf(v: ContainerVariant) {
   const key = coreKey(v);
@@ -715,6 +755,35 @@ export function containerDetail(o: ContainerOpts): ContainerDetail {
     details.set(full, d);
   }
   return d;
+}
+/** 一个变体的简模（只有箱体漆一块）。和开不开门、哪家船公司无关。 */
+export function containerLod(o: ContainerOpts): THREE.BufferGeometry {
+  const v = containerVariant({ ...o, doors: 0 }), key = coreKey(v);
+  let g = lods.get(key);
+  if (!g) lods.set(key, (g = buildLod(planOf(v))));
+  return g;
+}
+/**
+ * 简模用的船公司标：两侧各一张平的面片。
+ * 三米多宽的白色大字隔着一百米也看得见，如果一换成简模它就消失，会很扎眼；所以简模单独留着它。
+ * 它只和规格、船公司有关，和 seed、做旧无关，于是全场所有同规格同公司的远处箱子可以一次画完。
+ */
+export function containerLodLogo(size: ContainerSize, brand: number): THREE.BufferGeometry {
+  const key = `${size}|${brand}`;
+  let g = lodLogos.get(key);
+  if (!g) {
+    const { length, height: H } = CONTAINER_SIZES[size], logo = markDecals(brand).logo;
+    const w = Math.min(Math.min(H * 0.4, 1.05) * logo.aspect, size === 20 ? 2.2 : 3.4), h = w / logo.aspect, cx = size === 20 ? -0.75 : -(length / 2) * 0.42;
+    const z = HALF_W, [u0, v0, u1, v1] = logo.uv; // 浮在简模侧面外 3 厘米：远处深度缓冲很粗，贴得太近会闪
+    const quads = [1, -1].map((side) => {
+      const q = new THREE.PlaneGeometry(w, h), uv = q.getAttribute('uv');
+      for (let i = 0; i < uv.count; i++) uv.setXY(i, u0 + (u1 - u0) * uv.getX(i), v0 + (v1 - v0) * uv.getY(i));
+      if (side < 0) q.rotateY(Math.PI); // 转到背面去：位置和朝向一起镜像，字还是正的
+      return q.translate(side * cx, H * 0.52, side * z);
+    });
+    lodLogos.set(key, (g = mergeGeometries(quads)));
+  }
+  return g;
 }
 
 /**
@@ -747,10 +816,15 @@ export function containerMeshes(d: ContainerDetail, color: THREE.ColorRepresenta
   return group;
 }
 
-/** 单独搭一只箱子（模型查看器用；游戏里成批的箱子走 ContainerField）。 */
-export function buildContainer(o: ContainerOpts & { color?: number } = {}): PropModel {
-  const v = containerVariant(o), spec = CONTAINER_SIZES[v.size];
-  const group = containerMeshes(containerDetail(v), o.color ?? CONTAINER_COLORS.blue);
+/** 单独搭一只箱子（模型查看器用；游戏里成批的箱子走 ContainerField）。lod: true 是看它的简模。 */
+export function buildContainer(o: ContainerOpts & { color?: number; lod?: boolean } = {}): PropModel {
+  const v = containerVariant(o), spec = CONTAINER_SIZES[v.size], color = o.color ?? CONTAINER_COLORS.blue;
+  let group: THREE.Group;
+  if (o.lod) {
+    const body = tintedMesh(containerLod(v), containerMaterials().body, color);
+    body.castShadow = true;
+    group = new THREE.Group().add(body, new THREE.Mesh(containerLodLogo(v.size, v.brand), containerMaterials().marks));
+  } else group = containerMeshes(containerDetail(v), color);
   group.name = `container${v.size}`;
   return { group, boxes: containerBoxes(v.size, v.doors), size: [spec.length, spec.height, CONTAINER_WIDTH], name: group.name };
 }
