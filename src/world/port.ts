@@ -8,11 +8,13 @@ import { barrierMesh, flares, lightCones } from './props';
 import { buildAnnex } from './annex';
 import { buildForklift } from './forklift';
 import { placeOnce, PropField } from './propfield';
-import { barrel, cableReel, cardboardBoxes, crateStack, crateWood, ibcTote, jerryCan, pallet, palletStack, sandbags, tarpCargo, tireStack, trafficCone } from './props/cargo';
+import { barrel, cableReel, cardboardBoxes, CARGO, crateStack, crateWood, ibcTote, jerryCan, pallet, palletStack, sandbags, tarpCargo, tireStack, trafficCone } from './props/cargo';
+import { EQUIPMENT } from './props/equipment';
+import { bollardPost } from './props/site';
 import type { RainShelter } from './rain';
 import { buildRelay, type Relay, type RelaySpec } from './relay';
-import { buildWorkshop, placeWorkshop } from './workshop';
-import { buildWorkshopFit, placeWorkshopFit } from './workshopfit';
+import { buildWorkshop, placeWorkshop, WORKSHOP } from './workshop';
+import { buildWorkshopFit, placeWorkshopFit, WORKSHOP_PROPS } from './workshopfit';
 import type { ReflectionUniforms } from '../render/reflection';
 import { buildGround } from './ground';
 import { SUN_COLOR, SUN_INTENSITY } from './atmosphere';
@@ -448,8 +450,20 @@ export function buildPort(progress: (msg: string) => void): Port {
   props.place(cableReel({ seed: 2 }), -81.5, 21, 0.2); props.place(tarpCargo({ seed: 0 }), -98.4, 24.5, 1.52); barrels(-78.6, 26.5, 5);
   props.place(palletStack({ count: 9 }), -88.2, 27.4, 0.1); props.place(palletStack({ count: 6, seed: 1 }), -86.7, 27.6, -0.08); props.place(pallet({ seed: 3 }), -86.4, 25.9, 0.5);
   cones(-94.6, 11, -Math.PI / 2, 4, 3); cones(-88.4, 11, -Math.PI / 2, 4, 3);
-  // 车间里那台：停在东南角，货叉落地，脚下垫着一块钢板（位置照参考，换算到我们的坐标）
-  group.add(placeOnce(buildForklift({ seed: 21, interior: true }), -79.7, 5.6, 2.75, colliders, 0.03));
+  // 车间两个门口的 3 根防撞柱：卷帘门两侧各一根，推拉门扇停靠的那一侧一根（车间自己的坐标，照参考）
+  ([[-6.45, -10.45], [-0.55, -10.45], [12.6, -22.4]] as const).forEach(([x, z], i) => props.place(bollardPost({ seed: i }), x + SHOP_DX, z + SHOP_DZ, i * 1.3));
+  // 车间里面的通用道具：清单在 workshopfit.ts（WORKSHOP_PROPS，车间自己的坐标，这里加上平移量）。
+  // 全部用"室内版"材质 —— 淋不到雨，反射的是屋里而不是天空。二十几件几乎件件不同，实例化帮不上忙，
+  // 所以单开一份清单、用 buildMerged 按材质焊成十几个网格（见 propfield.ts）。
+  // 叉车例外：它自己就有十五种材质，单独摆（和甲号中继旁那台一样）—— 停在东南角，货叉落地，脚下垫着一块钢板
+  const indoorProps = new PropField();
+  const INDOOR_MODELS = { ...CARGO, ...EQUIPMENT };
+  for (const p of WORKSHOP_PROPS) {
+    const x = p.x + SHOP_DX, z = p.z + SHOP_DZ, y = p.y ?? WORKSHOP.floor, args = { ...p.args, interior: true }; // 不写高度的都站在地坪面上
+    if (p.name === 'forklift') indoor.add(placeOnce(buildForklift(args), x, z, p.yaw, colliders, y));
+    else indoorProps.place(INDOOR_MODELS[p.name](args), x, z, p.yaw, y);
+  }
+  indoor.add(indoorProps.buildMerged(colliders));
   // 西边原有的几处掩体
   barrels(-64.5, 30, 5); props.place(crateStack({ seed: 2 }), -68.3, -40.6, 0.1); props.place(crateWood({ seed: 0 }), -66.6, -40.2, 0.3);
   group.add(props.build(colliders));

@@ -23,7 +23,7 @@ import { WORKSHOP, type Workshop } from './workshop';
 //
 // 发光的东西（灯管、屏幕、灯带）都只是"很亮的面片"：它们自己不照亮任何东西，亮的感觉来自后处理的泛光。
 //
-// 油桶、托盘堆、轮胎、叉车这些通用道具不在这里搭（它们在 props/cargo.ts、forklift.ts），
+// 油桶、托盘堆、轮胎、工具车、叉车这些通用道具不在这里搭（它们在 props/cargo.ts、props/equipment.ts、forklift.ts），
 // 这里只给出该摆在哪：见文件末尾的 WORKSHOP_PROPS。
 
 export interface WorkshopFit {
@@ -769,7 +769,7 @@ export function placeWorkshopFit(fit: WorkshopFit, dx: number, dz: number, quart
 // ------------------------------------------------------------------ 通用道具的摆放清单
 /** 一件通用道具摆在哪。坐标是参考坐标（和上面的陈设同一套），摆的时候要和陈设做同样的平移。 */
 export interface WorkshopProp {
-  /** 道具名：CARGO 表里的名字（props/cargo.ts），或者 'forklift'（forklift.ts 的 buildForklift）。 */
+  /** 道具名：CARGO 表（props/cargo.ts）或 EQUIPMENT 表（props/equipment.ts）里的名字，或者 'forklift'（forklift.ts 的 buildForklift）。 */
   name: string;
   x: number; z: number;
   /** 绕竖轴的转角（弧度），和 PropField.place 的约定一样。 */
@@ -778,20 +778,20 @@ export interface WorkshopProp {
   y?: number;
   /** 传给道具函数的参数（都应该再加上 interior: true）。 */
   args?: Record<string, unknown>;
-  /** 不登记碰撞（叠在别的道具顶上的那几件）。 */
-  noCollide?: boolean;
-  /** 还没有模型的道具（工具车、气瓶架）。 */
-  missing?: boolean;
 }
 
 /**
  * 车间里的通用道具该摆在哪（照参考的摆法）。这些东西不归这个文件搭，这里只是一份清单，给摆放的代码照着用。
- * 和参考不一样的只有一处：夹层下面那只绿桶从 z = −27 挪到 −26.9，原位置会蹭到北墙的刚架柱。
+ * 和参考不一样的有三处：
+ *   · 夹层下面那只绿桶从 z = −27 挪到 −26.9，原位置会蹭到北墙的刚架柱；
+ *   · 东南角那只托盘和它上面的纸箱从 x = 10.6 挪到 10.75：原位置上，叉车车尾的一角伸进托盘的占地里 18 厘米，纸箱几乎贴着配重；
+ *   · 叠在托盘上的那两堆纸箱，参考里不登记碰撞。可是垫在底下的单只托盘太矮、本来就不挡人，
+ *     结果人能从那堆纸箱里直接穿过去 —— 所以我们这里每一件都照常登记碰撞，清单里不设"不挡人"的开关。
  */
 export const WORKSHOP_PROPS: WorkshopProp[] = [
   // 北墙两组货架之间的空当：一摞托盘，顶上叠一堆纸箱
   { name: 'pallet_stack', x: 0, z: -26.9, yaw: 0.1, args: { seed: 3 } },
-  { name: 'cardboard_boxes', x: -0.05, z: -26.9, yaw: 0.5, y: 1.182, args: { seed: 4 }, noCollide: true },
+  { name: 'cardboard_boxes', x: -0.05, z: -26.9, yaw: 0.5, y: 1.182, args: { seed: 4 } },
   // 车间中部偏东
   { name: 'crate_stack', x: 2.9, z: -15.9, yaw: 0.12, args: { seed: 11 } },
   { name: 'crate_wood', x: 4.15, z: -16.3, yaw: -0.25, args: { seed: 12 } },
@@ -806,10 +806,10 @@ export const WORKSHOP_PROPS: WorkshopProp[] = [
   // 东南角：沙袋、叉车、工具车、气瓶架、一只托盘上放着纸箱
   { name: 'sandbags', x: 10.2, z: -16.4, yaw: HALF_PI + 0.05, args: { seed: 20 } },
   { name: 'forklift', x: 8.3, z: -13.9, yaw: 2.75, args: { seed: 21 } },
-  { name: 'toolbox_cart', x: 6, z: -12.2, yaw: 0.15, args: { seed: 22 }, missing: true },
-  { name: 'gas_cylinders', x: 10.9, z: -11.9, yaw: 0, args: { seed: 23 }, missing: true },
-  { name: 'pallet', x: 10.6, z: -13.6, yaw: 0.2, args: { seed: 33 } },
-  { name: 'cardboard_boxes', x: 10.6, z: -13.6, yaw: 0.3, y: 0.174, args: { seed: 34 }, noCollide: true },
+  { name: 'toolbox_cart', x: 6, z: -12.2, yaw: 0.15, args: { seed: 22 } },
+  { name: 'gas_cylinders', x: 10.9, z: -11.9, yaw: 0, args: { seed: 23 } },
+  { name: 'pallet', x: 10.75, z: -13.6, yaw: 0.2, args: { seed: 33 } },
+  { name: 'cardboard_boxes', x: 10.75, z: -13.6, yaw: 0.3, y: 0.174, args: { seed: 34 } },
   // 西南角
   { name: 'tarp_cargo', x: -13.2, z: -13.2, yaw: 0.12, args: { seed: 24 } },
   { name: 'tire_stack', x: -15, z: -15.6, yaw: 0, args: { seed: 25 } },

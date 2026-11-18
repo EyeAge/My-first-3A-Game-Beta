@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { buildForklift } from '../world/forklift';
 import type { LocalBox, PropModel } from '../world/kit';
 import { CARGO } from '../world/props/cargo';
+import { EQUIPMENT } from '../world/props/equipment';
 import { buildWorkshop } from '../world/workshop';
 import { buildWorkshopFit, WORKSHOP_PROPS } from '../world/workshopfit';
 
@@ -32,9 +33,8 @@ export function fitBoard(o: FitBoardOptions = {}): { group: THREE.Group; boxes: 
   group.add(fit.group);
 
   if (o.props) for (const p of WORKSHOP_PROPS) {
-    if (p.missing) continue;
     const args = { ...p.args, interior: true };
-    const model: PropModel = p.name === 'forklift' ? buildForklift(args) : CARGO[p.name](args);
+    const model: PropModel = p.name === 'forklift' ? buildForklift(args) : (CARGO[p.name] ?? EQUIPMENT[p.name])(args);
     // 道具模型是带缓存、会被共用的，所以放一份克隆（几何体和材质仍然共用）
     const copy = model.group.clone();
     copy.position.set(p.x, p.y ?? 0.03, p.z);
