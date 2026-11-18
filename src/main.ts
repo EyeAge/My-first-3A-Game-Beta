@@ -16,7 +16,7 @@ import { initSurfaces } from './render/surfaces';
 import { UI, type HudFrame, type Marker } from './ui/ui';
 import { bakeEnvironment, createSea, createSky } from './world/atmosphere';
 import { createRain } from './world/rain';
-import { bakedGroundMask, MASK_WATER_BELOW } from './world/groundmask';
+import { bakedGroundMask, isPuddleAt, MASK_WATER_BELOW } from './world/groundmask';
 import { buildPort, QUAY_X } from './world/port';
 
 type State = 'menu' | 'playing' | 'paused' | 'dead' | 'won';
@@ -199,9 +199,17 @@ async function boot() {
     if (state === 'playing') {
       if (input.pressed('Escape') || input.pressed('KeyP')) pause();
       player.update(dt, mission.time, input, settings, port.colliders, weapon.ads);
-      if (player.stepped) audio.step(player.sprinting);
-      if (player.landed) { audio.land(); effects.splash(player.pos, 0.35); }
-      else if (player.stepped && player.sprinting) effects.splash(player.pos, 0.14); // 冲刺时踩起一点积水
+      // 脚下是不是水洼。积水图只管平面位置，所以要先确认人真的踩在露天的路面上：
+      // 站在箱顶、台阶上（脚底高于地面）不算；车间里的地坪和室外一样高，但屋里没有积水，也不算
+      const inPuddle = player.onGround && player.pos.y < 0.05 && !indoors && isPuddleAt(player.pos.x, player.pos.z);
+      if (player.stepped) {
+        audio.step(player.sprinting, inPuddle);
+        if (inPuddle) effects.splash(player.pos, player.sprinting ? 0.55 : 0.4); // 踩进水里才溅水花：跑比走溅得高
+      }
+      if (player.landed) {
+        audio.land(inPuddle);
+        if (inPuddle) effects.splash(player.pos, 0.9); else effects.landDust(player.pos); // 跳进水洼是一大片水花，落在别处只扬起一圈尘
+      }
       if (player.inWater) {
         // 掉进海里：捞回岸上，扣一点血
         effects.splash(tmp.set(player.pos.x, -1.7, player.pos.z), 2.2);

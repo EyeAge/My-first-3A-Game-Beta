@@ -3,6 +3,7 @@ import { clamp, damp } from '../core/math';
 import type { Input } from '../core/input';
 import { MuzzleFlash } from '../render/muzzleflash';
 import type { Colliders, RayHit } from '../world/colliders';
+import { isPuddleAt } from '../world/groundmask';
 import { QUAY_X } from '../world/port';
 import type { Enemies, World } from './enemies';
 import { buildGun, DEPTH, SIGHT_Y } from './gunmodel';
@@ -105,8 +106,11 @@ export class Weapon {
         const endT = eh ? eh.t : wallT;
         _p.copy(o).addScaledVector(d, endT);
         // 打到岸壁以外的"地面"其实是海面上空：把落点沿弹道延长到海面
-        const water = !eh && wallT < 300 && this.hit.ny > 0.5 && _p.y < 0.05 && _p.x > QUAY_X + 0.8;
-        if (water) _p.copy(o).addScaledVector(d, (-1.7 - o.y) / d.y);
+        const sea = !eh && wallT < 300 && this.hit.ny > 0.5 && _p.y < 0.05 && _p.x > QUAY_X + 0.8;
+        if (sea) _p.copy(o).addScaledVector(d, (-1.7 - o.y) / d.y);
+        // 打在露天地面的水洼里：和打进海里一样只出水花，不崩碎屑、不留弹孔（水面上留不下坑）。
+        // 积水图只管平面位置，所以先确认打中的是朝上的、贴着地面的那个面，而不是箱顶
+        const water = sea || (!eh && wallT < 300 && this.hit.ny > 0.7 && _p.y < 0.08 && isPuddleAt(_p.x, _p.z));
         this.muzzle.getWorldPosition(_m);
         effects.tracer(_m, _p);
         // 抛壳：从机匣右侧甩出去
@@ -121,6 +125,8 @@ export class Weapon {
           enemies.damage(eh.enemy, eh.weak ? 58 : 24, eh.weak);
         } else if (water) {
           effects.impact(_p, 0, 1, 0, 'water');
+          const [vol, pan] = enemies.spatial(_p);
+          if (vol > 0.3) audio.impactWater(vol * 0.7, pan);
         } else if (wallT < 300) {
           // 打到的是什么材质，由碰撞盒上的标记说了算。没标记的：地面当水泥，其余的当金属（港区里没标记的大多是集装箱和钢架）
           const ground = this.hit.ny > 0.5 && _p.y < 0.05;

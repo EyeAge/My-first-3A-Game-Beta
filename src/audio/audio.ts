@@ -113,8 +113,40 @@ export class GameAudio {
     this.tone({ freq: 110, freqEnd: 32, dur: 0.5, type: 'sine', gain: 0.6 * vol, pan });
   }
   hurt() { this.burst({ dur: 0.16, freq: 500, freqEnd: 140, gain: 0.5 }); this.tone({ freq: 96, freqEnd: 60, dur: 0.2, type: 'sine', gain: 0.5 }); }
-  step(sprint: boolean) { this.burst({ dur: 0.07, freq: 700 + Math.random() * 500, type: 'bandpass', q: 1.2, gain: sprint ? 0.11 : 0.07 }); this.burst({ dur: 0.05, freq: 4500, type: 'highpass', gain: 0.02 }); }
-  land() { this.burst({ dur: 0.14, freq: 420, freqEnd: 110, gain: 0.3 }); }
+  /**
+   * 泼水声，踩水和子弹打进水洼共用。三样东西叠在一起：
+   *   · 一段音调往下滑的噪声（1500 → 520 赫兹）：水被推开的“哗”
+   *   · 一小段只留高频的噪声：溅起来的碎水珠的“嘶”
+   *   · 几个音调往上滑的短音，时刻随机：气泡破掉的“咕嘟”。strength 越大越多
+   */
+  private slosh(dur: number, strength: number, vol: number, pan = 0) {
+    this.burst({ dur, freq: 1500, freqEnd: 520, type: 'bandpass', q: 0.9, gain: 0.2 * vol, pan });
+    this.burst({ dur: dur * 0.55, freq: 3000, type: 'highpass', gain: 0.05 * vol, pan });
+    for (let i = 0, n = Math.round(5 * strength); i < n; i++) {
+      const f = 500 + Math.random() * 1200;
+      this.tone({ freq: f, freqEnd: f * 1.7, dur: 0.03 + Math.random() * 0.03, gain: 0.035 * vol, pan, delay: Math.random() * dur * 0.6 });
+    }
+  }
+  /** 脚步。wet = 踩在水洼里：换成泼水声，底下垫一声闷的落脚。 */
+  step(sprint: boolean, wet = false) {
+    if (wet) {
+      this.slosh(0.46, 1, sprint ? 0.72 : 0.5);
+      this.tone({ freq: 100, freqEnd: 55, dur: 0.09, gain: sprint ? 0.12 : 0.08 });
+      return;
+    }
+    this.burst({ dur: 0.07, freq: 700 + Math.random() * 500, type: 'bandpass', q: 1.2, gain: sprint ? 0.11 : 0.07 }); this.burst({ dur: 0.05, freq: 4500, type: 'highpass', gain: 0.02 });
+  }
+  /** 落地。wet = 跳进了水洼：在落地的闷响上再加一声压低了的泼水。 */
+  land(wet = false) {
+    this.burst({ dur: 0.14, freq: 420, freqEnd: 110, gain: 0.3 });
+    if (wet) this.slosh(0.5, 1.2, 0.8);
+  }
+  /** 子弹打进水里（水洼或者海面）：泼水声加一个往上滑的“啾”。vol / pan 和别的弹着声一样，由距离和方位算出来。 */
+  impactWater(vol: number, pan: number) {
+    if (vol <= 0.02) return;                        // 音量为 0 时合成器的“指数渐变”会抛异常，和下面几个带 vol 的音效一样先拦掉
+    this.slosh(0.5, 0.9, vol, pan);
+    this.tone({ freq: 420, freqEnd: 1150, dur: 0.12, gain: 0.05 * vol, pan });
+  }
   click() { this.tone({ freq: 660, dur: 0.05, type: 'square', gain: 0.05 }); }
   relayTick(k: number) { this.tone({ freq: 500 + k * 700, dur: 0.05, type: 'square', gain: 0.05 }); }
   relayDone() {
