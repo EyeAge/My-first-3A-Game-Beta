@@ -68,7 +68,8 @@ async function main() {
   const size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3());
   const radius = Math.max(0.2, size.length() / 2);
   if (q.get('ground') !== '0') {
-    const g = new THREE.Mesh(new THREE.PlaneGeometry(radius * 30, radius * 30), surface('concrete'));
+    // world: true —— 平面自带的贴图坐标是 0 到 1，会把一张 3 米的水泥贴图拉满整块地；改成按世界坐标铺
+    const g = new THREE.Mesh(new THREE.PlaneGeometry(radius * 30, radius * 30), surface('concrete', { world: true }));
     g.rotation.x = -Math.PI / 2; g.position.y = Math.min(0, box.min.y) - 0.001; g.receiveShadow = true;
     scene.add(g);
   }
@@ -78,8 +79,9 @@ async function main() {
   }
   // 阴影相机刚好罩住模型
   const sc = sun.shadow.camera;
+  const sunDir = sun.position.clone().normalize(); // 先把方向记下来：下面一挪位置，再去读就不是方向了
   sun.target.position.copy(center);
-  sun.position.copy(center).add(sun.position.clone().normalize().multiplyScalar(radius * 4));
+  sun.position.copy(center).addScaledVector(sunDir, radius * 4);
   sc.left = sc.bottom = -radius * 1.6; sc.right = sc.top = radius * 1.6; sc.near = 0.1; sc.far = radius * 10;
   sc.updateProjectionMatrix();
 
