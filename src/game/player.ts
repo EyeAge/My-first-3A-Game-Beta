@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { clamp, damp } from '../core/math';
 import type { Input } from '../core/input';
 import type { Settings } from '../core/settings';
-import type { Colliders } from '../world/colliders';
+import type { Box, Colliders, Surface } from '../world/colliders';
 import { BOUNDS, QUAY_X } from '../world/port';
 
 const HALF = 0.36;       // 玩家碰撞体的半宽
@@ -25,6 +25,8 @@ export class Player {
   damageFrom = new THREE.Vector3(); damageFlash = 0;
   horizSpeed = 0;
   stepPhase = 0; stepped = false; landed = false;
+  /** 脚下踩的是什么（决定脚步声）：站在地面上是水泥；站在某个盒子上就看它的材质标记，没标的当钢板（港区里没标记的盒子大多是集装箱和钢架）。 */
+  surface: Surface = 'concrete';
   private eye = STAND - 0.12;
   private recoilP = 0; private recoilY = 0;
   private shake = 0;
@@ -106,11 +108,12 @@ export class Player {
     this.vel.y -= GRAVITY * dt;
     let ny = this.pos.y + this.vel.y * dt;
     let ground = this.pos.x <= QUAY_X ? 0 : -Infinity; // 码头以东是海，没有地面
+    let under: Box | null = null;                      // 脚下垫着的那个盒子（站在地面上就是 null）
     const inset = HALF - 0.03;
     for (let i = 0; i < boxes.length; i++) {
       const b = boxes[i];
       if (this.pos.x + inset <= b.minX || this.pos.x - inset >= b.maxX || this.pos.z + inset <= b.minZ || this.pos.z - inset >= b.maxZ) continue;
-      if (b.maxY <= this.pos.y + step + 0.01 && b.maxY > ground) ground = b.maxY;
+      if (b.maxY <= this.pos.y + step + 0.01 && b.maxY > ground) { ground = b.maxY; under = b; }
       if (this.vel.y > 0 && b.minY >= this.pos.y + h - 0.02 && ny + h > b.minY) { ny = b.minY - h; this.vel.y = 0; }
     }
     const wasAir = !this.onGround;
@@ -119,6 +122,7 @@ export class Player {
       // 落地的震动看摔得多重：平地起跳落回来（每秒 6 米多）不震；从一层箱顶跳下来（每秒 10 米）轻轻一震，越高越重
       if (this.landed && this.vel.y < -7.5) this.addShake(Math.min(0.5, (-this.vel.y - 7.5) * 0.06));
       ny = ground; this.vel.y = 0; this.onGround = true;
+      this.surface = under ? under.surface ?? 'metal' : 'concrete';
     } else { this.onGround = false; this.landed = false; }
     this.pos.y = ny;
     this.inWater = this.pos.y < -2.4;

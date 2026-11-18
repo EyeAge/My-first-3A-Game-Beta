@@ -207,11 +207,11 @@ async function boot() {
       // 站在箱顶、台阶上（脚底高于地面）不算；车间里的地坪和室外一样高，但屋里没有积水，也不算
       const inPuddle = player.onGround && player.pos.y < 0.05 && !indoors && isPuddleAt(player.pos.x, player.pos.z);
       if (player.stepped) {
-        audio.step(player.sprinting, inPuddle);
+        audio.step(player.sprinting, inPuddle, player.surface);   // 脚下是钢板、木头还是水泥，脚步声不一样
         if (inPuddle) effects.splash(player.pos, player.sprinting ? 0.55 : 0.4); // 踩进水里才溅水花：跑比走溅得高
       }
       if (player.landed) {
-        audio.land(inPuddle);
+        audio.land(inPuddle, player.surface);
         if (inPuddle) effects.splash(player.pos, 0.9); else effects.landDust(player.pos); // 跳进水洼是一大片水花，落在别处只扬起一圈尘
       }
       if (player.inWater) {
