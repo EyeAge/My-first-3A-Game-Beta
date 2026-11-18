@@ -615,9 +615,13 @@ export function prepareContainerMarks() {
   for (const size of [20, 40, 'hc'] as const) for (let seed = 0; seed < SEED_VARIANTS; seed++) markLabels({ size, seed });
 }
 
-function buildMarks(plan: Plan): THREE.BufferGeometry | null {
+/**
+ * brand 要单独传进来，不能用 plan.v.brand：方案（Plan）是按 规格|花样|做旧 缓存的，几家船公司共用同一份，
+ * 它里面记的 brand 只是"第一个用到这份方案的箱子"的那一家。
+ */
+function buildMarks(plan: Plan, brand: number): THREE.BufferGeometry | null {
   const { v, H, half: p, top } = plan, hc = v.size === 'hc';
-  const mat = containerMaterials().marks, art = markDecals(v.brand);
+  const mat = containerMaterials().marks, art = markDecals(brand);
   const k = new Kit('container-marks', v.seed);
   const text = markLabels(v), owner = text.owner, type = text.type, logo = art.logo;
   const remap = (g: THREE.BufferGeometry, patch: Patch) => {
@@ -750,7 +754,7 @@ export function containerDetail(o: ContainerOpts): ContainerDetail {
     const plan = planOf(v);
     let core = cores.get(key);
     if (!core) cores.set(key, (core = buildCore(plan)));
-    const marks = buildMarks(plan);
+    const marks = buildMarks(plan, v.brand);
     d = { ...core, marks, triangles: triangles(core.body) + triangles(core.metal) + triangles(core.inside) + triangles(core.wood) + triangles(marks) };
     details.set(full, d);
   }
