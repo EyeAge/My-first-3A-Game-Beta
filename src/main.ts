@@ -255,6 +255,7 @@ async function boot() {
     bolt.wait -= dt; bolt.t += dt;
     if (bolt.wait <= 0) {
       bolt.wait = 30 + Math.random() * 30; bolt.t = 0; bolt.power = 0.3 + 0.7 * Math.random();
+      audio.thunder(bolt.power);                       // 雷声跟着闪电来：越亮的闪电越近，雷声到得越早（延迟在 audio 里算）
       const a = Math.PI * (0.55 + Math.random() * 0.9);
       sky.uniforms.uFlashDir.value.set(Math.cos(a), 0.35 + Math.random() * 0.3, Math.sin(a) * (Math.random() < 0.5 ? -1 : 1)).normalize();
     }
