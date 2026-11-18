@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { clamp, damp } from '../core/math';
-import type { GameAudio } from '../audio/audio';
+import type { GameAudio, LoopVoice } from '../audio/audio';
 import type { Effects } from '../render/effects';
 import type { Colliders, RayHit } from '../world/colliders';
 import type { NavGrid } from '../world/nav';
@@ -343,6 +343,7 @@ export class Enemies {
   clear() {
     for (const e of this.list) this.dispose(e);
     this.list.length = 0; this.wrecks.length = 0; this.recentSpawns.length = 0;
+    this.world.audio.loops([]);                        // 敌人都清掉了，它们身上的持续音也关掉
     this.tokens = 0; this.tokenT = -99; this.wantAirT = this.wantGroundT = -99;
     _m.makeScale(0, 0, 0);
     this.bolts.forEach((b, i) => { b.live = false; this.boltMesh.setMatrixAt(i, _m); });
@@ -747,6 +748,35 @@ export class Enemies {
     }
 
     this.updateBolts(dt, player);
+    this.updateLoops();
+  }
+
+  private loopList: (LoopVoice & { dist: number })[] = [];   // 每帧重填、反复使用的名单，省得每帧新建数组
+  /**
+   * 敌人的持续音：无人机的旋翼声、机器狗和守卫的伺服电机声。只给离镜头最近的 6 个开（而且得在 90 米以内）。
+   * 音量随距离衰减得比一次性的音效快得多（5 米处是满的，20 米处剩四分之一）：它们一直响着，传太远会成为满场的底噪。
+   * 音高跟着动作走：无人机飞得越快越尖，被击落后一路掉调；地面单位站着几乎没声，走起来、转身时才响。
+   */
+  private updateLoops() {
+    const list = this.loopList, cam = this.world.camera.position;
+    list.length = 0;
+    for (const e of this.list) {
+      const dist = e.pos.distanceTo(cam);
+      if (dist > 90 || e.wreck || e.sink > 0) continue;
+      let vol: number, rate: number;
+      if (e.kind === 'gull') {
+        vol = (e.alive ? 1 : 0.5) * 0.5 * (5 / (5 + 0.9 * Math.max(0, dist - 5)));
+        rate = e.alive ? 0.94 + 0.3 * clamp(e.vel.length() / 10, 0, 1) : Math.max(0.4, 1.25 - e.dieT * 0.4);
+      } else {
+        if (!e.alive) continue;                          // 被击毁的地面单位电机已经断电（断电的下滑音在死亡音效里）
+        const speed = e.speed / SPEED_SCALE;             // 换算回参考的速度尺度，下面两个公式里的系数才对得上
+        vol = clamp(0.12 + speed * 0.12 + Math.abs(e.yawRate) * 0.1, 0, 0.8) * (4 / (4 + Math.max(0, dist - 4)));
+        rate = (0.8 + speed * 0.08) * (e.kind === 'guard' ? 0.7 : 1);   // 守卫的电机大，声音低一截
+      }
+      list.push({ key: e, kind: e.kind === 'gull' ? 'rotor' : 'servo', vol, pan: this.spatial(e.pos)[1], rate, dist });
+    }
+    list.sort((a, b) => a.dist - b.dist);
+    this.world.audio.loops(list);
   }
 
   /** 镜头颜色：平时琥珀色，交战变红；预警时猛地变亮（flare），这是玩家判断"它要开火了"的主要依据。 */
