@@ -1,7 +1,8 @@
-import { emissive, type SurfaceName } from '../../render/surfaces';
-import { Kit, type PropModel, type Rgb, type V3 } from '../kit';
+import * as THREE from 'three';
+import { emissive, surface, type SurfaceName } from '../../render/surfaces';
+import { Kit, noise3, type PropModel, type Rgb, type V3 } from '../kit';
 
-// 设备与杂物类道具：发电机、三脚投光灯。
+// 设备与杂物类道具：发电机、三脚投光灯、垃圾箱、工具车。
 //
 // 这些东西不参与玩法，作用只有一个：让堆场看起来"有人在这里干过活"。
 // 所以每一件都是成组出现的：发电机旁边立着投光灯，中间拖一根电缆；工具车的台面上丢着扳手和抹布。
@@ -238,9 +239,208 @@ export function floodlightStand(o: EquipOpts & { on?: boolean } = {}): PropModel
   });
 }
 
+// ================================================================ 垃圾箱
+/** 零件自己的摆放矩阵：先按 rot 转，再挪到 pos。给 Kit.add 直接放几何体时用（零件箱没有现成基本体的形状：拱起的盖子、揉皱的袋子、弯贴片）。 */
+const xf = (pos: V3, rot: V3 = [0, 0, 0]) =>
+  new THREE.Matrix4().compose(new THREE.Vector3(...pos), new THREE.Quaternion().setFromEuler(new THREE.Euler(...rot)), new THREE.Vector3(1, 1, 1));
+
+/** 脚轮：顶上一块安装板，两片叉板夹着一只橡胶轮。r 是轮子半径；原点在安装板中心的正下方地面上。垃圾箱和工具车都用它。 */
+function caster(k: Kit, r: number, mountY: number) {
+  const s = r / 0.08; // 其余尺寸跟着轮子大小等比例缩放（0.08 是垃圾箱那只的半径）
+  const off = 0.035 * s; // 轮轴比安装板靠后一点：推着走的时候轮子会自己转到身后，这就是"万向轮"
+  k.box('steel_galv', 0.13 * s, 0.012 * s, 0.11 * s, 0, mountY, 0, { c: 0.003, tint: 0.7 });
+  for (const side of [1, -1]) k.bar('steel_galv', [off, r, side * 0.034 * s], [0, mountY - 0.004, side * 0.034 * s], 0.05 * s, 0.006 * s, { plain: true, tint: 0.65 });
+  k.cyl('rubber', r, 0.045 * s, off, r, 0, { axis: 'z', seg: 12, tint: 0.9 });
+  k.cyl('steel_galv', r * 0.44, 0.05 * s, off, r, 0, { axis: 'z', seg: 8, tint: 0.6 });
+}
+
+/** 垃圾箱盖：一块薄板，顶面中间微微拱起（塑料盖都是这样，为了不积水）。只有顶面的顶点被抬高。 */
+function lidGeometry(w: number, t: number, d: number, bulge: number) {
+  const g = new THREE.BoxGeometry(w, t, d, 4, 1, 5);
+  const p = g.getAttribute('position');
+  for (let i = 0; i < p.count; i++) if (p.getY(i) > 0) p.setY(i, p.getY(i) + bulge * Math.cos((p.getZ(i) / d) * PI) * Math.cos((p.getX(i) / w) * PI));
+  g.computeVertexNormals();
+  return g;
+}
+
+/**
+ * 一团软东西（垃圾袋）：从一个只有 120 个三角形的球出发，
+ * 先把它往"方枕头"的形状上靠（坐标的绝对值开 0.6 次方 —— 越靠近 0 的分量被放大得越多，球就鼓成了圆角的方块），
+ * 再按噪声把每个顶点推来推去，揉出褶子。最后重算法线。
+ */
+function blobGeometry(sx: number, sy: number, sz: number, seed: number) {
+  const g = new THREE.SphereGeometry(1, 10, 7);
+  const p = g.getAttribute('position');
+  const boxy = (v: number) => Math.sign(v) * Math.pow(Math.abs(v), 0.6);
+  for (let i = 0; i < p.count; i++) {
+    let x = boxy(p.getX(i)) * sx / 2, y = boxy(p.getY(i)) * sy / 2, z = boxy(p.getZ(i)) * sz / 2;
+    const n = noise3(x * 6 + seed, y * 6, z * 6) - 0.5;
+    x += n * 0.06; z += n * 0.06; y += n * 0.04;
+    p.setXYZ(i, x, y, z);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+
+/**
+ * 带轮子的大垃圾箱 1.9 × 1.35 × 1.1。箱体的横截面是个梯形：正面（+z）往外斜，背面几乎是直的。
+ * 两片塑料盖一片盖着、一片向后掀开搭在背后，掀开的那半边能看到里面的垃圾袋。
+ */
+export function dumpster(o: EquipOpts & { color?: PaintColor; label?: string } = {}): PropModel {
+  const seed = o.seed ?? 0;
+  return cached('dumpster', [seed, o.color, o.label, o.interior], () => {
+    const k = new Kit('dumpster', seed, { interior: o.interior });
+    const { mat: body, shade } = paint(o.color, 'green');
+    const HX = 0.89;                    // 箱体半长
+    const Y0 = 0.2, Y1 = 1.12;          // 箱底、上口的高度
+    const ZF0 = 0.3, ZF1 = 0.5;         // 正面：箱底处、上口处的 z
+    const ZB0 = -0.44, ZB1 = -0.5;      // 背面：箱底处、上口处的 z
+    const WALL = 0.022;                 // 壁厚
+    // 箱体 = 一个"U"字形的截面沿 x 拉长。截面画在 (−z, y) 平面里，绕 y 转 90° 之后，挤出方向就成了 x
+    const section: [number, number][] = [
+      [-ZF1, Y1], [-ZF0, Y0], [-ZB0, Y0], [-ZB1, Y1],                                                          // 外轮廓：正面上口 → 箱底 → 背面上口
+      [-ZB1 - WALL, Y1], [-ZB0 - WALL * 0.8, Y0 + WALL], [-ZF0 + WALL * 0.8, Y0 + WALL], [-ZF1 + WALL, Y1],  // 内轮廓，往回走
+    ];
+    k.extrude(body, section, HX * 2, { rot: [0, HALF, 0], soft: 0, tint: (x, y) => shade(0.9 + 0.1 * noise3(x * 3 + seed * 2.3, y * 3, 0)) });
+    for (const s of [1, -1]) {
+      k.extrude(body, [[-ZF1, Y1], [-ZF0, Y0], [-ZB0, Y0], [-ZB1, Y1]], WALL, { pos: [s * (HX - WALL / 2), 0, 0], rot: [0, HALF, 0], soft: 0, tint: shade(0.95) }); // 端板
+      k.box(body, 0.05, 0.045, ZF1 - ZB1 + 0.04, s * HX, Y1, 0, { c: 0.008, tint: shade(0.9) });                // 端头的口沿
+      for (const z of [-0.22, 0.14]) k.box(body, 0.03, 0.84, 0.05, s * (HX + 0.012), 0.66, z, { c: 0.006, tint: shade(0.9) }); // 两根竖筋
+      k.box(body, 0.035, 0.1, 0.84, s * (HX + 0.014), 0.93, 0, { c: 0.008, tint: shade(0.85) });                // 一根横梁
+      // 吊耳轴：垃圾车就是叉着这两根轴把箱子举起来倒的，所以磨得发亮
+      k.tube('steel_worn', [s * (HX + 0.01), 0.93, 0.3], [s * (HX + 0.065), 0.93, 0.3], 0.03, { seg: 10, cap: true, tint: 0.7 });
+      k.cyl('steel_worn', 0.042, 0.008, s * (HX + 0.064), 0.93, 0.3, { axis: 'x', seg: 10, tint: 0.6 });
+    }
+    k.box(body, HX * 2 + 0.04, 0.045, 0.05, 0, Y1, ZF1, { c: 0.008, tint: shade(0.9) }); // 前后口沿
+    k.box(body, HX * 2 + 0.04, 0.045, 0.05, 0, Y1, ZB1, { c: 0.008, tint: shade(0.9) });
+    // 前后斜面上各 4 根加强筋，顺着斜面走（方杆，两个端点落在斜面外侧）
+    for (const x of [-0.6, -0.2, 0.2, 0.6]) {
+      k.bar(body, [x, Y0 + 0.03, ZF0 + 0.022], [x, Y1 - 0.04, ZF1 + 0.012], 0.055, 0.03, { c: 0.006, tint: shade(0.9) });
+      k.bar(body, [x, Y0 + 0.03, ZB0 - 0.016], [x, Y1 - 0.04, ZB1 - 0.012], 0.055, 0.03, { c: 0.006, tint: shade(0.9) });
+    }
+    const slope = (ZF1 - ZF0) / (Y1 - Y0);                    // 正面每升高 1 米往外斜多少
+    const frontZ = (y: number) => ZF0 + (y - Y0) * slope;      // 正面在高度 y 处的 z
+    k.bar(body, [-HX, Y0 + 0.5, frontZ(Y0 + 0.5) + 0.022], [HX, Y0 + 0.5, frontZ(Y0 + 0.5) + 0.022], 0.06, 0.03, { c: 0.006, tint: shade(0.88) }); // 腰上一道横筋
+    // 正面的字和污渍。正面是往外斜的（上口比箱底靠外），贴片要跟着仰同样的角度才贴得平。
+    // （参考里这个角度的正负号写反了，贴片会一半扎进箱壁里；这里按实际的斜面算）
+    const tilt: V3 = [Math.atan(slope), 0, 0];
+    const onFront = (x: number, y: number): V3 => [x, y, frontZ(y) + 0.003];
+    k.decal('grime_streak', 0.36, onFront(0.4, 0.8), tilt, 0.6);
+    k.decal('rust_run', 0.3, onFront(0, 0.455), tilt, 0.46); // 顶边正好在腰上那道横筋的下沿：锈是从筋的焊缝里淌出来的
+    k.decal('leak_stain', 0.34, onFront(-0.4, 0.45), tilt, 0.45);
+    k.label(o.label ?? `四号泊位废物 ${11 + (seed % 2)}`, { color: 'white', font: 'stencil', distress: 0.5 }, 0.36, 0.09, onFront(-0.4, 0.93), tilt);
+    // 公司标是藏青色的，直接贴在深绿的箱体上看不清：先钉一块白铁皮牌子，再把标贴在牌子上
+    k.box('paint_white', 0.33, 0.115, 0.004, ...onFront(0.4, 0.42), { plain: true, rot: tilt, tint: 0.92 });
+    k.decal('logo_c', 0.3, [0.4, 0.42, frontZ(0.42) + 0.0065], tilt);
+
+    // 盖子：后沿一根铰轴，两片盖各自绕着它转
+    const HY = Y1 + 0.045, HZ = ZB1 - 0.02; // 铰轴的高度和 z
+    k.tube('steel_galv', [-HX - 0.02, HY, HZ], [HX + 0.02, HY, HZ], 0.013, { seg: 6, cap: true, tint: 0.7 });
+    const lid = (x: number, open: number) => k.at([x, HY, HZ], [open, 0, 0], () => {
+      const D = 1.07, shadeLid = k.range(0.75, 0.95); // 盖子从铰轴往前伸 1.07 米
+      k.add('plastic_grey', lidGeometry(0.885, 0.04, D, 0.018), { tint: shadeLid }, xf([0, 0.005, D / 2]));
+      for (const rx of [-0.26, 0.26]) k.box('plastic_grey', 0.07, 0.016, D - 0.16, rx, 0.036, D / 2, { c: 0.006, tint: shadeLid * 0.9 }); // 两道筋
+      k.box('plastic_grey', 0.3, 0.035, 0.05, 0, 0.02, D + 0.01, { c: 0.01, tint: shadeLid * 0.8 });                                      // 前沿的把手
+      for (const rx of [-0.3, 0.3]) k.box('plastic_grey', 0.08, 0.03, 0.09, rx, 0.005, 0.03, { plain: true, tint: shadeLid * 0.8 });      // 铰链座
+    });
+    lid(-0.45, 0);
+    // 另一片翻过去 270° 挂在背后：绕 x 轴转 90° 多一点，盖子就从"平着往前伸"变成"贴着后壁往下垂"
+    lid(0.45, HALF + 0.07 + k.range(0, 0.05));
+    // 掀开的那半边：三只黑垃圾袋，一片竖着插在里面的纸板
+    const bags: [number, number, number, number][] = [[0.45, 0.93, 0.05, 1], [0.66, 0.9, -0.24, 0.8], [0.22, 0.86, -0.2, 0.85]];
+    for (const [x, y, z, s] of bags) k.add('polymer_black', blobGeometry(0.46 * s, 0.4 * s, 0.42 * s, k.rng() * 20), { tint: 0.8 }, xf([x, y, z], [k.rng() * 0.5, k.rng() * 6, 0]));
+    k.strip('cardboard', [[0.2, 0.9, 0.2], [0.24, 1.14, 0.26], [0.3, 1.2, 0.33]], [0.16, 0, -0.05], { tint: 0.7 });
+    // 四只万向脚轮，各朝各的方向
+    for (const x of [-0.7, 0.7]) for (const z of [-0.3, 0.17]) k.at([x, 0, z], [0, k.rng() * 6, 0], () => caster(k, 0.08, 0.194));
+
+    return k.finish({ size: [1.9, 1.35, 1.1], boxes: [{ min: [-0.95, 0.05, -0.56], max: [0.95, 1.2, 0.55] }], surface: 'metal' });
+  });
+}
+
+// ================================================================ 工具车
+/**
+ * 修理工的工具车 0.9 × 0.95 × 0.5：红色柜体、五层抽屉（其中一层没推到底）、一端有推手、四只脚轮。
+ * 台面上摆着干活干到一半的东西：扳手、小锤、一排套筒、喷剂、螺丝刀、一块抹布。
+ * （规格文档把小锤和螺丝刀写成了"木柄螺丝刀"和"记号笔"。按参考里实际的零件看 —— 木柄 + 横着的钢块、
+ * 黄色粗柄 + 细钢杆 —— 是锤子和螺丝刀，这里按零件的样子做。）
+ */
+export function toolboxCart(o: EquipOpts & { color?: PaintColor; label?: string } = {}): PropModel {
+  const seed = o.seed ?? 0;
+  return cached('toolbox_cart', [seed, o.color, o.label, o.interior], () => {
+    const k = new Kit('toolbox_cart', seed, { interior: o.interior });
+    const { mat: body, shade } = paint(o.color, 'red');
+    const CX = 0.04, LEN = 0.74, Y0 = 0.125, Y1 = 0.785, HZ = 0.23; // 柜体中心的 x（推手占了 -x 那头）、长、底、顶、半宽
+    k.box(body, LEN, Y1 - Y0, HZ * 2, CX, (Y0 + Y1) / 2, 0, { c: 0.012, tint: shade() });
+    k.box('steel_dark', LEN + 0.01, 0.02, HZ * 2 + 0.01, CX, Y0 + 0.004, 0, { c: 0.006, tint: 0.5 });
+    // 抽屉：从上往下 5 层，越往下越高。其中一层拉出来 5 厘米，另有几层没关严（差 4 毫米）
+    const pulled = 1 + (seed % 3);
+    let top = Y1 - 0.03;
+    [0.075, 0.075, 0.1, 0.13, 0.19].forEach((h, i) => {
+      const out = i === pulled ? 0.05 : k.rng() < 0.3 ? 0.004 : 0, cy = top - h / 2;
+      k.box(body, LEN - 0.05, h - 0.01, 0.014, CX, cy, HZ + 0.005 + out, { c: 0.004, tint: shade(k.range(0.9, 1)) });
+      k.box('aluminium', LEN - 0.09, 0.016, 0.016, CX, cy + h / 2 - 0.02, HZ + 0.019 + out, { c: 0.004, tint: 0.85 }); // 通长的铝拉手
+      if (out > 0.01) {
+        // 拉出来的那层：露出抽屉的侧壁、垫在里面的黑胶垫，还有几根从缝里能看到的钢棒（批头、冲子之类）
+        k.box('steel_dark', LEN - 0.07, h - 0.02, out, CX, cy, HZ + out / 2, { plain: true, tint: 0.4 });
+        k.box('rubber', LEN - 0.08, 0.004, out, CX, cy + h / 2 - 0.012, HZ + out / 2, { plain: true, tint: 0.5 });
+        for (let j = 0; j < 4; j++) k.tube('aluminium', [CX - 0.25 + j * 0.15, cy + h / 2 - 0.016, HZ + 0.008], [CX - 0.23 + j * 0.15, cy + h / 2 - 0.014, HZ + out - 0.012], 0.007, { seg: 5, cap: true, tint: 0.75 });
+      }
+      top -= h;
+    });
+    k.cyl('aluminium', 0.011, 0.008, CX + LEN / 2 - 0.06, Y1 - 0.016, HZ + 0.004, { axis: 'z', seg: 8, tint: 0.75 }); // 锁芯
+    // 台面：一张橡胶垫，后面和两头有挡边，东西不会滚下去
+    k.box('rubber', LEN - 0.04, 0.006, HZ * 2 - 0.04, CX, Y1 + 0.003, 0, { plain: true, tint: 0.9 });
+    k.box(body, LEN, 0.03, 0.014, CX, Y1 + 0.013, -HZ + 0.007, { c: 0.004, tint: shade(0.95) });
+    for (const s of [1, -1]) k.box(body, 0.014, 0.03, HZ * 2, CX + s * (LEN / 2 - 0.007), Y1 + 0.013, 0, { c: 0.004, tint: shade(0.95) });
+    // 推手：一根弯成 U 形的铝管
+    k.hose('aluminium', [[CX - LEN / 2, 0.56, -0.17], [-0.41, 0.6, -0.17], [-0.435, 0.73, -0.17], [-0.435, 0.73, 0.17], [-0.41, 0.6, 0.17], [CX - LEN / 2, 0.56, 0.17]], 0.012, { seg: 6, steps: 20, tint: 0.85 });
+    // 脚轮：推手那头两只是定向的，另一头两只万向（随机朝向）
+    for (const sx of [1, -1]) for (const sz of [1, -1]) k.at([CX + sx * (LEN / 2 - 0.07), 0, sz * (HZ - 0.06)], [0, sx > 0 ? k.rng() * 6 : 0, 0], () => caster(k, 0.05, 0.119));
+    k.label(o.label ?? `检修 ${1 + (seed % 2)}`, { color: 'white', font: 'stencil', distress: 0.4 }, 0.3, 0.07, [CX + LEN / 2 + 0.002, 0.6, 0], [0, HALF, 0]);
+    k.decal('logo_d', 0.3, [CX + LEN / 2 + 0.002, 0.42, 0], [0, HALF, 0]);
+    k.decal('grime_streak', 0.3, [CX, 0.45, -HZ - 0.002], [0, PI, 0], 0.6);
+
+    // ---- 台面上的东西
+    // 工具都是亮钢。材质表里有专门的"拉丝钢"，但它和拉手用的铝是同一种质感、只差一点颜色，
+    // 所以这里直接用铝、压暗一成：整辆车少一种材质，就少一次绘制调用。
+    const TOOL = 'aluminium', DESK = Y1 + 0.006;
+    k.at([CX - 0.18, DESK, 0.08], [0, 0.5, 0], () => { // 梅花开口两用扳手：一头是整圈，一头缺个口
+      k.box(TOOL, 0.2, 0.006, 0.02, 0, 0.004, 0, { c: 0.002, tint: 0.9 });
+      k.torus(TOOL, 0.016, 0.006, 0.11, 0.005, 0, { axis: 'y', tubeSeg: 4, seg: 10, tint: 0.9 });
+      k.add(TOOL, new THREE.TorusGeometry(0.017, 0.006, 4, 7, PI * 1.4), { tint: 0.9 }, xf([-0.112, 0.005, 0], [HALF, 0, 2.2]));
+    });
+    k.at([CX + 0.02, DESK, -0.1], [0, -0.3, 0], () => { // 小锤：木柄 + 钢锤头
+      k.tube('wood_pallet', [-0.14, 0.014, 0], [0.12, 0.016, 0], 0.012, { r2: 0.01, seg: 6, cap: true, tint: 0.9 });
+      k.box('steel_dark', 0.032, 0.03, 0.1, 0.125, 0.017, 0.005, { c: 0.006, tint: 0.8 });
+    });
+    k.at([CX + 0.2, DESK, 0.1], [0, 0.12, 0], () => { // 一排 6 个套筒，从小到大插在黑色的卡条上
+      k.box('rubber', 0.22, 0.014, 0.05, 0, 0.007, 0, { c: 0.004, tint: 1.6 });
+      for (let i = 0; i < 6; i++) k.cyl(TOOL, 0.008 + i * 0.0014, 0.03, -0.085 + i * 0.034, 0.029, 0, { seg: 8, tint: 0.9 });
+    });
+    // 一罐蓝色喷剂：罐身、收口的肩、红色喷头
+    k.cyl('plastic_blue', 0.032, 0.13, CX + 0.28, DESK + 0.065, -0.12, { seg: 12, tint: 0.9 });
+    k.lathe(TOOL, [[0.032, 0], [0.028, 0.012], [0.014, 0.018], [0.014, 0.018], [0.014, 0.03], [0, 0.03]], CX + 0.28, DESK + 0.13, -0.12, { seg: 10, tint: 0.9 });
+    k.cyl('paint_red', 0.012, 0.014, CX + 0.28, DESK + 0.165, -0.12, { seg: 8, tint: 0.95 }); // 喷头。默认的红柜体用的就是这种红漆，不为这一小粒多带一种材质
+    // 黄柄螺丝刀
+    k.tube('paint_yellow', [CX - 0.3, DESK + 0.012, -0.13], [CX - 0.2, DESK + 0.012, -0.16], 0.014, { seg: 7, cap: true, tint: 0.9 });
+    k.tube(TOOL, [CX - 0.2, DESK + 0.012, -0.16], [CX - 0.08, DESK + 0.01, -0.196], 0.004, { seg: 5, cap: true, tint: 0.9 });
+    // 一块揉皱的红抹布：一块分了格的薄板，顶面按噪声拱起褶子，边缘再左右扯歪一点
+    const rag = new THREE.BoxGeometry(0.16, 0.012, 0.12, 6, 1, 5), rp = rag.getAttribute('position'), wrinkle = k.rng() * 9;
+    for (let i = 0; i < rp.count; i++) {
+      const x = rp.getX(i), y = rp.getY(i), z = rp.getZ(i);
+      rp.setXYZ(i, x + 0.014 * (noise3(z * 20, wrinkle, 0) - 0.5), y + (y > 0 ? 0.03 * noise3(x * 26 + wrinkle, z * 26, 0) : 0), z + 0.01 * (noise3(x * 20, wrinkle + 3, 0) - 0.5));
+    }
+    rag.computeVertexNormals();
+    // 抹布的颜色不在材质表里：借手套布的质感，把颜色换成暗红。多出一个材质，但全场只有这一小块
+    k.add(surface('glove_fabric', { vertexColors: true, interior: o.interior, color: 0x7d2b24 }), rag, { tint: 0.9 }, xf([CX - 0.25, DESK + 0.006, 0.115], [0, 0.8, 0]));
+
+    return k.finish({ size: [0.9, 0.95, 0.5], boxes: [{ min: [-0.45, 0, -0.25], max: [0.45, 0.95, 0.25] }], surface: 'metal' });
+  });
+}
+
 // ================================================================ 名字 → 建模函数
 /** 按参考道具表里的名字取建模函数。每个函数都只接受一个参数对象，都可以不给。 */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const EQUIPMENT: Record<string, (o?: any) => PropModel> = {
-  generator, floodlight_stand: floodlightStand,
+  generator, floodlight_stand: floodlightStand, dumpster, toolbox_cart: toolboxCart,
 };
