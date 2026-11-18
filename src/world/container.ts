@@ -22,9 +22,11 @@ import { Kit, type LocalBox, type PropModel, type Rgb, type Tint, type V3 } from
 //   3. 喷字和污迹是贴在表面外 3 毫米的小面片。侧板上的字不是一张平板，而是沿着波纹截面折出来的带子，
 //      斜着看的时候字会跟着棱起伏。
 //
-//   4. 同一只箱子有两份几何：精模（detail，20 尺箱六千、40 尺箱七千多个三角形）和简模（lod，两百个三角形以内的平板盒子）。
-//      离得远的箱子用简模，颜色和脏污照样有，只是没有起伏和小零件。
-//      两份几何的漆面贴图是对齐的（见 addPanel），切换的时候斑驳不会跳。
+//   4. 同一只箱子有三份几何，由近到远换着用：
+//        精模（detail）  20 尺箱六千、40 尺箱七千多个三角形，什么都有；
+//        中模（mid）     一千五到两千七百个三角形：波纹和框架还在，凹坑、门上的小零件和小字没了；
+//        简模（lod）     两百个三角形上下的平板盒子，颜色和脏污照样有，只是没有起伏。
+//      三份几何的漆面贴图是对齐的（见 addPanel），切换的时候斑驳不会跳。
 //
 // 坐标约定：长边沿 x，箱门在 +x 端，前端板在 -x 端；宽沿 z；底面在 y=0，原点在占地中心。
 
@@ -319,8 +321,11 @@ function makePlan(v: ContainerVariant) {
     stain(c, MUD, mud);
     return c;
   };
-  /** 侧板的漆：在基础明暗上再加三样 —— 波纹槽里压暗、顶梁淌下来的锈条、凹坑里掉漆发锈。 */
-  const sidePaint = (x: number, y: number, z: number): Rgb => {
+  /**
+   * 侧板的漆：在基础明暗上再加三样 —— 波纹槽里压暗、顶梁淌下来的锈条、凹坑里掉漆发锈。
+   * pits 给 false 就不画坑里的锈：中模的侧板没有把坑压进去，顶点也稀，硬把锈色写上去会抹成一大片。
+   */
+  const sidePaint = (x: number, y: number, z: number, pits = true): Rgb => {
     const side = z > 0 ? 1 : -1, c = shade(x, y, z);
     // 槽里照不到多少天光，压暗一点（假的"环境光遮蔽"）。凹进去 8 毫米开始暗，34 毫米暗到头
     const groove = sstep(0.008, 0.034, PANEL_Z - Math.abs(z));
@@ -330,7 +335,7 @@ function makePlan(v: ContainerVariant) {
       const t = Math.abs(x - s.x) / s.halfWidth;
       if (t < 1) stain(c, RUST_TINT, hang * hang * s.strength * (1 - t * t) * (0.45 + 0.55 * wear));
     }
-    const dent = dentAt(x, y, side);
+    const dent = pits ? dentAt(x, y, side) : 0;
     if (dent > 0.004) stain(c, BARE, Math.min(0.8, dent * 22));
     return c;
   };
@@ -409,18 +414,18 @@ const SLOT = { side: (side: number, i: number) => (side > 0 ? 0 : 40) + i, roof:
 const sideSheets = (plan: Plan) => sheets(embed(plan.sideKnots, 0.02), 16); // 16 格 = 4 个波纹周期，1.1 米一张
 /** 箱顶切成哪几张。 */
 const roofSheets = (plan: Plan) => sheets(ribKnots(-plan.half + 0.062, plan.half - 0.13, ROOF_RIB, -plan.half + 0.1), 20); // 20 格 = 5 个波纹周期，一米一张
-/** 一串板各自占哪一段 [起, 止]；第一张的起点和最后一张的终点换成 from / to（简模的平板要一直铺到箱子的边上）。 */
+/** 一串板各自占哪一段 [起, 止]；第一张的起点和最后一张的终点换成 from / to（简模、中模的平板要一直铺到箱子的边上）。 */
 const spans = (list: [number, number][][], from: number, to: number) => list.map((sheet, i): [number, number] => [i === 0 ? from : sheet[0][0], i === list.length - 1 ? to : sheet[sheet.length - 1][0]]);
 
 /**
  * 把一张大板（侧板、箱顶、前端板）放进零件箱，并且自己指定它的漆面贴图挪到哪里。
  *
  * 平时这件事是零件箱替我们做的：它按"这是第几个零件"给每个零件的贴图随机挪一个位置（kit.ts），免得每块板在同一个地方掉同一块漆。
- * 可是同一只箱子有精模和简模两份几何，零件的个数和顺序各不相同 —— 同一张板在两份几何里会被挪到两个不同的地方。
+ * 可是同一只箱子有精模、中模、简模三份几何，零件的个数和顺序各不相同 —— 同一张板在三份几何里会被挪到三个不同的地方。
  * 于是箱子在远近之间切换的那一刻，整面漆的斑驳会"唰"地换一套，比波纹消失还显眼。
  *
  * 所以这几张大板不让零件箱挪（shift: false），改成按"哪个变体的第几张板"算一个固定的位移：
- * 两份几何里同一张板算出来的位移相同，漆面就严丝合缝地接得上。
+ * 三份几何里同一张板算出来的位移相同，漆面就严丝合缝地接得上。
  *
  * 位移怎么加上去：零件箱是按几何体"摆放之前"的位置铺贴图的。那就先把板平移 t，让它照这个位置铺，
  * 再用摆放矩阵把板挪回原处 —— 形状一点没动，贴图挪了 t。
@@ -436,6 +441,22 @@ function partOf(model: PropModel, name: SurfaceName) {
   const found = (model.group.children as THREE.Mesh[]).filter((c) => c.name.endsWith(`:${name}`)).map((c) => c.geometry);
   return found.length > 1 ? mergeGeometries(found) : found[0] ?? null; // 同一种材质里有的零件投影、有的不投影时，零件箱会分成两块，这里并回去
 }
+
+/** 门板上横向压型的高度：平的地方离门板中面 19 毫米，凸起的地方 31 毫米。 */
+const DOOR_RIB = { low: 0.019, high: 0.031 };
+/**
+ * 门板压型的竖向截面：一串 [高度, 凸出多少]。6 道（高箱 7 道）凸起，每一道上下各留一段平边和一段斜边。
+ * 精模和中模的门都照它来折。
+ */
+function doorProfile(size: ContainerSize): [number, number][] {
+  const doorTop = CONTAINER_SIZES[size].height - 0.124, ribs = size === 'hc' ? 7 : 6, y0 = DOOR_Y0 + 0.085, y1 = doorTop - 0.085, pitch = (y1 - y0) / ribs;
+  const profile: [number, number][] = [];
+  for (let i = 0; i < ribs; i++) { const y = y0 + i * pitch; profile.push([y, DOOR_RIB.low], [y + 0.022, DOOR_RIB.low], [y + 0.05, DOOR_RIB.high], [y + pitch - 0.05, DOOR_RIB.high], [y + pitch - 0.022, DOOR_RIB.low]); }
+  profile.push([y1, DOOR_RIB.low]);
+  return profile;
+}
+/** 四根锁杆离铰链多远（每扇门两根），和锁杆的半径、离门板中面多远。 */
+const LOCK_RODS = { offsets: [0.31, 0.83], radius: 0.0155, out: 0.052 };
 
 /** 前端板外平面的 x（p 是半个箱长）。 */
 const frontX = (p: number) => -(p - 0.014);
@@ -516,13 +537,8 @@ function buildCore(plan: Plan): Core {
     k.push([hingeX, 0, side * HINGE_Z], [0, -side * doorAngle(v.doors, side), 0]);
     const along = (d: number) => -side * d;
     k.box(body, 0.034, leafH, LEAF_W + 0.003, 0, mid, along(LEAF_W / 2 - 0.0045), { c: 0.008, ...paint }); // 门板。铰链那一侧多伸 6 毫米压进门角柱，不留缝
-    // 门面的横向压型：6 道（高箱 7 道）凸起，每道从 19 毫米凸到 31 毫米，上下各留一段平边和一段斜边。
-    // 左右两头收回到平的（最外面两排顶点不凸），像真的冲压件那样，凸起是封口的
-    const ribs = hc ? 7 : 6, y0 = DOOR_Y0 + 0.085, y1 = doorTop - 0.085, pitch = (y1 - y0) / ribs, LOW = 0.019, HIGH = 0.031;
-    const profile: [number, number][] = [];
-    for (let i = 0; i < ribs; i++) { const y = y0 + i * pitch; profile.push([y, LOW], [y + 0.022, LOW], [y + 0.05, HIGH], [y + pitch - 0.05, HIGH], [y + pitch - 0.022, LOW]); }
-    profile.push([y1, LOW]);
-    k.add(body, ribbedSheet(profile, [0.06, 0.085, LEAF_W - 0.095, LEAF_W - 0.07], (y, bulge, d, row) => [row === 0 || row === 3 ? LOW : bulge, y, along(d)], [1, 0, 0]), paint);
+    // 门面的横向压型（截面见 doorProfile）。左右两头收回到平的（最外面两排顶点不凸），像真的冲压件那样，凸起是封口的
+    k.add(body, ribbedSheet(doorProfile(v.size), [0.06, 0.085, LEAF_W - 0.095, LEAF_W - 0.07], (y, bulge, d, row) => [row === 0 || row === 3 ? DOOR_RIB.low : bulge, y, along(d)], [1, 0, 0]), paint);
     // 胶条：中缝一条竖的，上下各一条横的
     k.box(body, 0.022, leafH + 0.012, 0.018, 0.004, mid, along(LEAF_W + 0.001), { plain: true, tint: RUBBER });
     for (const y of [doorTop + 0.004, DOOR_Y0 - 0.004]) k.box(body, 0.022, 0.016, LEAF_W, 0.004, y, along(LEAF_W / 2), { plain: true, tint: RUBBER });
@@ -533,8 +549,8 @@ function buildCore(plan: Plan): Core {
       k.cyl('steel_galv', 0.013, 0.086, 0.026, y, along(-0.002), { seg: 6, open: true, ...zinc() });
     }
     // 锁杆：每扇两根竖的镀锌圆管，贯穿门的上下。转动把手，杆两头的凸轮就卡进门楣和门槛上的锁座
-    for (const d of [0.31, 0.83]) {
-      k.cyl('steel_galv', 0.0155, leafH + 0.2, 0.052, mid, along(d), { seg: 7, open: true, ...zinc() });
+    for (const d of LOCK_RODS.offsets) {
+      k.cyl('steel_galv', LOCK_RODS.radius, leafH + 0.2, LOCK_RODS.out, mid, along(d), { seg: 7, open: true, ...zinc() });
       for (const e of [-1, 1]) {
         k.box('steel_galv', 0.03, 0.045, 0.085, 0.048, mid + e * (leafH / 2 + 0.065), along(d), { plain: true, ...zinc() }); // 凸轮
         k.box(body, 0.03, 0.05, 0.075, 0.04, mid + e * (leafH / 2 - 0.035), along(d), { plain: true, ...paint });           // 把杆固定在门上的托架
@@ -550,7 +566,7 @@ function buildCore(plan: Plan): Core {
     k.pop();
   }
   // 门楣和门槛上的锁座：对着四根锁杆各一个（它们长在门框上，不跟着门转）
-  for (const side of [1, -1]) for (const d of [0.31, 0.83]) for (const y of [H - 0.07, 0.115]) {
+  for (const side of [1, -1]) for (const d of LOCK_RODS.offsets) for (const y of [H - 0.07, 0.115]) {
     k.box(body, 0.035, 0.05, 0.11, p - 0.03, y, side * (HINGE_Z - d), { plain: true, ...paint });
   }
 
@@ -718,12 +734,96 @@ function buildMarks(plan: Plan, brand: number): THREE.BufferGeometry | null {
   return (k.finish({ grime: 0 }).group.children[0] as THREE.Mesh | undefined)?.geometry ?? null;
 }
 
-// ====================================================================== 简模
+// ====================================================================== 中模和简模
 
 /** 波纹槽里的压暗，精模是一道一道的；没有波纹的平板只能取平均：斜面和内平面合起来占一个周期的将近一半。 */
 const grooveShare = (c: Corrugation) => (c.slope + (c.period - c.flat - 2 * c.slope)) / c.period;
-/** 简模侧面的几排高度：泥污在 0.44 米以下最浓，锈条集中在离箱顶半米以内，中间一大段没什么变化。精模的侧板也有这几排。 */
+/** 中模、简模共用的几排高度：泥污在 0.44 米以下最浓，锈条集中在离箱顶半米以内，中间一大段没什么变化。精模的侧板也有这几排。 */
 const coarseRows = (lo: number, hi: number, H: number) => [lo, 0.44, H - 0.5, hi];
+
+/**
+ * 中等距离用的"中模"：40 尺箱两千六百多个三角形，20 尺箱一千五百多个，大约是精模的三分之一。
+ *
+ * 留下的：两块侧板和前端板的真波纹（和精模用同一套折点，所以棱的位置、明暗一模一样），上下侧梁和角柱那一圈框的轮廓，
+ *         门板上那几道横向的压型，顶点色里的泥污和锈条。四根镀锌锁杆也留着，不过它们不是漆的颜色，另算一块（见 containerMidRods）。
+ * 省掉的：凹坑（要很密的顶点才压得圆）、箱顶的波纹（从地面看不见）、角件、通风器，门上的铰链、把手、锁座、胶条 ——
+ *         两扇门在这里是连成一片的一张压型板。
+ *         喷字也不带：箱主代号那样的小字二十几米外已经认不出来了；只有侧面那块三米多宽的船公司标还看得清，
+ *         它用简模的那张平面片（containerLodLogo）顶替。
+ *
+ * 为什么要有它：二十几米外已经看不清锁杆和铰链了，但波纹板在斜阳底下一道亮一道暗，隔着五六十米还看得出来。
+ * 只有精模和简模两档的话，箱子一换成简模就从"波纹铁皮"变成"光板"，走着走着能看见前面的箱子一只只变平。
+ */
+function buildMid(plan: Plan) {
+  const { v, L, H, half: p, shade } = plan;
+  const k = new Kit('container-mid', kitSeed(v));
+  const paint = { tint: shade };
+  /** 一块朝 out 方向的平板：a 轴从 a0 到 a1 分 n 格，b 轴从 b0 到 b1 一格；at 把 (a, b) 换成顶点坐标。框上的各条边都用它。 */
+  const flat = (a0: number, a1: number, n: number, b0: number, b1: number, at: (a: number, b: number) => V3, out: V3) => k.add(BODY, ribbedSheet(flatKnots(a0, a1, n), [b0, b1], (a, _d, b) => at(a, b), out), paint);
+  const RAIL0 = 0.17, RAIL1 = H - 0.062, long = L > 7 ? 5 : 3; // 下侧梁的顶面、上侧梁的底面；长边上的梁分几格（格子多一点，顶点色的深浅才有变化）
+  // 框在这里只是贴在外面的平条，没有厚度；波纹板在它后面几厘米。斜着看过去，视线会从平条的边上"钻"到板的后面，
+  // 所以每块板都要往平条背后多伸出去一截（上下各伸到 LAP0 / LAP1），把这条缝堵上。精模的框是实心的方梁，没有这个问题
+  const LAP0 = PANEL_Y0 - 0.06, LAP1 = H - 0.02;
+
+  // ---- 两块侧板：真波纹，四排顶点；外面一圈框（上下侧梁、前后角柱）是比波纹凸出 8 毫米的平条
+  const zf = HALF_W - 0.004;
+  for (const side of [-1, 1]) {
+    sideSheets(plan).forEach((sheet, i) => {
+      addPanel(k, v, SLOT.side(side, i), ribbedSheet(sheet, coarseRows(LAP0, LAP1, H), (x, rib, y) => [x, y, side * (PANEL_Z - rib)], [0, 0, side]), (x, y, z) => plan.sidePaint(x, y, z, false));
+    });
+    const at = (x: number, y: number): V3 => [x, y, side * zf], out: V3 = [0, 0, side];
+    flat(-p, p, long, 0, RAIL0, at, out);                    // 下侧梁
+    flat(-p, p, long, RAIL1, H, at, out);                    // 上侧梁
+    flat(-p, -p + 0.09, 1, RAIL0, RAIL1, at, out);           // 前角柱
+    flat(p - 0.144, p, 1, RAIL0, RAIL1, at, out);            // 门角柱
+  }
+  // ---- 前端：波纹板 + 一圈框
+  addPanel(k, v, SLOT.front, ribbedSheet(frontKnots(), [LAP0, 1.25, LAP1], (z, rib, y) => [frontX(p) + rib, y, z], [-1, 0, 0]), frontPaint(plan));
+  {
+    const at = (z: number, y: number): V3 => [-p + 0.004, y, z], out: V3 = [-1, 0, 0];
+    flat(-HALF_W, HALF_W, 2, 0, RAIL0, at, out);
+    flat(-HALF_W, HALF_W, 2, RAIL1, H, at, out);
+    for (const s of [-1, 1]) flat(s * (HALF_W - 0.155), s * HALF_W, 1, RAIL0, RAIL1, at, out);
+  }
+  // ---- 门端：两扇门连成一张压型板，外面一圈门框。
+  //      压型的截面和精模一样（见 doorProfile），只是横向省成 7 排顶点：门的两边、每扇门压型的两头、中缝。
+  //      压型从每扇门的两头斜着鼓起来，到中缝又落回去，所以中间那条缝看上去还在
+  {
+    const doorTop = H - 0.124, edge = HINGE_Z, hingeX = p - 0.066;
+    const wide = HALF_W - 0.03; // 板的四边都伸到门框的平条背后去
+    const across = [-wide, -edge + 0.085, -0.099, 0, 0.099, edge - 0.085, wide], raised = [false, true, true, false, true, true, false];
+    // doorProfile 里每道凸起是 5 个点，头一个点（凸起之间的平段上）中模用不着：平段两头已经各有一个点了
+    const profile: [number, number][] = [[LAP0, DOOR_RIB.low], ...doorProfile(v.size).filter((_, i) => i % 5 !== 0), [LAP1, DOOR_RIB.low]];
+    k.add(BODY, ribbedSheet(profile, across, (y, bulge, z, row) => [hingeX + (raised[row] ? bulge : DOOR_RIB.low), y, z], [1, 0, 0]), paint);
+    const at = (z: number, y: number): V3 => [p - 0.006, y, z], out: V3 = [1, 0, 0];
+    flat(-HALF_W, HALF_W, 2, 0, RAIL0, at, out);             // 门槛
+    flat(-HALF_W, HALF_W, 2, doorTop, H, at, out);           // 门楣
+    for (const s of [-1, 1]) flat(s * edge, s * HALF_W, 1, RAIL0, doorTop, at, out);
+  }
+  // ---- 箱顶：平板。和精模的箱顶切成同样的几张，贴图挪到同样的位置
+  const roofGroove = grooveShare(ROOF_RIB);
+  spans(roofSheets(plan), -p, p).forEach(([a, b], i) => {
+    addPanel(k, v, SLOT.roof(i), ribbedSheet([[a, 0], [b, 0]], [-zf, zf], (x, _d, z) => [x, H, z], [0, 1, 0]), (x, _y, z) => plan.roofPaint(x, z, roofGroove));
+  });
+  // ---- 箱底：一块朝下的暗板
+  k.plane(BODY, L - 0.06, CONTAINER_WIDTH - 0.06, [0, 0.02, 0], { rot: [Math.PI / 2, 0, 0], tint: 0.3 });
+  return (k.finish({ grime: 0 }).group.children[0] as THREE.Mesh).geometry;
+}
+
+/**
+ * 中模门上的四根锁杆（镀锌的，不跟着箱体颜色走，所以不能和箱体并成一块）。
+ * 只留杆子本身，五棱的细管，一共 40 个三角形；凸轮、把手那些小件二十几米外看不见。
+ * 隔着五六十米，箱门上最认得出来的就是这四道发亮的竖线，少了它，箱门就成了一块光板。
+ */
+function buildMidRods(size: ContainerSize) {
+  const { length, height: H } = CONTAINER_SIZES[size], hingeX = length / 2 - 0.066, doorTop = H - 0.124, leafH = doorTop - DOOR_Y0;
+  const k = new Kit('container-mid-rods', size === 20 ? 0 : size === 40 ? 1 : 2);
+  for (const side of [1, -1]) LOCK_RODS.offsets.forEach((d, i) => {
+    // 比精模的锁杆粗四分之一：五棱的细管本来就比圆管显瘦，隔得又远，不加粗的话在屏幕上会细到断断续续
+    k.cyl('steel_galv', LOCK_RODS.radius * 1.25, leafH + 0.2, hingeX + LOCK_RODS.out, (DOOR_Y0 + doorTop) / 2, side * (HINGE_Z - d), { seg: 5, open: true, tint: 0.84 + 0.1 * i, cast: false });
+  });
+  return (k.finish({ grime: 0 }).group.children[0] as THREE.Mesh).geometry;
+}
 
 /**
  * 远处用的简模：一个平板盒子，两百个三角形上下。
@@ -778,7 +878,7 @@ export interface ContainerDetail {
   boxes: LocalBox[];
   triangles: number;
 }
-const plans = new Map<string, Plan>(), cores = new Map<string, Core>(), details = new Map<string, ContainerDetail>(), lods = new Map<string, THREE.BufferGeometry>(), lodLogos = new Map<string, THREE.BufferGeometry>();
+const plans = new Map<string, Plan>(), cores = new Map<string, Core>(), marks = new Map<string, THREE.BufferGeometry | null>(), mids = new Map<string, THREE.BufferGeometry>(), midRods = new Map<ContainerSize, THREE.BufferGeometry>(), lods = new Map<string, THREE.BufferGeometry>(), lodLogos = new Map<string, THREE.BufferGeometry>();
 const coreKey = (v: ContainerVariant) => `${v.size}|${v.seed}|${v.wear}|${v.doors}`;
 function planOf(v: ContainerVariant) {
   const key = coreKey(v);
@@ -790,17 +890,33 @@ const triangles = (g: THREE.BufferGeometry | null) => (g ? (g.index ? g.index.co
 
 /** 一个变体的精模。同样的参数只搭一次；只是船公司不同的两个变体，箱体那部分几何是共用的。 */
 export function containerDetail(o: ContainerOpts): ContainerDetail {
-  const v = containerVariant(o), key = coreKey(v), full = `${key}|${v.brand}`;
-  let d = details.get(full);
-  if (!d) {
-    const plan = planOf(v);
-    let core = cores.get(key);
-    if (!core) cores.set(key, (core = buildCore(plan)));
-    const marks = buildMarks(plan, v.brand);
-    d = { ...core, marks, triangles: triangles(core.body) + triangles(core.metal) + triangles(core.inside) + triangles(core.wood) + triangles(marks) };
-    details.set(full, d);
-  }
-  return d;
+  const v = containerVariant(o), key = coreKey(v);
+  let core = cores.get(key);
+  if (!core) cores.set(key, (core = buildCore(planOf(v))));
+  const text = containerMarks(v);
+  return { ...core, marks: text, triangles: triangles(core.body) + triangles(core.metal) + triangles(core.inside) + triangles(core.wood) + triangles(text) };
+}
+/**
+ * 一个变体身上的喷字和污迹（船公司标、箱主代号、合格牌、锈水条……贴在表面外 3 毫米的一层面片）。
+ * 单独能取，是因为它比箱体多分一层：同一种箱体可以是几家船公司的，箱体的几何共用一份，喷字各家一份。
+ */
+export function containerMarks(o: ContainerOpts): THREE.BufferGeometry | null {
+  const v = containerVariant(o), key = `${coreKey(v)}|${v.brand}`;
+  if (!marks.has(key)) marks.set(key, buildMarks(planOf(v), v.brand));
+  return marks.get(key)!;
+}
+/** 一个变体的中模（只有箱体漆一块，关着门）。和哪家船公司无关。 */
+export function containerMid(o: ContainerOpts): THREE.BufferGeometry {
+  const v = containerVariant({ ...o, doors: 0 }), key = coreKey(v);
+  let g = mids.get(key);
+  if (!g) mids.set(key, (g = buildMid(planOf(v))));
+  return g;
+}
+/** 中模门上的四根锁杆。只和规格有关：同一种规格的箱子，不管新旧、哪家公司，锁杆都在同一个位置。 */
+export function containerMidRods(size: ContainerSize): THREE.BufferGeometry {
+  let g = midRods.get(size);
+  if (!g) midRods.set(size, (g = buildMidRods(size)));
+  return g;
 }
 /** 一个变体的简模（只有箱体漆一块）。和开不开门、哪家船公司无关。 */
 export function containerLod(o: ContainerOpts): THREE.BufferGeometry {
@@ -810,8 +926,8 @@ export function containerLod(o: ContainerOpts): THREE.BufferGeometry {
   return g;
 }
 /**
- * 简模用的船公司标：两侧各一张平的面片。
- * 三米多宽的白色大字隔着一百米也看得见，如果一换成简模它就消失，会很扎眼；所以简模单独留着它。
+ * 中模和简模用的船公司标：两侧各一张平的面片，大小、位置和精模上沿着波纹折出来的那块标一样。
+ * 三米多宽的白色大字隔着一百米也看得见，如果一离开精模它就消失，会很扎眼；所以单独留着它。
  * 它只和规格、船公司有关，和 seed、做旧无关，于是全场所有同规格同公司的远处箱子可以一次画完。
  */
 export function containerLodLogo(size: ContainerSize, brand: number): THREE.BufferGeometry {
@@ -862,14 +978,15 @@ export function containerMeshes(d: ContainerDetail, color: THREE.ColorRepresenta
   return group;
 }
 
-/** 单独搭一只箱子（模型查看器用；游戏里成批的箱子走 ContainerField）。lod: true 是看它的简模。 */
-export function buildContainer(o: ContainerOpts & { color?: number; lod?: boolean } = {}): PropModel {
+/** 单独搭一只箱子（模型查看器用；游戏里成批的箱子走 ContainerField）。lod: true 是看它的简模，mid: true 是看中模。 */
+export function buildContainer(o: ContainerOpts & { color?: number; lod?: boolean; mid?: boolean } = {}): PropModel {
   const v = containerVariant(o), spec = CONTAINER_SIZES[v.size], color = o.color ?? CONTAINER_COLORS.blue;
   let group: THREE.Group;
-  if (o.lod) {
-    const body = tintedMesh(containerLod(v), containerMaterials().body, color);
+  if (o.lod || o.mid) {
+    const body = tintedMesh(o.mid ? containerMid(v) : containerLod(v), containerMaterials().body, color);
     body.castShadow = true;
-    group = new THREE.Group().add(body, new THREE.Mesh(containerLodLogo(v.size, v.brand), containerMaterials().marks));
+    group = new THREE.Group().add(body, new THREE.Mesh(containerLodLogo(v.size, v.brand), containerMaterials().marks)); // 中模、简模身上都只有两侧那块平的船公司标
+    if (o.mid) group.add(new THREE.Mesh(containerMidRods(v.size), containerMaterials().metal));
   } else group = containerMeshes(containerDetail(v), color);
   group.name = `container${v.size}`;
   return { group, boxes: containerBoxes(v.size, v.doors), size: [spec.length, spec.height, CONTAINER_WIDTH], name: group.name };
