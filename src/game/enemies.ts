@@ -534,16 +534,8 @@ export class Enemies {
   }
   /** 从 (x, y, z) 往正下方看，最先碰到的表面有多高（地面是 0）。 */
   private surfaceBelow(x: number, y: number, z: number) { return y - this.ray(x, y, z, 0, -1, 0, y); }
-  /** 地面单位能不能站在这里：在港区范围内、没掉下码头、寻路网格上这一格是空的。 */
-  private walkable(x: number, z: number) {
-    return x > BOUNDS.minX + 1 && x < QUAY_X - 1 && z > BOUNDS.minZ + 1 && z < BOUNDS.maxZ - 1 && this.world.nav.isFree(x, z);
-  }
-  /** 两点之间能不能直着走过去：沿线每隔 0.7 米取一个点，都可走才算。 */
-  private clearLine(ax: number, az: number, bx: number, bz: number) {
-    const len = Math.hypot(bx - ax, bz - az), n = Math.ceil(len / 0.7);
-    for (let i = 1; i <= n; i++) if (!this.walkable(ax + ((bx - ax) * i) / n, az + ((bz - az) * i) / n)) return false;
-    return true;
-  }
+  /** 地面单位能不能站在这里：寻路网格上这一格是空的（港区最外面 1 米和码头沿在网格里本来就是封死的）。 */
+  private walkable(x: number, z: number) { return this.world.nav.isFree(x, z); }
 
   // ------------------------------------------------------------------ 3. 感知
 
@@ -900,15 +892,15 @@ export class Enemies {
     if (e.planT <= 0 || !e.path) {
       // 每 0.6 秒左右重新找一次路：目标可能动了，自己也可能被挤偏了
       e.planT = 0.6 + rnd() * 0.15;
+      // 寻路返回的是几个拐点；终点落在走不到的地方（比如玩家站在箱顶上）时，最后一个拐点是离它最近的可走位置
       e.path = this.world.nav.findPath(x, z, e.goalX, e.goalZ);
       e.pathI = 0;
-      // 终点落在走不到的格子里（比如玩家站在箱顶上）：走到离它最近的可走格为止
-      if (e.path && e.path.length >= 4 && !this.walkable(e.goalX, e.goalZ)) e.path.length -= 2;
     }
     const p = e.path;
     if (!p) { e.hasGoal = false; e.maxSpeed = 0; return true; }
-    // 路点是一格一格的格子中心，照着走会走成锯齿。所以：已经走到的路点跳过；能直着走到下一个的，也跳过当前这个
-    while (e.pathI < p.length - 2 && (Math.hypot(p[e.pathI] - x, p[e.pathI + 1] - z) < 0.9 || this.clearLine(x, z, p[e.pathI + 2], p[e.pathI + 3]))) e.pathI += 2;
+    // 已经走到的拐点跳过（半米一格，离拐点 0.55 米以内就算到了）；已经能直着走到下一个拐点的，也不必先去踩当前这个
+    const nav = this.world.nav;
+    while (e.pathI < p.length - 2 && (Math.hypot(p[e.pathI] - x, p[e.pathI + 1] - z) < 0.55 || nav.clearLine(x, z, p[e.pathI + 2], p[e.pathI + 3]))) e.pathI += 2;
     const remain = Math.hypot(p[p.length - 2] - x, p[p.length - 1] - z);
     if (remain < 0.45) { e.hasGoal = false; e.maxSpeed = 0; return true; }
     e.wantYaw = Math.atan2(p[e.pathI] - x, p[e.pathI + 1] - z);
