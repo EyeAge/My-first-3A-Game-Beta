@@ -153,9 +153,10 @@ export function windowsTexture(cols: number, rows: number, seed: number, lit = 0
 
 /**
  * 路面的平铺细节：两张“数据图”，上下左右能无缝拼接。地面着色器把它们用两种大小各铺一遍
- * （4.76 米一铺看斑块和裂缝，0.48 米一铺看石子），所以同一张图既管大尺度也管小尺度。
+ * （4.76 米一铺看斑块，0.48 米一铺看石子），所以同一张图既管大尺度也管小尺度。
  *
- *   detail：R 石子颗粒   G 斑块（一片深一片浅）   B 裂缝（接近 1 的地方是一条条细线）   A 中等大小的杂点（浅色骨料、漆面崩口）
+ *   detail：R 石子颗粒   G 斑块（一片深一片浅）   B 空着   A 中等大小的杂点（浅色骨料、漆面崩口）
+ *           （B 以前存裂缝的花样；裂缝现在由地面着色器按每块板用式子直接画，见 ground.ts 的 gSlabCrack）
  *   slope ：RG 石子的坡度（x、z 两个方向）   BA 大鼓包的坡度 —— 坡度就是“这里的表面朝哪边斜”，着色器直接拿它拼法线
  *
  * 为什么不沿用 asphaltTextures() 的颜色图 + 法线图：那一套是“画好的成品”，颜色、石子都定死了；
@@ -170,18 +171,8 @@ export function groundDetailTextures(res = 512) {
     // 每个 fractalNoise 的最后一个参数是周期，等于它前面的频率：这样 u、v 从 0 走到 1 正好绕回原处，贴图才能无缝平铺
     const g = fractalNoise(u * 96, v * 96, 3, 2, 96) * 0.6 + fractalNoise(u * 40, v * 40, 9, 2, 40) * 0.4;
     const blotch = fractalNoise(u * 6, v * 6, 21, 4, 6);
-    // 裂缝：取噪声“正好等于 0.5”的那些等高线——1 − |2n − 1| 在那里等于 1，两边迅速掉下去，画出来就是细线。
-    // 光这样画出来的是一圈圈圆滑的闭合曲线，像地图上的等高线，不像裂缝。所以再做三件事：
-    //   · 取样前先用一层大的噪声把坐标推歪（8 格，推出去四分之一张图那么远）：线的走向变得没有规律
-    //   · 再叠一层细的（37 格，推 1%，铺到地上是五厘米）：线变成一小段一小段折着走的，裂缝都是这样
-    //   · 最后用另一层噪声把一部分线“掐细直到断开”（gate）：闭合的圈变成一段段两头尖的线
-    const wx = (fractalNoise(u * 8, v * 8, 31, 2, 8) - 0.5) * 0.25 + (fractalNoise(u * 37, v * 37, 33, 2, 37) - 0.5) * 0.02;
-    const wy = (fractalNoise(u * 8, v * 8, 37, 2, 8) - 0.5) * 0.25 + (fractalNoise(u * 37, v * 37, 39, 2, 37) - 0.5) * 0.02;
-    const gate = fractalNoise(u * 3, v * 3, 47, 2, 3);
-    const cut = 1 - Math.min(1, Math.max(0, (gate - 0.36) / 0.2));
-    const ridge = 1 - Math.abs(2 * fractalNoise((u + wx) * 5, (v + wy) * 5, 43, 3, 5) - 1) - cut * 0.12;
     const mid = fractalNoise(u * 28, v * 28, 51, 3, 28);
-    detail[i * 4] = byte(g); detail[i * 4 + 1] = byte(blotch); detail[i * 4 + 2] = byte(ridge); detail[i * 4 + 3] = byte(mid);
+    detail[i * 4] = byte(g); detail[i * 4 + 1] = byte(blotch); detail[i * 4 + 3] = byte(mid);
     grain[i] = g; lump[i] = fractalNoise(u * 9, v * 9, 71, 4, 9);
   }
   // 坡度 = 左右（上下）两个邻居的高度差。下标取模，绕回另一边，保证坡度图也是无缝的
