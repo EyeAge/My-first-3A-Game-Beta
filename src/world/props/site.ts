@@ -617,7 +617,7 @@ export interface SlidingGateOpts extends SiteOpts { /** 带不带地上的轨道
 /**
  * 推拉大门的门扇：6 米长、2.2 米高的方管框 + 铁丝网，底下两只橡胶轮骑在地轨上。门扇沿 x，原点在门扇正中。
  * 这是"拉开以后停在一边"的样子：门洞在 -x 那一头。地轨从门扇这头一直铺过门洞，
- * 所以它不以原点为中心 —— 从 x = -9.6 到 +3.2。"禁止驶入"的牌子朝 +z。
+ * 所以它不以原点为中心 —— 从 x = -9.6 到 +3.2。"禁止驶入"的牌子前后两面各挂一块。
  */
 export function slidingGate(o: SlidingGateOpts = {}): PropModel {
   const track = o.track !== false;
@@ -633,9 +633,12 @@ export function slidingGate(o: SlidingGateOpts = {}): PropModel {
       k.box('steel_galv', 0.04, 0.12, 0.075, x, 0.13, 0, { plain: true });                              // 轮叉
     }
     if (track) k.box('steel_dark', 12.8, 0.03, 0.1, -3.2, 0.015, 0, { plain: true, cast: false });
-    // "禁止驶入"：一块铝牌挂在门扇正中，贴纸贴在牌子上
-    k.box('aluminium', 0.74, 0.74, 0.004, 0, 1.5, 0.034, { plain: true });
-    sticker(k, 'no_entry', 0.7, [0, 1.5, 0.0375]);
+    // "禁止驶入"：铝牌挂在门扇正中，贴纸贴在牌子上。前后各一块 ——
+    // 门扇的轨道只朝一头伸（朝门洞），不能靠"转 180°"来换牌子的朝向，所以干脆两面都挂，怎么摆都看得见
+    for (const side of [1, -1]) {
+      k.box('aluminium', 0.74, 0.74, 0.004, 0, 1.5, side * 0.034, { plain: true });
+      sticker(k, 'no_entry', 0.7, [0, 1.5, side * 0.0375], [0, side > 0 ? 0 : Math.PI, 0]);
+    }
     return k.finish({ size: [6.06, 2.35, 0.1], boxes: [{ min: [-3.03, 0, -0.05], max: [3.03, 2.35, 0.05], surface: 'metal', playerOnly: true }] });
   });
 }
