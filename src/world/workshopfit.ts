@@ -1,4 +1,7 @@
 import * as THREE from 'three';
+import { mulberry32, type Rng } from '../core/math';
+import type { DecalDef } from '../render/decalart';
+import { DECALS } from '../render/labels';
 import { emissive } from '../render/surfaces';
 import { hex, Kit, type LocalBox, type Mat, type Tint, type V3 } from './kit';
 import { WORKSHOP } from './workshop';
@@ -59,10 +62,24 @@ const STAIR = { x: -8.25, z: -23.15, steps: 12, rise: 0.2, run: 0.2, start: -1.5
 const BENCH = { x0: 1.6, x1: 5, front: -12.05, back: -11.3, top: 0.94 } as const;
 /** 龙门吊架：横梁沿 x 方向，两组 A 字腿相距 2.6 米。 */
 const GANTRY = { x: -11.6, z: -17.6, half: 1.3, apex: 3.3 } as const;
+/** 货架：总高、立柱离中心的距离（x 方向、z 方向）、两层横梁的高度。 */
+const RACK = { h: 4.2, postX: 1.305, postZ: 0.5, levels: [1.45, 2.86] } as const;
+/**
+ * 北墙那一排货架的 z。参考里是 −27.13，但那样货架的后半截会和北墙的刚架柱（柱子朝屋里伸到 z = −27.28）插在一起，
+ * 柱子从托盘上的货里穿出来。这里把整排往南挪 0.42 米，让货架的背面刚好站在柱子前面。
+ */
+const NORTH_ROW_Z = -26.71;
+/** 9 组货架：[x, z, 种子]。种子决定货位号和每个货位上摆什么。 */
+const RACKS: [number, number, number][] = [
+  ...[-8.4, -5.6, -2.8, 2.8, 5.6, 8.4].map((x): [number, number, number] => [x, NORTH_ROW_Z, Math.round(x * 7 + 90)]),
+  ...[2.8, 5.6, 8.4].map((x): [number, number, number] => [x, -23.45, Math.round(x * 5 + 40)]),
+];
 
 // ------------------------------------------------------------------ 小工具
 type BoxOpt = NonNullable<Parameters<Kit['box']>[7]>;
 type PartOpt = NonNullable<Parameters<Kit['add']>[2]>;
+
+const smoothstep = (lo: number, hi: number, v: number) => { const t = Math.min(1, Math.max(0, (v - lo) / (hi - lo))); return t * t * (3 - 2 * t); };
 const moveTo = (x: number, y: number, z: number) => new THREE.Matrix4().makeTranslation(x, y, z);
 
 /** 按两个对角点放一个盒子（规格里的尺寸大多是"从哪到哪"，这样写不用心算中心和边长）。 */
@@ -120,6 +137,16 @@ function ibeamX(k: Kit, mat: Mat, len: number, depth: number, width: number, x: 
   const flange = 0.016, web = 0.01;
   for (const s of [-1, 1]) k.box(mat, len, flange, width, x, y + s * (depth / 2 - flange / 2), z, { c: 0.003, tint });
   k.box(mat, len, depth - 2 * flange, web, x, y, z, { plain: true, tint });
+}
+
+/**
+ * 木头的贴图是有纹路的，零件箱不会替它随机挪位置（挪了相邻的木板纹路就接不上）。
+ * 但托盘上一条条的木板本来就各是各的料，纹路全一样反而假。这里先把盒子挪开一段再铺贴图，然后挪回原位：
+ * 形状和位置不变，每块板采到的却是贴图上不同的一段。
+ */
+function board(k: Kit, sx: number, sy: number, sz: number, x: number, y: number, z: number, rng: Rng, o: BoxOpt = {}) {
+  const du = rng() * 3, dv = rng() * 3, g = new THREE.BoxGeometry(sx, sy, sz).translate(du, 0, dv);
+  k.add('wood_pallet', g, o, moveTo(x - du, y, z - dv));
 }
 
 // ------------------------------------------------------------------ 夹层办公室
@@ -480,6 +507,164 @@ function buildGantry(k: Kit, boxes: LocalBox[]) {
   collide(boxes, hx - 0.58, 1.1, cz - 0.38, hx + 0.5, 1.92, cz + 0.38);
 }
 
+// ------------------------------------------------------------------ 货架
+/** 往贴纸表里补一张"立柱上的冲孔"。贴纸表里已经有同名的就不动它。 */
+function registerDecals() {
+  // 货架立柱的正面每隔 10 厘米有一对长圆孔（挂横梁用）。一组货架 4 根柱子、每根 40 对，要是每个孔都做成一张小面片，
+  // 9 组货架就是一万多个三角形。这里把"8 对孔"画成一张 7 × 80 厘米的竖条贴纸，一根柱子贴 5 张就够了。
+  const PX = 800;   // 每米画多少像素
+  const def: DecalDef = {
+    w: 0.07 * PX, h: 0.8 * PX, rough: 0.9, bleed: [10, 11, 13],
+    draw(g) {
+      for (let row = 0; row < 8; row++) for (const side of [-1, 1]) {
+        const x = (0.035 + side * 0.022 - 0.007) * PX, y = (row * 0.1 + 0.05 - 0.017) * PX, w = 0.014 * PX, h = 0.034 * PX;
+        g.fillStyle = 'rgba(9,10,12,0.96)';
+        g.fillRect(x, y, w, h);
+        g.fillStyle = 'rgba(120,140,170,0.45)';   // 孔的下沿露出一线钢板的厚度，稍微亮一点
+        g.fillRect(x + 1.5, y + h - 2.5, w - 3, 1.5);
+      }
+    },
+  };
+  DECALS.rack_holes ??= def;
+}
+
+/** 货架上用的简化托盘（1.2 × 0.144 × 1.0 米），底面在 y。只用直角盒：一组货架上有六七只，压在货下面也看不清倒角。 */
+function addShelfPallet(k: Kit, rng: Rng, y: number, dx = 0, dz = 0) {
+  const wood = (mul = 1): Tint => { const u = (0.62 + 0.38 * rng()) * mul; return [u, u * 0.96, u * 0.87]; };
+  for (let i = -2; i <= 2; i++) board(k, i === 0 ? 0.16 : 0.14, 0.022, 1, dx + i * 0.2525, y + 0.133, dz, rng, { tint: wood(), grain: 'z' });   // 面板 5 条
+  for (const z of [-0.45, 0, 0.45]) {
+    board(k, 1.15, 0.022, 0.1, dx, y + 0.111, dz + z, rng, { tint: wood(), grain: 'x' });   // 纵梁板
+    board(k, 1.15, 0.022, 0.1, dx, y + 0.011, dz + z, rng, { tint: wood(), grain: 'x' });   // 底板
+    for (const x of [-0.505, 0, 0.505]) if (x || z) board(k, 0.14, 0.078, 0.1, dx + x, y + 0.061, dz + z, rng, { tint: wood(0.8) });   // 垫块（正中间那块哪边都看不见，省掉）
+  }
+}
+
+type LoadKind = 'cartons' | 'wrapped' | 'drums' | 'pallets';
+/** 圆桶的侧面轮廓 [半径, 高度]：直筒上两道外鼓的滚箍、一圈桶口的卷边，桶盖比桶口低 1.4 厘米。 */
+const DRUM_PROFILE: [number, number][] = [
+  [0.225, 0], [0.225, 0.27], [0.233, 0.29], [0.225, 0.31], [0.225, 0.56], [0.233, 0.58], [0.225, 0.6], [0.225, 0.835], [0.232, 0.845], [0.232, 0.86],
+  [0.232, 0.86], [0.212, 0.86], [0.212, 0.86], [0.212, 0.846], [0.212, 0.846], [0, 0.846],
+];
+
+/** 一个货位上的货：先垫一只托盘，上面按 kind 摆。放在当前坐标系的原点。 */
+function addLoad(k: Kit, kind: LoadKind, rng: Rng) {
+  addShelfPallet(k, rng, 0);
+  const top = 0.144;   // 托盘的顶面
+  if (kind === 'cartons') {
+    // 纸箱垛：2–3 层，每层 2 × 2 只。最上面一层每只有四分之一的可能已经被拿走
+    const layers = 2 + Math.floor(rng() * 2), h = 0.36;
+    /** 四个角上各摞了几只箱子（打包带要顺着这个高度走）。 */
+    const count = new Map<string, number>();
+    for (let l = 0; l < layers; l++) for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+      if (l === layers - 1 && rng() < 0.25) continue;
+      count.set(`${sx},${sz}`, l + 1);
+      const shade = 0.82 + 0.18 * rng();
+      k.at([sx * 0.272 + (rng() - 0.5) * 0.02, top + h * l, sz * 0.237 + (rng() - 0.5) * 0.02], [0, (rng() - 0.5) * 0.05, 0], () => {
+        k.box('cardboard', 0.53, h - 0.006, 0.46, 0, h / 2, 0, { c: 0.008, tint: shade });
+        // 封箱胶带：箱顶一条，朝外的那一头垂下来 7 厘米（朝里的那头贴着隔壁的箱子，看不见）
+        k.plane('polymer_tan', 0.534, 0.05, [0, h - 0.002, 0], { rot: [-HALF_PI, 0, 0], cast: false });
+        k.plane('polymer_tan', 0.05, 0.07, [sx * 0.2662, h - 0.038, 0], { rot: [0, sx * HALF_PI, 0], cast: false });
+        k.plane('paint_white', 0.11, 0.075, [sx * 0.1, h * 0.42, sz * 0.2312], { rot: [0, sz > 0 ? 0 : Math.PI, 0], tint: 1.3 });   // 朝外那一面的运单标签
+      });
+    }
+    // 两道黑色打包带：从前面兜上去、压过箱顶、从后面下来。前后两摞不一样高的话，带子在中间跟着落一级
+    for (const sx of [-1, 1]) {
+      const front = (count.get(`${sx},1`) ?? 0) * h, back = (count.get(`${sx},-1`) ?? 0) * h, lift = 0.004;
+      k.strip('polymer_black', [[sx * 0.3, top - 0.03, 0.476], [sx * 0.3, top + front + lift, 0.476], [sx * 0.3, top + front + lift, 0], [sx * 0.3, top + back + lift, 0], [sx * 0.3, top + back + lift, -0.476], [sx * 0.3, top - 0.03, -0.476]], [0.008, 0, 0], { cast: true });
+    }
+  } else if (kind === 'wrapped') {
+    // 缠膜垛：三层货摞成一整垛，外面裹一层半透明的缠绕膜，四个角各一根纸护角
+    const H = 0.9 + rng() * 0.25, shade = 0.8 + 0.2 * rng();
+    for (let i = 0; i < 3; i++) k.box('cardboard', 1.08 - (i % 2) * 0.012, H / 3 - 0.004, 0.92 - (i % 2) * 0.01, 0, top + (H / 3) * (i + 0.5), 0, { c: 0.01, tint: shade * (0.92 + 0.08 * rng()) });
+    k.box('glass_dirty', 1.1, H + 0.012, 0.94, 0, top + H / 2 + 0.002, 0, { c: 0.03, cast: false });
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) k.box('cardboard', 0.05, H * 0.96, 0.05, sx * 0.535, top + H / 2, sz * 0.455, { c: 0.004, tint: 1.12 });
+    k.plane('paint_white', 0.34, 0.09, [0.2, top + H * 0.7, 0.4712], { tint: 1.3 });
+    k.label(`批次 ${1000 + Math.floor(rng() * 8999)}`, { color: 'black', font: 'sans', distress: 0.1 }, 0.3, 0.06, [0.2, top + H * 0.7, 0.4728]);
+  } else if (kind === 'drums') {
+    // 四只塑料桶（三成是红的），拦腰一圈打包带
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+      const x = sx * 0.285, z = sz * 0.24, red = rng() < 0.3, shade = 0.85 + 0.15 * rng();
+      k.lathe(red ? 'paint_red' : 'plastic_blue', DRUM_PROFILE, x, top, z, { seg: 12, tint: shade });
+      k.cyl('polymer_black', 0.03, 0.02, x + 0.13, top + 0.856, z, { seg: 6 });   // 桶盖上的注液口
+    }
+    // 带子绷在四只桶的外面：在每只桶上绕过四分之一圈（取 0°、45°、90° 三个点），桶和桶之间是直的
+    const band: V3[] = [];
+    for (const [sx, sz, from] of [[1, 1, 1], [1, -1, 0], [-1, -1, 3], [-1, 1, 2]]) for (let i = 0; i <= 2; i++) {
+      const a = (from - i * 0.5) * HALF_PI;   // 从正上方看顺时针走：+z 侧 → +x 侧 → −z 侧 → −x 侧
+      band.push([sx * 0.285 + Math.cos(a) * 0.2345, top + 0.44, sz * 0.24 + Math.sin(a) * 0.2345]);
+    }
+    band.push(band[0]);
+    k.strip('polymer_black', band, [0, 0.015, 0], { cast: true });
+  } else {
+    // 一摞空托盘：再摞 2–5 只，每只都歪一点
+    const more = 2 + Math.floor(rng() * 4);
+    for (let i = 0; i < more; i++) addShelfPallet(k, rng, top + i * 0.146, (rng() - 0.5) * 0.04, (rng() - 0.5) * 0.04);
+  }
+}
+
+/** 一组货架，放在当前坐标系的原点（正面朝 +z）。 */
+function addRack(k: Kit, seed: number) {
+  const { h, postX, postZ, levels } = RACK, rng = mulberry32(seed + 21);
+  /** 立柱的漆：柱脚被叉车、拖把、脏水折腾得最狠，所以脚下暗三成，到半米高恢复正常。 */
+  const scuffed: Tint = (_x, y) => 0.7 + 0.3 * smoothstep(0, 0.5, y - FLOOR);
+
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      post(k, 'paint_blue', 0.09, 0.07, sx * postX, 0, h, sz * postZ, { tint: scuffed, ring: 0.5 });
+      k.box('steel_galv', 0.14, 0.01, 0.12, sx * postX, 0.005, sz * postZ, { plain: true, cast: false });                 // 柱脚板
+      for (const dx of [-0.057, 0.057]) k.cyl('steel_galv', 0.01, 0.02, sx * postX + dx, 0.016, sz * postZ, { seg: 6, cast: false, tint: 0.8 });   // 两颗地脚螺栓
+      // 冲孔：前排柱子贴在正面，后排柱子贴在背面
+      for (let i = 0; i < 5; i++) k.decal('rack_holes', 0.07, [sx * postX, 0.47 + i * 0.8, sz * (postZ + 0.0356)], sz > 0 ? undefined : [0, Math.PI, 0], 0.8);
+    }
+    // 两头的缀条：前后两根柱子之间 5 道横杆，中间 4 道之字形的斜杆。有了它，一前一后两根柱子才是一片稳当的"梯子"
+    const ys = [0.2, 1.1, 2, 2.9, 3.8];
+    ys.forEach((y, i) => {
+      k.box('paint_blue', 0.03, 0.03, 2 * postZ - 0.07, sx * postX, y, 0, { plain: true });
+      if (i + 1 < ys.length) { const s = i % 2 ? 1 : -1; k.bar('paint_blue', [sx * postX, y, s * (postZ - 0.04)], [sx * postX, ys[i + 1], -s * (postZ - 0.04)], 0.03, 0.03, { plain: true }); }
+    });
+    k.box('paint_yellow', 0.14, 0.4, 0.02, sx * postX, 0.2, postZ + 0.06, { c: 0.006 });   // 正面柱脚的黄色防撞护板
+  }
+
+  for (const y of levels) {
+    for (const sz of [-1, 1]) {
+      k.box('paint_orange', 2 * postX - 0.09, 0.12, 0.05, 0, y, sz * (postZ + 0.01), { c: 0.008 });                       // 橙色横梁
+      for (const sx of [-1, 1]) k.box('paint_orange', 0.012, 0.2, 0.065, sx * (postX - 0.051), y - 0.02, sz * (postZ + 0.005), { plain: true, tint: 0.85 });   // 梁端的挂钩片
+    }
+    // 层板：3 根托梁上铺一张钢丝网（10 根顺着货架的 + 13 根横着的）
+    for (const x of [-0.85, 0, 0.85]) k.box('steel_galv', 0.04, 0.025, 2 * postZ, x, y + 0.045, 0, { plain: true });
+    for (let i = 0; i < 10; i++) k.box('steel_galv', 2 * postX - 0.1, 0.006, 0.006, 0, y + 0.062, -0.45 + i * 0.1, { plain: true, cast: false });
+    for (let i = 0; i < 13; i++) k.box('steel_galv', 0.006, 0.006, 2 * postZ + 0.04, -1.2 + i * 0.2, y + 0.066, 0, { plain: true, cast: false });
+  }
+
+  // 标签：下层梁上是货位号，上层梁上是限重。黑字印在一张白底的不干胶上
+  const ink = { color: 'black', font: 'sans', distress: 0.1 } as const, face = postZ + 0.035;
+  k.plane('paint_white', 0.38, 0.09, [0, levels[0], face + 0.0012], { tint: 1.3 });
+  k.label(`货位 ${String.fromCharCode(65 + (seed % 6))}-${10 + (seed % 40)}`, ink, 0.34, 0.07, [0, levels[0], face + 0.0024]);
+  k.plane('paint_white', 0.54, 0.062, [0.6, levels[1], face + 0.0012], { tint: 1.3 });
+  k.label('每层限重2000千克', ink, 0.5, 0.045, [0.6, levels[1], face + 0.0024]);
+
+  // 货：3 层（地面、两层层板）× 2 个货位，每个货位按种子抽一种。表里纸箱垛和缠膜垛各出现两次，所以它们最常见
+  const kinds: (LoadKind | 'none')[] = ['cartons', 'wrapped', 'drums', 'cartons', 'wrapped', 'pallets', 'none'];
+  [0, levels[0] + 0.069, levels[1] + 0.069].forEach((y, level) => {
+    for (const side of [-1, 1]) {
+      let kind = kinds[Math.floor(rng() * kinds.length)];
+      if (level === 2 && kind === 'drums') kind = 'wrapped';   // 顶层不放桶：太重，也够不着
+      if (kind === 'none') continue;
+      const load = kind;
+      k.at([side * 0.615 + (rng() - 0.5) * 0.03, y, (rng() - 0.5) * 0.05], null, () => addLoad(k, load, rng));
+    }
+  });
+}
+
+function buildRacks(k: Kit, boxes: LocalBox[]) {
+  registerDecals();
+  for (const [x, z, seed] of RACKS) {
+    k.at([x, FLOOR, z], null, () => addRack(k, seed));
+    // 整组货架是一个实心盒：层板之间的空当在碰撞上也是实的（和参考一样），货架就是一堵可以当掩体的墙
+    collide(boxes, x - 1.35, 0, z - 0.55, x + 1.35, RACK.h, z + 0.55);
+  }
+}
+
 // ------------------------------------------------------------------ 组装
 export function buildWorkshopFit(): WorkshopFit {
   // 全部放进同一只零件箱：同一种材质的零件（不管是办公室的还是货架的）最后合成一个网格，整套陈设只有二十来次绘制调用。
@@ -493,6 +678,7 @@ export function buildWorkshopFit(): WorkshopFit {
   buildWorkbench(k, boxes);
   buildPowerBox(k);
   buildGantry(k, boxes);
+  buildRacks(k, boxes);
 
   // 碰撞盒是上面手工登记的那一份，所以不要零件箱自动量的外包盒（boxes: []）
   const group = k.finish({ boxes: [], grime: 0.9 }).group;
