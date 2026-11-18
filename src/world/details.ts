@@ -162,7 +162,9 @@ export function buildDetails(containers: BoxSpec[], W: number, H: number, L: num
   for (let x = bounds.minX + 3; x < bounds.maxX - 3; x += 3 + rng() * 6) {
     const h = 1.6 + rng() * 2.2;
     wall('grime', x, 4.4 - h / 2, bounds.minZ, 0, 1, 1.2 + rng() * 1.6, h);
-    wall('grime', x + 2, 4.4 - h / 2, bounds.maxZ, 0, -1, 1.2 + rng() * 1.6, h);
+    const w = 1.2 + rng() * 1.6;
+    // 南围墙在大门那里断开了：先看看这个位置的墙后面是不是实心的，门洞里不贴（不然水渍会悬在半空）
+    if (colliders.pointInside(x + 2, 2, bounds.maxZ + 0.6)) wall('grime', x + 2, 4.4 - h / 2, bounds.maxZ, 0, -1, w, h);
   }
   for (let z = bounds.minZ + 3; z < bounds.maxZ - 3; z += 3 + rng() * 6) { const h = 1.6 + rng() * 2.2; wall('grime', bounds.minX, 4.4 - h / 2, z, 1, 0, 1.2 + rng() * 1.6, h); }
 
