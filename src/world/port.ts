@@ -10,6 +10,7 @@ import { buildForklift } from './forklift';
 import { placeOnce, PropField } from './propfield';
 import { barrel, cableReel, cardboardBoxes, crateStack, crateWood, ibcTote, jerryCan, pallet, palletStack, sandbags, tarpCargo, tireStack, trafficCone } from './props/cargo';
 import type { RainShelter } from './rain';
+import { buildRelay, type Relay, type RelaySpec } from './relay';
 import { buildWorkshop, placeWorkshop } from './workshop';
 import { buildWorkshopFit, placeWorkshopFit } from './workshopfit';
 import type { ReflectionUniforms } from '../render/reflection';
@@ -25,12 +26,7 @@ export const QUAY_X = 62;
 export const BOUNDS = { minX: -110, maxX: QUAY_X, minZ: -100, maxZ: 100 };
 const CW = 2.44, CH = 2.59, CL = 12.19; // 40 尺集装箱的宽、高、长
 
-export interface Relay {
-  id: number; name: string; short: string;
-  pos: THREE.Vector3; cut: boolean;
-  setCut(): void;
-  reset(): void;
-}
+export type { Relay }; // 中继柜的接口定义在 relay.ts；从这里再导出一次，用到它的地方（mission.ts）不用改
 export interface Port {
   group: THREE.Group;
   colliders: Colliders;
@@ -344,35 +340,18 @@ export function buildPort(progress: (msg: string) => void): Port {
   plane(signTexture(['激战撤离艇', '四号登船点'], { bg: '#1b2227', fg: '#ffb347' }), 3.2, 1.6, 64.25, 1.5, 84.6, -Math.PI / 2, 0.5);
 
   // ---------------------------------------------------------------- 中继
-  const relays: Relay[] = [];
-  // 乙号在车间正中：屋脊线的正下方、东门和南门两条通道的交点上，从两个门口都能一眼看到。东墙破口漏进来的那束光正好罩着它
-  const relayDefs: [string, string, number, number, number, boolean][] = [['甲号中继 · 堆场', '甲', 8, 0, 0, false], ['乙号中继 · 车间', '乙', -90, 0, Math.PI / 2, true], ['丙号中继 · 码头', '丙', 48, -8, 0, false]];
-  const beamGeo = new THREE.CylinderGeometry(0.16, 0.16, 70, 6, 1, true);
-  relayDefs.forEach(([name, short, x, z, ry, indoor], id) => {
-    const top = indoor ? 4.6 : 8.5; // 天线杆：屋里的那根矮一截，不然要顶到屋架
-    colliders.add(x, 1.1, z, 1.5, 2.2, 1.5);
-    box(x, 1.1, z, 1.4, 2.2, 1.0, 0x2c3338);
-    box(x, 2.3, z, 1.6, 0.12, 1.2, 0x1b1f22);
-    beam(x, 2.3, z, x, top, z, 0.14, 0x565c60);
-    box(x, top - 0.5, z, 1.6, 0.9, 0.2, 0x9a9d9a);
-    const sign = plane(signTexture([name, '港区主控上行链路 · 检修前请断电'], { bg: '#1b2227', fg: '#ffb347', size: 70 }), 1.25, 0.62, x, 1.55, z, ry, 0.6);
-    sign.position.x += Math.sin(ry) * 0.52; sign.position.z += Math.cos(ry) * 0.52;
-    if (ry === 0) { const s2 = sign.clone(); s2.rotation.y = Math.PI; s2.position.z = z - 0.52; group.add(s2); }
-    const lampMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(5, 0.5, 0.3) });
-    const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.16, 10, 8), lampMat);
-    lamp.position.set(x, top + 0.25, z);
-    group.add(lamp);
-    // 一束直通天空的信号光柱，隔着几排集装箱也能看见中继在哪
-    const shaftMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(1.6, 0.5, 0.12), transparent: true, opacity: 0.32, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false });
-    const shaft = new THREE.Mesh(beamGeo, shaftMat);
-    shaft.position.set(x, 8.5 + 35, z);
-    if (!indoor) group.add(shaft); // 屋里的中继不要光柱：它会穿过屋顶
-    const relay: Relay = {
-      id, name, short, pos: new THREE.Vector3(x, 1.2, z), cut: false,
-      setCut() { this.cut = true; lampMat.color.setRGB(0.3, 4, 1.2); shaft.visible = false; },
-      reset() { this.cut = false; lampMat.color.setRGB(5, 0.5, 0.3); shaft.visible = true; },
-    };
-    relays.push(relay);
+  // 三只中继柜（造型在 props/site.ts，摆放和状态机在 relay.ts）。柜门原本朝南，yaw 照参考各转一点，不会三只都横平竖直。
+  // 乙号在车间正中：屋脊线的正下方、东门和南门两条通道的交点上，柜门转向东门，从两个门口都能一眼看到；东墙破口漏进来的那束光正好罩着它。
+  // 它的位置由陈设给出（地上那根从北墙拖过来的电缆就是冲着它去的）
+  const relaySpecs: RelaySpec[] = [
+    { name: '甲号中继 · 堆场', short: '甲', x: 8, z: 0, yaw: 0.35 },
+    { name: '乙号中继 · 车间', short: '乙', x: fit.relayPos[0], y: fit.relayPos[1], z: fit.relayPos[2], yaw: 0.9 * (Math.PI / 2), interior: true },
+    { name: '丙号中继 · 码头', short: '丙', x: 48, z: -8, yaw: -0.2 },
+  ];
+  const relays = relaySpecs.map((spec, id) => {
+    const { relay, group: cabinet } = buildRelay(id, spec, colliders);
+    (spec.interior ? indoor : group).add(cabinet);
+    return relay;
   });
 
   // ---------------------------------------------------------------- 路灯
@@ -514,6 +493,7 @@ export function buildPort(progress: (msg: string) => void): Port {
     update(t, focus) {
       flare.uniforms.uTime.value = t;
       shop.update?.(t); // 排风扇
+      for (const r of relays) r.update(t); // 中继柜的灯、天线、柜门
       if (t - lastSort > 0.4) {
         lastSort = t;
         order.sort((a, b) => lampPos[a].distanceToSquared(focus) - lampPos[b].distanceToSquared(focus));
