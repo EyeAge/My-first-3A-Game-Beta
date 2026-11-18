@@ -6,9 +6,13 @@ export interface ReflectionUniforms {
   uReflM: { value: THREE.Matrix4 };
   uReflOn: { value: number };
   uReflTime: { value: number };
+  /** 把“水面斜了多少”换算成反射贴图上挪多远（水面不平，倒影跟着晃）。跟相机的视角有关，每帧更新。 */
+  uReflScale: { value: THREE.Vector2 };
+  /** 反射贴图的行数相对 270 行的对数。地面按粗糙度取贴图的第几级模糊时加上它，换画质档位、贴图变大变小，看到的模糊程度不变。 */
+  uReflLod: { value: number };
 }
 export function reflectionUniforms(): ReflectionUniforms {
-  return { tRefl: { value: null }, uReflM: { value: new THREE.Matrix4() }, uReflOn: { value: 0 }, uReflTime: { value: 0 } };
+  return { tRefl: { value: null }, uReflM: { value: new THREE.Matrix4() }, uReflOn: { value: 0 }, uReflTime: { value: 0 }, uReflScale: { value: new THREE.Vector2(0.5, 0.5) }, uReflLod: { value: 0 } };
 }
 
 /**
@@ -32,11 +36,14 @@ export class PlanarReflection {
     this.uniforms.uReflOn.value = 0; this.uniforms.tRefl.value = null;
     this.frames = 0;
     if (scale <= 0) return;
-    // 带 mipmap：越粗糙的地面采样越模糊的那一级，潮湿但没积水的地方反射就是糊的
-    this.rt = new THREE.WebGLRenderTarget(Math.max(2, Math.round(w * scale)), Math.max(2, Math.round(h * scale)), {
+    // 带 mipmap：越粗糙的地面采样越模糊的那一级，潮湿但没积水的地方反射就是糊的。
+    // 宽取 16 的整数倍、高取 8 的整数倍：每一级 mipmap 都是上一级对半缩，边长能多整除几次 2，前几级就不会因为取整丢掉一行一列
+    const width = Math.max(64, Math.round((w * scale) / 16) * 16), height = Math.max(32, Math.round((h * scale) / 8) * 8);
+    this.rt = new THREE.WebGLRenderTarget(width, height, {
       type: THREE.HalfFloatType, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter, magFilter: THREE.LinearFilter,
     });
     this.uniforms.tRefl.value = this.rt.texture;
+    this.uniforms.uReflLod.value = Math.log2(height / 270);
   }
 
   render(time: number) {
@@ -59,9 +66,13 @@ export class PlanarReflection {
 
     // 世界坐标 → 反射贴图 uv
     this.uniforms.uReflM.value.set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1).multiply(cam.projectionMatrix).multiply(cam.matrixWorldInverse);
+    // 投影矩阵的 [0]、[5] 两项就是“视野有多窄”（1 / tan(半视角)）：视野越窄，同样的倾斜在画面上挪得越远。开镜时视野会变，所以每帧取
+    const proj = camera.projectionMatrix.elements;
+    this.uniforms.uReflScale.value.set(proj[0] * 0.5, proj[5] * 0.5);
 
-    // 斜裁剪：把近裁剪面换成地面本身，地面以下的东西（镜像相机其实在地下）就不会被画进来
-    _plane.set(_up, 0).applyMatrix4(cam.matrixWorldInverse);
+    // 斜裁剪：把近裁剪面换成地面本身，地面以下的东西（镜像相机其实在地下）就不会被画进来。
+    // 裁剪面比地面低 1 厘米（y = −0.01）：正好卡在 y = 0 的话，贴着地面的箱脚、轮胎会被削掉最底下一线，倒影和实物之间漏一条缝
+    _plane.set(_up, 0.01).applyMatrix4(cam.matrixWorldInverse);
     _clip.set(_plane.normal.x, _plane.normal.y, _plane.normal.z, _plane.constant);
     const pm = cam.projectionMatrix.elements;
     _q.set((Math.sign(_clip.x) + pm[8]) / pm[0], (Math.sign(_clip.y) + pm[9]) / pm[5], -1, (1 + pm[10]) / pm[14]);

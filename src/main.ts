@@ -75,8 +75,10 @@ async function boot() {
   const mission = new Mission(port, enemies, ui, audio, weapon, player);
   enemies.onPlayerHit = (dmg, from) => { player.takeDamage(dmg, from, mission.time); audio.hurt(); input.rumble(0.8, 0.5, 160); };
 
-  // 反射画面里不需要的东西：地面自己、雨丝、第一人称枪模、贴花，还有车间里面的东西（会反光的湿地面都在屋外，屋里的东西照不进去）
-  renderer.reflection = new PlanarReflection(renderer.gl, scene, camera, port.reflection, () => [port.ground, rain.group, weapon.view, decals.mesh, port.indoor]);
+  // 反射画面里不需要的东西：地面自己、雨（雨丝和地上的小水花都在 rain.group 里）、第一人称枪模、贴花，
+  // 车间里面的东西（会反光的湿地面都在屋外，屋里的东西照不进去），
+  // 还有海面——它比地面低，本来就会被反射的裁剪面整个裁掉，藏起来只是省掉白画的那一次
+  renderer.reflection = new PlanarReflection(renderer.gl, scene, camera, port.reflection, () => [port.ground, sea.mesh, rain.group, weapon.view, decals.mesh, port.indoor]);
   const applyQuality = () => {
     const p = profileOf(settings.quality);
     renderer.setQuality(p, port.sun);

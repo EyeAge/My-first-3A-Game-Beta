@@ -609,10 +609,6 @@ export function buildGround(quayX: number) {
     uRain: { value: 0.6 },
     /** 全局湿度 0..1：1 是正在下雨的样子，往 0 调地面逐渐变干、水洼消失。和材质库共用同一个对象，全场的湿度一起变。 */
     uWet: wetness,
-    /** 把“水面斜了多少”换算成倒影贴图上挪多远；跟相机的视角有关，每帧更新。 */
-    uReflScale: { value: new THREE.Vector2(0.5, 0.5) },
-    /** 倒影贴图的行数相对 270 行的对数：让模糊程度不随贴图分辨率变。 */
-    uReflLod: { value: 0 },
   };
 
   // 底子是一个纯白、全粗糙的标准材质：颜色、粗糙度、法线都由下面注入的着色器按世界坐标现算
@@ -648,13 +644,6 @@ export function buildGround(quayX: number) {
   ground.rotation.x = -Math.PI / 2;
   ground.position.set(quayX - 231, 0, 0);
   ground.receiveShadow = true;
-  // 每次画地面之前，按当前相机更新两个和倒影有关的数（reflection.ts 不提供它们，所以在这里自己算）
-  ground.onBeforeRender = (_renderer, _scene, camera) => {
-    const p = camera.projectionMatrix.elements;
-    uniforms.uReflScale.value.set(p[0] * 0.5, p[5] * 0.5);
-    const image = reflection.tRefl.value?.image as { height?: number } | undefined;
-    uniforms.uReflLod.value = Math.log2(Math.max(image?.height ?? 270, 1) / 270);
-  };
   group.add(ground);
 
   return { mesh: ground, group, reflection, uniforms, mask, puddleDepthAt, isPuddleAt };

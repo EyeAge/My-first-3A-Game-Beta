@@ -13,16 +13,17 @@ export const QUALITY_LABEL: Record<Quality, string> = { low: '低', medium: '中
  *   tier       0..3，对应低 / 中 / 高 / 极高（内部分辨率的像素预算按它取）
  *   shadow     阴影图边长；msaa 多重采样数
  *   ao         环境光遮蔽的采样数，0 关；volSteps 体积光每条视线走几步，0 关
- *   reflect    地面反射贴图相对屏幕的分辨率比例，0 关
+ *   reflect    地面反射贴图相对屏幕的分辨率比例，0 关。中、高两档都是一半（面积四分之一），极高是原大；
+ *              地面按粗糙度取这张图的模糊级别时已经折算过分辨率（reflection.ts 的 uReflLod），所以换档只影响水洼里倒影的清晰度
  */
 export interface QualityProfile { tier: 0 | 1 | 2 | 3; pixelRatio: number; shadow: number; msaa: number; ao: number; volSteps: number; bloom: boolean; rain: number; lamps: number; reflect: number }
 export function profileOf(q: Quality): QualityProfile {
   const dpr = window.devicePixelRatio || 1;
   switch (q) {
     case 'low': return { tier: 0, pixelRatio: Math.min(dpr, 1) * 0.7, shadow: 1024, msaa: 0, ao: 0, volSteps: 8, bloom: true, rain: 3000, lamps: 2, reflect: 0 };
-    case 'medium': return { tier: 1, pixelRatio: Math.min(dpr, 1), shadow: 2048, msaa: 2, ao: 8, volSteps: 12, bloom: true, rain: 5500, lamps: 4, reflect: 0.35 };
+    case 'medium': return { tier: 1, pixelRatio: Math.min(dpr, 1), shadow: 2048, msaa: 2, ao: 8, volSteps: 12, bloom: true, rain: 5500, lamps: 4, reflect: 0.5 };
     case 'high': return { tier: 2, pixelRatio: Math.min(dpr, 1.5), shadow: 2048, msaa: 4, ao: 12, volSteps: 16, bloom: true, rain: 8000, lamps: 6, reflect: 0.5 };
-    case 'ultra': return { tier: 3, pixelRatio: Math.min(dpr, 2), shadow: 4096, msaa: 4, ao: 16, volSteps: 24, bloom: true, rain: 9000, lamps: 8, reflect: 0.75 };
+    case 'ultra': return { tier: 3, pixelRatio: Math.min(dpr, 2), shadow: 4096, msaa: 4, ao: 16, volSteps: 24, bloom: true, rain: 9000, lamps: 8, reflect: 1 };
   }
 }
 
