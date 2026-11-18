@@ -215,12 +215,14 @@ const FRAG_MAP = /* glsl */ `
 
 #ifdef SURF_ACUT
   // 铁丝网：靠"alpha 小于阈值就不画"镂空。问题是远处一根丝还不到一个像素宽，要么整根消失、要么一闪一闪。
-  // 办法：先估计贴图被缩小了多少级（lod）。缩得越小就把阈值降得越低，让丝始终保持大约一个像素宽；
-  // 缩到连网眼都看不清时，改成按屏幕位置的固定花纹随机丢弃，远处的网变成一层稳定的"薄纱"。
+  // 办法：先估计贴图被缩小了多少级（lod）。贴图缩小以后，每个像素的 alpha 其实是"这一小块里铁丝占了几成"；
+  // 所以一旦开始缩小，就不再用固定的 0.5 当阈值，而是按屏幕位置的固定花纹给每个像素一个 0…1 的阈值 ——
+  // 占了三成的像素有三成的机会留下。这样不管隔多远，留下来的像素占的比例都等于铁丝真正占的比例：
+  // 近处是一根根丝，远一点是断断续续的丝，再远是一层稳定的"薄纱"。
+  // （以前是"缩得越小阈值越低"，想让丝保持一个像素宽；结果 5–15 米这一段留下的像素比铁丝多出好几倍，整片网糊成了一堵白墙。）
   { vec2 texelsPerPixel = fwidth(surfUv) * uSurfMisc.z; float lod = log2(max(max(texelsPerPixel.x, texelsPerPixel.y), 1e-4));
-    float nearCut = 0.5 * exp2(-clamp(lod - 1.0, 0.0, 4.0));
     float dither = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
-    float cut = mix(nearCut, 0.05 + dither * 0.80, smoothstep(3.5, 5.5, lod));
+    float cut = mix(0.5, 0.04 + dither * 0.92, smoothstep(0.5, 2.5, lod));
     diffuseColor.a = sampledDiffuseColor.a > cut ? 1.0 : 0.0;
     diffuseColor.rgb *= mix(1.0, 0.45, smoothstep(1.5, 4.5, lod)); }   // 远处留下来的像素其实代表更细的丝，压暗一些，免得阳光下变成一片白
 #endif
