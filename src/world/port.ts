@@ -11,6 +11,7 @@ import { placeOnce, PropField } from './propfield';
 import { barrel, cableReel, cardboardBoxes, crateStack, crateWood, ibcTote, jerryCan, pallet, palletStack, sandbags, tarpCargo, tireStack, trafficCone } from './props/cargo';
 import type { RainShelter } from './rain';
 import { buildWorkshop, placeWorkshop } from './workshop';
+import { buildWorkshopFit, placeWorkshopFit } from './workshopfit';
 import type { ReflectionUniforms } from '../render/reflection';
 import { buildGround } from './ground';
 import { SUN_COLOR, SUN_INTENSITY } from './atmosphere';
@@ -290,12 +291,21 @@ export function buildPort(progress: (msg: string) => void): Port {
   // 车间是按参考的坐标搭的（workshop.ts），这里整体平移 (−88, +19.5) 挪到地图西侧，占 x −104…−76、z −8.5…8.5。
   // 朝向不变：东门（z −2.5…2.5）正对堆场和太阳，贴着海面来的晨光能从门洞一直照到屋子深处；南面是卷帘门。
   // 屋外那根电缆从门前的路灯杆顶拉到东南檐角（坐标是车间自己的，所以要减去平移量）
-  const shop = placeWorkshop(buildWorkshop({ mastCables: [[[-63.4 + 88, 9.3, 0 - 19.5], [12.3, 7.3, -11.3], 1]] }), -88, 19.5);
-  group.add(shop.group);
-  for (const b of shop.boxes) {
-    if (b.max[1] < 0.3) continue; // 3 厘米厚的地坪：不登记碰撞，直接走上去就行（和 propfield.ts 里"又矮又贴地的不登记"是同一个道理）
-    colliders.add((b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, (b.min[2] + b.max[2]) / 2, b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2], b);
-  }
+  const SHOP_DX = -88, SHOP_DZ = 19.5;
+  const shell = buildWorkshop({ mastCables: [[[-63.4 - SHOP_DX, 9.3, 0 - SHOP_DZ], [12.3, 7.3, -11.3], 1]] });
+  // 屋里的陈设（workshopfit.ts）：夹层办公室、走道和钢梯、工作台、龙门吊架、九组货架、地上的油渍和电缆。
+  // 它要知道屋面的洞在哪（每个洞的正下方贴一块漏雨的水渍），认的是车间自己的坐标 —— 所以用还没平移过的那一份 roofHoles
+  const fit = placeWorkshopFit(buildWorkshopFit({ roofHoles: shell.roofHoles }), SHOP_DX, SHOP_DZ);
+  const shop = placeWorkshop(shell, SHOP_DX, SHOP_DZ);
+  // 屋里的东西都收进 indoor 这一组（陈设在这里加，道具、叉车、乙号中继在后面加），方便整组开关
+  const indoor = new THREE.Group();
+  indoor.name = 'indoor';
+  indoor.add(fit.group);
+  group.add(shop.group, indoor);
+  // 碰撞盒逐个登记（墙是薄的，门洞留着）。盒子上带的标记原样传进去：surface 决定弹着和脚步的声音，
+  // noNav 是"寻路不用管它"（屋面、细柱子），playerOnly 是"只挡人不挡子弹"（栏杆、吊架的 A 字腿）。
+  // 3 厘米厚的地坪也登记：人走进门会被它垫高 3 厘米（迈得上去），和摆在地坪上的道具、钢梯的第一级对得上；子弹打在屋里的地上，弹孔也才贴在地坪面上而不是埋在它下面
+  for (const b of [...shop.boxes, ...fit.boxes]) colliders.add((b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, (b.min[2] + b.max[2]) / 2, b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2], b);
   // 屋里的 4 盏点光：太阳照不到的角落靠它们给一层暖色的底光。它们很弱（正下方地面的照度大约只有太阳的九分之一），不投影
   for (const l of shop.lights) {
     const lamp = new THREE.PointLight(l.color, l.intensity, l.distance, 2);
