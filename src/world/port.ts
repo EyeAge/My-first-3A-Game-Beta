@@ -1,13 +1,13 @@
 import * as THREE from 'three';
-import { mulberry32, pick } from '../core/math';
 import { Colliders } from './colliders';
-import { buildDetails, type BoxSpec } from './details';
+import { buildDetails } from './details';
 import { NavGrid } from './nav';
 import { labelMaterial } from '../render/labels';
 import { weathered } from '../render/weathered';
 import { flares, lightCones } from './props';
 import { buildAnnex } from './annex';
 import { buildForklift } from './forklift';
+import { layContainers, layShipCargo } from './layout/containers';
 import { GATE, layGate } from './layout/gate';
 import { layQuay } from './layout/quay';
 import { layRoad } from './layout/road';
@@ -23,15 +23,15 @@ import { buildWorkshopFit, placeWorkshopFit, WORKSHOP_PROPS } from './workshopfi
 import type { ReflectionUniforms } from '../render/reflection';
 import { buildGround } from './ground';
 import { SUN_COLOR, SUN_INTENSITY } from './atmosphere';
-import { containerGeometry, doorTextures, frameTextures, RIBS, sideTextures, tintByAlpha, type Brand } from './container';
-import { corrugationNormal, signTexture, windowsTexture } from './textures';
+import { CONTAINER_COLORS, CONTAINER_SIZES } from './container';
+import { ContainerField } from './containerfield';
+import { signTexture, windowsTexture } from './textures';
 
 // 激战港区 · 四号泊位。
 // 坐标约定：+x 是东（海在东边），-z 是北。玩家从西南角进场，撤离艇在码头南端。
 
 export const QUAY_X = 62;
 export const BOUNDS = { minX: -110, maxX: QUAY_X, minZ: -100, maxZ: 100 };
-const CW = 2.44, CH = 2.59, CL = 12.19; // 40 尺集装箱的宽、高、长
 const INDOOR_DRAW_RANGE = 100;          // 离车间多少米以内才画屋里的东西
 
 export type { Relay }; // 中继柜的接口定义在 relay.ts；从这里再导出一次，用到它的地方（mission.ts）不用改
@@ -39,6 +39,8 @@ export interface Port {
   group: THREE.Group;
   colliders: Colliders;
   nav: NavGrid;
+  /** 全场的集装箱。平时用不着直接碰它；调试时可以看 containers.count（一共多少只）、containers.detailCount（此刻多少只在用精模）。 */
+  containers: ContainerField;
   relays: Relay[];
   playerStart: THREE.Vector3;
   evacPos: THREE.Vector3;
@@ -60,11 +62,7 @@ export interface Port {
   update(t: number, focus: THREE.Vector3): void;
 }
 
-const PALETTE = [0x9a3b26, 0x1f5488, 0x1d6f6c, 0xb85a1c, 0x70787c, 0x2f6240, 0xb38d2c, 0xb5b2a8, 0x24304a, 0x7a2430];
-const BRANDS: (Brand | null)[] = [{ name: '激战远洋', sub: '集装箱运输', mark: 0 }, { name: '激战北航', sub: '北极 · 大西洋 · 支线运输', mark: 1 }, { name: '激战太平洋', sub: '远洋 · 冷链 · 散货', mark: 2 }, { name: '激战联运', sub: '多式联运', mark: 3 }, null];
-
 export function buildPort(progress: (msg: string) => void): Port {
-  const rng = mulberry32(4207);
   const group = new THREE.Group();
   const colliders = new Colliders();
   const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
@@ -92,68 +90,10 @@ export function buildPort(progress: (msg: string) => void): Port {
   };
 
   // ---------------------------------------------------------------- 集装箱
-  progress('正在生成涂装、锈迹与雨水');
-  // 每家船公司一套贴图。堆场里的箱子用立体的波纹板；船上和吊具上的离得远，用方盒子加法线贴图就够了
-  const corr = corrugationNormal(RIBS);
-  const topMat = new THREE.MeshStandardMaterial({ color: 0xb4b4b4, roughness: 0.4, metalness: 0.15, normalMap: corr });
-  const frameTex = frameTextures();
-  frameTex.map.repeat.set(1, 1);
-  const frameMat = tintByAlpha(new THREE.MeshStandardMaterial({ map: frameTex.map, roughnessMap: frameTex.rough, roughness: 1, metalness: 0.15 }));
-  type Item = { x: number; y: number; z: number; rot: number; c: number };
-  const variants = BRANDS.map((brand, i) => {
-    const st = sideTextures(brand, i + 1, CL), dt = doorTextures(i + 1);
-    const side = tintByAlpha(new THREE.MeshStandardMaterial({ map: st.map, roughnessMap: st.rough, roughness: 1, metalness: 0.15 }));
-    const sideFar = tintByAlpha(new THREE.MeshStandardMaterial({ map: st.map, roughnessMap: st.rough, roughness: 1, metalness: 0.15, normalMap: corr }));
-    const door = tintByAlpha(new THREE.MeshStandardMaterial({ map: dt.map, roughnessMap: dt.rough, roughness: 1, metalness: 0.15 }));
-    return { near: [side, frameMat, topMat, door], far: [sideFar, sideFar, topMat, topMat, door, door], items: [] as Item[], farItems: [] as Item[] };
-  });
-  const addContainer = (x: number, y: number, z: number, rot: number, c: number, far = false) => {
-    const v = variants[Math.floor(rng() * variants.length)];
-    (far ? v.farItems : v.items).push({ x, y, z, rot, c });
-  };
-  // 箱门上的四根锁杆是镀锌的，不跟着箱体颜色走，所以单独用灰色的小方条来做
-  const yard: BoxSpec[] = [];
-  const ROD = 0x8d9296;
-  const hardware = (x: number, y: number, z: number, rot: number) => {
-    const part = (lx: number, ly: number, lz: number, sx: number, sy: number, sz: number, color: number) =>
-      rot ? box(x + lz, y + ly, z - lx, sz, sy, sx, color) : box(x + lx, y + ly, z + lz, sx, sy, sz, color);
-    for (const a of [-1, 1]) for (const lx of [0.3, 0.86]) {
-      part(a * lx, 0, CL / 2 - 0.005, 0.034, CH - 0.2, 0.034, ROD);
-      for (const ly of [-1, 1]) part(a * lx, ly * (CH / 2 - 0.13), CL / 2 - 0.002, 0.1, 0.07, 0.05, 0x5d6266);      // 锁杆两头的锁座
-      part(a * lx + a * 0.13, -0.18, CL / 2 + 0.018, 0.3, 0.035, 0.016, ROD);                                       // 把手
-      part(a * lx + a * 0.26, -0.18, CL / 2 + 0.012, 0.05, 0.09, 0.03, 0x5d6266);                                   // 把手扣
-    }
-  };
-  /** 码一摞箱子，并登记一个整摞的碰撞盒。 */
-  const stack = (x: number, z: number, h: number, rot = 0, color?: number) => {
-    for (let k = 0; k < h; k++) {
-      const c = color ?? pick(rng, PALETTE), y = CH / 2 + k * CH;
-      addContainer(x, y, z, rot, c);
-      yard.push({ x, y, z, rot });
-      hardware(x, y, z, rot);
-    }
-    if (h > 0) colliders.add(x, (h * CH) / 2, z, rot ? CL : CW, h * CH, rot ? CW : CL);
-  };
-
-  progress('正在布置集装箱');
-  const blockXs = [-58, -44, -30, -6, 8, 22];
-  const segZs = [-63.4, -31.7, 0, 31.7, 63.4];
-  for (const bx of blockXs) for (const sz of segZs) {
-    if (bx === 8 && sz === 0) continue; // 留出甲号中继所在的空场
-    // 车间东门正对着这个堆位。太阳只有 13° 高，一只 2.6 米高的箱子就能拖出 11 米长的影子，
-    // 码在这里的箱子会把门口整个罩进阴影里 —— 所以空出来当门前的场地
-    if (bx === -58 && sz === 0) continue;
-    const blockColor = rng() < 0.35 ? pick(rng, PALETTE) : undefined; // 有些堆位是同一家船公司的货
-    for (let row = -1; row <= 1; row++) for (const bay of [-1, 1]) {
-      let h = rng() < 0.07 ? 0 : rng() < 0.12 ? 4 : 1 + Math.floor(rng() * 3);
-      if (bx === -44 && sz === 0) h = Math.min(h, 2); // 再往东一排离门 32 米：码两层以内，影子够不到门
-      stack(bx + row * (CW + 0.2), sz + bay * (CL / 2 + 0.15), h, 0, blockColor);
-    }
-  }
-  // 主干道和码头前沿的零散箱子，充当掩体
-  stack(-22.5, 30, 1); stack(-13.5, 2, 2); stack(-22.5, -34, 1); stack(-13.5, -62, 1);
-  stack(40, 62, 2, 1); stack(46, -72, 1, 1); stack(31, 10, 1); stack(31, -44, 2); stack(47, 24, 1, 1); stack(41, -30, 1, 1);
-  stack(-68, 52, 1); stack(-68, -58, 2);
+  // 全场的箱子都交给一个 ContainerField：它负责实例化绘制、按远近切换精模 / 简模、登记碰撞盒（containerfield.ts）。
+  // 这里先把它建出来，岸桥、货轮、堆场各自往里"报"箱子（堆场和零散箱子的清单在 layout/containers.ts）；
+  // 等全部报完，在下面"室外场地的陈设"那里统一 build()
+  const containers = new ContainerField({ seed: 4207 });
 
   // ---------------------------------------------------------------- 起重机
   progress('正在架设起重机');
@@ -168,8 +108,8 @@ export function buildPort(progress: (msg: string) => void): Port {
     for (const h of [0.55, 1.1]) beam(ax, ay + h, az, bx, by + h, bz, 0.05, RAIL);
     for (let i = 0; i <= posts; i++) { const k = i / posts, x = ax + (bx - ax) * k, y = ay + (by - ay) * k, z = az + (bz - az) * k; beam(x, y, z, x, y + 1.1, z, 0.05, RAIL); }
   };
-  /** 岸桥（岸边集装箱起重机）。cz 是它在码头上的位置，trolleyX 是小车停在大梁上的位置。 */
-  const crane = (cz: number, trolleyX: number) => {
+  /** 岸桥（岸边集装箱起重机）。cz 是它在码头上的位置，trolleyX 是小车停在大梁上的位置，cargo 是吊具下那只箱子的颜色。 */
+  const crane = (cz: number, trolleyX: number, cargo: number) => {
     const X1 = 34, X2 = 58, Z = 8, TOP = 42, G0 = 21, G1 = 105, GB = TOP + 1.6, GT = TOP + 4.6; // 大梁的起止位置、下弦和上弦的高度
     // 四条门腿，脚下是行走台车：一根平衡梁压着四组车轮
     for (const x of [X1, X2]) for (const s of [-1, 1]) {
@@ -235,7 +175,8 @@ export function buildPort(progress: (msg: string) => void): Port {
     box(trolleyX, 27.2, cz, 2.0, 0.7, 9, CRANE_D);                                 // 吊具上架
     box(trolleyX, 26.3, cz, 2.5, 0.45, 12.4, RAIL);                               // 吊具
     for (const s of [-1, 1]) box(trolleyX, 26.3, cz + s * 6.1, 2.6, 0.7, 0.3, CRANE_D);
-    addContainer(trolleyX, 26 - CH / 2, cz, 0, pick(rng, PALETTE), true);
+    // 吊具下吊着一只 40 尺箱，箱顶贴着吊具的底面（y = 26）。它悬在二十多米高的地方，谁也走不到跟前：永远用简模，也不登记碰撞
+    containers.add({ size: 40, x: trolleyX, y: 26 - CONTAINER_SIZES[40].height, z: cz, yaw: Math.PI / 2, color: cargo, lodOnly: true, solid: false });
     // 楼梯塔：贴着陆侧门腿，一段一段折返上到大梁
     const SZ = cz - Z - 1.5;
     for (const dx of [-2.2, 2.2]) for (const dz of [-0.7, 0.7]) beam(X1 + dx, 0, SZ + dz, X1 + dx, TOP + 1.2, SZ + dz, 0.14, CRANE);
@@ -254,17 +195,13 @@ export function buildPort(progress: (msg: string) => void): Port {
   };
   // 两台岸桥：[在码头上的位置 z, 小车停在大梁上的位置 x]。码头的摆放清单（layout/quay.ts）要知道门腿在哪，好在腿脚下立防撞柱
   const CRANES = [[-42, 78], [20, 86]] as const;
-  for (const [cz, trolleyX] of CRANES) crane(cz, trolleyX);
+  CRANES.forEach(([cz, trolleyX], i) => crane(cz, trolleyX, i ? CONTAINER_COLORS.teal : CONTAINER_COLORS.orange));
 
   // ---------------------------------------------------------------- 货轮
   const HULL = 0x121c26;
   box(84, 3, -30, 36, 12, 130, HULL, true);
   box(84, 0.1, -30, 36.3, 2.2, 130.3, 0x6a1f18);
   box(84, 9.3, -30, 36.6, 0.9, 130.6, 0x1a2630);
-  for (let r = 0; r < 12; r++) for (let b = 0; b < 7; b++) {
-    const h = 1 + Math.floor(rng() * 4);
-    for (let k = 0; k < h; k++) addContainer(69.6 + r * 2.62, 9.75 + CH / 2 + k * CH, -86 + b * 12.6, 0, pick(rng, PALETTE), true);
-  }
   // 船楼：一层一层的甲板，每层挑出一圈带栏杆的走廊；顶上是带翼桥的驾驶台、桅杆和雷达
   const HOUSE = 0x80827e, DECK = 0x4c5052;
   box(84, 20, 20, 30, 21, 18, HOUSE);
@@ -386,7 +323,14 @@ export function buildPort(progress: (msg: string) => void): Port {
   layRoad(stage);
   layQuay(stage, QUAY_X, CRANES.map(([cz]) => cz));
   layWest(stage);
+  // 集装箱也在这里摆：冷藏箱的机组是道具，要赶在 stage.build() 之前报上去。
+  // 货轮甲板上的箱格：12 行 × 7 列，第一摞在船身的西北角，甲板面高 9.75 米（船身和甲板的尺寸见上面"货轮"一段）。
+  // 第 3、4 列正好在一号岸桥（z = −42）的两边 —— 那里正在卸货
+  progress('正在布置集装箱');
+  layContainers(containers, stage);
+  layShipCargo(containers, stage, { x: 69.6, y: 9.75, z: -86, rows: 12, bays: 7, rowPitch: 2.62, bayPitch: 12.6 }, [3, 4]);
   group.add(stage.build());
+  group.add(containers.build(colliders)); // 碰撞盒在这一步登记（箱顶是金属面，开门箱是空壳）；必须排在下面建寻路网格之前
 
   // 车间里面的通用道具：清单在 workshopfit.ts（WORKSHOP_PROPS，车间自己的坐标，这里加上平移量）。
   // 全部用"室内版"材质 —— 淋不到雨，反射的是屋里而不是天空。二十几件几乎件件不同，实例化帮不上忙，
@@ -411,7 +355,7 @@ export function buildPort(progress: (msg: string) => void): Port {
   indoorLabels.userData.interior = true;
   indoor.traverse((o) => { if ((o as THREE.Mesh).material === outdoorLabels) (o as THREE.Mesh).material = indoorLabels; });
 
-  group.add(buildDetails(yard, CW, CH, CL, colliders, BOUNDS));
+  group.add(buildDetails(colliders, BOUNDS));
 
   // ---------------------------------------------------------------- 灯
   // 灯具有三样东西要画，都在这里汇总：
@@ -438,18 +382,6 @@ export function buildPort(progress: (msg: string) => void): Port {
   let lampCount = 6;
 
   // ---------------------------------------------------------------- 把收集到的东西变成网格
-  const cGeo = containerGeometry(CW, CH, CL), cFar = new THREE.BoxGeometry(CW, CH, CL);
-  const place = (geo: THREE.BufferGeometry, mats: THREE.Material[], items: Item[]) => {
-    if (!items.length) return;
-    const mesh = new THREE.InstancedMesh(geo, mats, items.length);
-    items.forEach((it, i) => {
-      mesh.setMatrixAt(i, m4.compose(v1.set(it.x, it.y, it.z), q.setFromAxisAngle(UP, it.rot * Math.PI / 2), v2.set(1, 1, 1)));
-      mesh.setColorAt(i, col.setHex(it.c));
-    });
-    mesh.castShadow = mesh.receiveShadow = true;
-    group.add(mesh);
-  };
-  for (const v of variants) { place(cGeo, v.near, v.items); place(cFar, v.far, v.farItems); }
   const beamMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), weathered(new THREE.MeshStandardMaterial({ roughness: 0.55, metalness: 0.25 })), beamList.length);
   beamList.forEach((b, i) => { beamMesh.setMatrixAt(i, b.m); beamMesh.setColorAt(i, col.setHex(b.c)); });
   beamMesh.castShadow = beamMesh.receiveShadow = true;
@@ -466,7 +398,7 @@ export function buildPort(progress: (msg: string) => void): Port {
   const order = lampSpots.map((_, i) => i);
   let lastSort = -1;
   return {
-    group, colliders, nav, relays, evacPos, sun, ground, reflection, interior, indoor, shelter,
+    group, colliders, nav, containers, relays, evacPos, sun, ground, reflection, interior, indoor, shelter,
     probePos: new THREE.Vector3((interior.min.x + interior.max.x) / 2, 2.4, (interior.min.z + interior.max.z) / 2),
     playerStart: new THREE.Vector3(-18, 0, 93),
     setLampCount(n) { lampCount = n; lastSort = -1; },
@@ -478,6 +410,7 @@ export function buildPort(progress: (msg: string) => void): Port {
       // （地图上能直着看进门洞的最远的地方是南围墙根，离车间 92 米，所以这个距离上不会看到东西突然冒出来）
       indoor.visible = interior.distanceToPoint(focus) < INDOOR_DRAW_RANGE;
       stage.cull(focus); // 室外的道具也一样：离得远的整片不画（layout/stage.ts）。全场只有十来片，每帧算一遍不费事
+      containers.update(focus); // 集装箱：近处的换成精模，远处的换回简模。它自己会控制节奏，每帧调没关系
       if (t - lastSort > 0.4) {
         lastSort = t;
         // 按水平距离排：高杆灯挂在 13 米高处，要是算直线距离，它永远排在两米高的投光灯后面

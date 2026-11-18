@@ -125,13 +125,12 @@ function atlas() {
   return t;
 }
 
-export interface BoxSpec { x: number; y: number; z: number; rot: number }
-
 /**
- * 给场景贴上细节。containers 是堆场里的集装箱，W/H/L 是箱体尺寸，bounds 是可活动范围。
- * 用单独的随机数种子，不会打乱集装箱本身的布局。
+ * 给场景贴上细节：围墙上的水渍，地上的油渍、裂缝、井盖、轮胎印。bounds 是可活动范围。
+ * colliders 用来避开被东西压着的地方，所以要等集装箱、道具的碰撞盒都登记完了再调。
+ * （集装箱身上的喷字、合格牌、锈水条不在这里：它们跟着每只箱子的模型走，见 container.ts。）
  */
-export function buildDetails(containers: BoxSpec[], W: number, H: number, L: number, colliders: Colliders, bounds: { minX: number; maxX: number; minZ: number; maxZ: number }) {
+export function buildDetails(colliders: Colliders, bounds: { minX: number; maxX: number; minZ: number; maxZ: number }) {
   const rng = mulberry32(9917);
   const list: { m: THREE.Matrix4; cell: Cell }[] = [];
   const q = new THREE.Quaternion(), qx = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2), Y = new THREE.Vector3(0, 1, 0);
@@ -144,19 +143,6 @@ export function buildDetails(containers: BoxSpec[], W: number, H: number, L: num
     q.setFromAxisAngle(Y, ang).multiply(qx);
     list.push({ m: new THREE.Matrix4().compose(new THREE.Vector3(x, 0.006 + list.length * 0.000002, z), q, new THREE.Vector3(w, l, 1)), cell });
   };
-
-  // ---- 集装箱
-  for (const c of containers) {
-    const ax = c.rot ? 1 : 0, az = c.rot ? 0 : 1; // 箱子长轴方向
-    // 侧板上的喷字和锈迹已经画在箱体贴图里了（波纹板上贴不了平的贴花），这里只管箱门：门板基本是平的
-    const ex = c.x + ax * (L / 2 - 0.03), ez = c.z + az * (L / 2 - 0.03);
-    if (colliders.pointInside(ex + ax * 0.5, c.y, ez + az * 0.5)) continue; // 门被别的箱子挡住就不贴了
-    const side = (d: number): [number, number] => [ex + az * d, ez + ax * d];
-    let [x, z] = side(0.6 * (ax ? -1 : 1)); wall('plate', x, c.y - 0.42, z, ax, az, 0.4, 0.4);
-    [x, z] = side(-0.58 * (ax ? -1 : 1)); wall('data', x, c.y - 0.1, z, ax, az, 0.74, 0.74);
-    if (rng() < 0.45) { [x, z] = side(0.58 * (ax ? -1 : 1)); wall('check', x, c.y + 0.42, z, ax, az, 0.34, 0.34); }
-    if (rng() < 0.2) { [x, z] = side(-0.58 * (ax ? -1 : 1)); wall('hazard', x, c.y + 0.62, z, ax, az, 0.44, 0.44); }
-  }
 
   // ---- 围墙上的水渍（车间和库房的外墙有自己的做旧，不用这里的贴花）
   for (let x = bounds.minX + 3; x < bounds.maxX - 3; x += 3 + rng() * 6) {
