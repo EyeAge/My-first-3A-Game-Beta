@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { Colliders } from './colliders';
 import type { PropModel } from './kit';
 
@@ -40,6 +41,44 @@ export class PropField {
         group.add(inst);
       }
       for (const p of list) addBoxes(model, p.m, p.yaw, colliders);
+    }
+    return group;
+  }
+
+  /**
+   * 另一种生成方式：不做实例化，而是把清单里所有的东西"焊"在一起 —— 用同一种材质的零件并成一个网格。
+   *
+   * 实例化省事的前提是"同一个模型摆很多件"。车间里那二十几件道具正相反：几乎每件都只有一个，
+   * 走 build() 的话每件、每种材质各占一次绘制调用，加起来上百次；而它们用到的材质翻来覆去就是那十几种。
+   * 所以这里先把每件道具的几何体按它的摆放位置"摆好"（顶点直接换算成世界坐标），再把同材质的拼成一个大网格，
+   * 最后只剩十几次绘制调用。代价是整堆东西变成一个整体：只要有一角在镜头里就整个都画。
+   * 因此只适合挤在一小块地方的一组道具；散在全场的还是用 build()。不支持 tint。
+   */
+  buildMerged(colliders: Colliders): THREE.Group {
+    const group = new THREE.Group();
+    group.name = 'props-merged';
+    const buckets = new Map<string, { src: THREE.Mesh; geos: THREE.BufferGeometry[] }>();
+    for (const [model, list] of this.items) {
+      for (const child of model.group.children) {
+        const src = child as THREE.Mesh, geo = src.geometry;
+        // 能拼到一起的条件：同一个材质、投不投影子一样，而且几何体带的数据种类一样（有的零件没有顶点色，硬拼会失败）
+        const key = [(src.material as THREE.Material).uuid, src.castShadow, src.receiveShadow, !!geo.index, ...Object.keys(geo.attributes).sort().map((name) => name + geo.attributes[name].itemSize)].join('|');
+        let bucket = buckets.get(key);
+        if (!bucket) buckets.set(key, (bucket = { src, geos: [] }));
+        for (const p of list) bucket.geos.push(geo.clone().applyMatrix4(p.m));
+      }
+      for (const p of list) addBoxes(model, p.m, p.yaw, colliders);
+    }
+    for (const { src, geos } of buckets.values()) {
+      const merged = mergeGeometries(geos, false) as THREE.BufferGeometry | null;
+      // 拼成了：那些挪好位置的副本就用不着了。万一没拼成（返回 null），就退回去一件一个网格，东西照样在，只是多几次绘制调用
+      if (merged) for (const g of geos) g.dispose();
+      for (const geo of merged ? [merged] : geos) {
+        const mesh = new THREE.Mesh(geo, src.material);
+        mesh.castShadow = src.castShadow; mesh.receiveShadow = src.receiveShadow;
+        mesh.name = `merged:${(src.material as THREE.Material).name || src.name}`;
+        group.add(mesh);
+      }
     }
     return group;
   }
