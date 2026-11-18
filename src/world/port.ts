@@ -391,7 +391,8 @@ export function buildPort(progress: (msg: string) => void): Port {
     const l = new THREE.SpotLight(0xffa858, 0, 40, 1.08, 0.85, 1.5);
     lightPool.push(l); group.add(l, l.target);
   }
-  group.add(lightCones(lampPos));
+  // 每盏路灯下面一个光锥：从灯往正下方张开，一直到地面（9.86 米），底面半径 6.4 米
+  group.add(lightCones(lampPos.map((pos) => ({ pos, dir: new THREE.Vector3(0, -1, 0), length: 9.86, radius: 6.4 }))));
   let lampCount = 6;
 
   // ---------------------------------------------------------------- 杂物
