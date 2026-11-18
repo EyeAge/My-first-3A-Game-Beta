@@ -13,7 +13,7 @@ import { groundDetailTextures, groundPaintTexture, stencilText } from './texture
 //
 // 着色器吃四张自己生成的贴图：
 //   掩码（groundmask.ts）  哪里低洼、哪里潮、哪里有油、哪里磨得狠 —— 全场只此一张，不平铺
-//   细节 / 坡度（textures.ts）  石子、斑块、裂缝的原料 —— 平铺
+//   细节 / 坡度（textures.ts）  石子、斑块的原料 —— 平铺
 //   喷涂图（本文件下半部分）  模板字、箭头、轮胎擦痕 —— 只盖主干道和码头两条行车走廊
 // 直线类的标线（车道线、斑马线、堆位边框……）不进贴图，直接用数学式子画，凑多近都是锐利的。
 
@@ -29,6 +29,9 @@ const LOOK = {
   aggregate: [0.11, 0.105, 0.095],      // 露出来的浅色石子，加在底色上
   patch: [0.085, 0.085, 0.09],          // 后补的新沥青，比老路面黑
   tar: [0.018, 0.018, 0.02],            // 填缝的沥青胶、裂缝
+  crackDarken: 0.7,                     // 发丝裂缝把路面压暗多少（1 = 全黑）。裂缝只有几毫米宽，画成纯黑反而像描上去的线
+  sealAsphalt: 0.85,                    // 补缝胶盖住沥青路面的程度；水泥面是浅色的，黑胶太跳，所以盖得薄一些
+  sealConcrete: 0.5,
   paintYellow: [0.52, 0.34, 0.035],
   paintWhite: [0.47, 0.47, 0.44],
   railBed: [0.05, 0.04, 0.035],         // 轨道槽里的锈和泥
@@ -117,6 +120,62 @@ float gHatchBox(vec2 p, vec2 c, vec2 h, float spacing, float lineWidth, float px
   float inside = clamp(-sd / px + 0.5, 0.0, 1.0);
   float diag = (p.x + p.y) * 0.7071;
   return max(gBand(sd, 0.075, px), gBand(mod(diag, spacing) - spacing * 0.5, lineWidth * 0.5, px) * inside);
+}
+
+// 一维的值噪声，同时返回它的导数：x = 值（0..1），y = x 每往前走 1、值变多少。seed 不同，取出来的就是互不相关的另一条曲线。
+vec2 gNoise1(float x, float seed){
+  float i = floor(x), f = x - i;
+  float a = gHash1(vec2(i, seed)), b = gHash1(vec2(i + 1.0, seed));
+  return vec2(mix(a, b, f * f * (3.0 - 2.0 * f)), (b - a) * 6.0 * f * (1.0 - f));
+}
+
+// 一块板上的一条裂缝。
+// 以前裂缝是从一张平铺的噪声图里取“等高线”：画出来是一圈圈又粗又圆滑的闭合曲线，像地图上的边界线，而且每块板的花样都差不多。
+// 真的裂缝是“一条线”：从板边裂进来，歪歪扭扭地走一段，要么一直裂到对边，要么越走越细、半路消失，偶尔分一个叉；它不会自己绕回来。
+// 所以这里直接用式子画这条线：先把坐标转一个随机的角度，s 是顺着裂缝走的方向，t 是横着的方向；
+// 裂缝的中线是 t = 三层噪声叠起来的一条曲线（大弯 2 米一个、小弯半米一个、毛刺 10 厘米一个），像素离这条曲线多远就是 |t − 曲线|。
+// 曲线斜着走的地方，这个竖直量出来的距离比真正的垂直距离大，所以除以 sqrt(1 + 斜率²) 换算回来，裂缝的粗细才不随走向变。
+//
+// 线宽只有几毫米，离远了比一个像素还细，要按“像素有多大比例落在缝里”来淡化（gBand）。这里的“像素有多大”得顺着裂缝的垂直方向量：
+// 贴着地面看过去，一个像素盖住的是一条前后很长、左右很窄的地面——迎面朝你延伸过来的裂缝其实看得很清楚，横在面前的才会被压扁。
+// 一律按最长的那个方向算的话，站着看时所有裂缝都淡得看不见。
+//
+// q 是板内坐标（板心为原点，±3 米）；ra、rb 是这块板的六个随机数；stepX、stepY 是屏幕上往右、往下挪一个像素时地面上挪多少米。
+// 返回 x = 发丝裂缝的覆盖度，y = 沿着裂缝灌的一道补缝胶的覆盖度（这条缝补没补过，由调用的地方决定），z = 裂缝两侧渗水的湿印。
+vec3 gSlabCrack(vec2 q, vec3 ra, vec3 rb, vec2 stepX, vec2 stepY){
+  float angle = ra.x * 6.28318;
+  vec2 dir = vec2(cos(angle), sin(angle)), across = vec2(-dir.y, dir.x);
+  float s = dot(q, dir);
+  float t = dot(q, across) - (ra.y - 0.5) * 3.0;                    // 整条线横向挪开一点：裂缝不一定过板心
+  float seed = floor(ra.z * 64.0) * 7.0;
+  vec2 n1 = gNoise1(s * 0.45 + seed, 1.0), n2 = gNoise1(s * 1.9 + seed, 2.0), n3 = gNoise1(s * 9.0 + seed, 3.0);
+  float off = t - (n1.x - 0.5) * 1.2 - (n2.x - 0.5) * 0.3 - (n3.x - 0.5) * 0.045;
+  float lean = n1.y * 0.54 + n2.y * 0.57 + n3.y * 0.405;            // 中线的斜率 = 每层的 幅度 × 频率 × 导数
+  float norm = inversesqrt(1.0 + lean * lean);                      // 1 + 斜率² 不小于 1，开方、取倒数都安全
+  float d = abs(off) * norm;
+  vec2 normal = (across - lean * dir) * norm;                       // 垂直于裂缝的单位向量
+  float px = abs(dot(normal, stepX)) + abs(dot(normal, stepY)) + 1e-5;
+  // 六成的裂缝只裂到半路：从板的一边进来，走到 stop 之前的 1.8 米里越来越细，直到消失
+  float stop = rb.x < 0.6 ? mix(-1.0, 2.4, rb.y) : 9.0;
+  float thick = (1.0 - smoothstep(stop - 1.8, stop, s)) * (0.5 + n2.x);  // 粗细沿途也在变（0.5–1.5 倍）
+  // 四成半的裂缝在半路分一个叉：从 fork 那一点起，以斜率 k 离开主干，走 len 米后消失
+  float fork = min(mix(-2.2, 0.6, rb.z), stop - 1.2);
+  float along = s - fork;
+  float k = (ra.z < 0.5 ? -1.0 : 1.0) * mix(0.35, 0.8, rb.y);
+  float len = mix(0.7, 2.0, fract(rb.x * 7.7));
+  float thickB = step(fract(rb.z * 5.3), 0.45) * step(0.0, along) * (1.0 - smoothstep(len * 0.3, len, along)) * 0.8;
+  float normB = inversesqrt(1.0 + (lean + k) * (lean + k));
+  float dB = abs(off - k * along) * normB;
+  vec2 normalB = (across - (lean + k) * dir) * normB;
+  float pxB = abs(dot(normalB, stepX)) + abs(dot(normalB, stepY)) + 1e-5;
+  // 裂缝本体最宽处 7 毫米（半宽 3.5 毫米）
+  float hair = max(gBand(d, 0.0035 * thick, px), gBand(dB, 0.0035 * thickB, pxB));
+  // 补缝胶：顺着裂缝浇的一道沥青胶，半宽 1–2.5 厘米，宽窄不匀；裂缝的尖梢太细，不补
+  float sealW = 0.010 + 0.015 * n2.x;
+  float seal = max(gBand(d, sealW, px) * smoothstep(0.1, 0.5, thick), gBand(dB, sealW * 0.8, pxB) * smoothstep(0.1, 0.5, thickB));
+  // 湿印：水顺着裂缝渗进去，两侧三四厘米的路面颜色更深。离远了裂缝本体看不见，靠它还能认出这里有一道缝
+  float seep = max(exp(-d * d / 0.0012) * min(thick, 1.0), exp(-dB * dB / 0.0012) * min(thickB, 1.0));
+  return vec3(hair, seal, seep);
 }
 
 // 所有“直线类”的标线。返回 (黄漆, 白漆) 的覆盖度。p 是世界坐标 xz，px 是 x、z 两个方向上一个像素盖住多少米。
@@ -209,7 +268,7 @@ const SHADER_BODY = /* glsl */ `
   if (inMask > 0.0) mk = mix(mk, gBicubic(uMask, muv, uMaskRes), inMask);
 
   // ---- 平铺细节：同一张图铺两种大小 ----
-  vec4 d1 = texture2D(uDetail, xz * 0.21);                 // 4.76 米一铺：斑块(g) 杂点(a)；裂缝(b) 在下面另取
+  vec4 d1 = texture2D(uDetail, xz * 0.21);                 // 4.76 米一铺：斑块(g) 杂点(a)
   vec2 grainUv = xz * ${float(GRAIN.tile)} + 0.37;
   vec4 d2 = texture2D(uDetail, grainUv);                   // 0.48 米一铺：石子(r) 浅色骨料(a)
   vec4 n1 = texture2D(uDetailSlope, grainUv);              // 石子的坡度
@@ -232,26 +291,36 @@ const SHADER_BODY = /* glsl */ `
   float wobble = (d1.g - 0.5) * 0.6;
   float conc = max(smoothstep(26.6, 27.3, xz.x + wobble), 1.0 - smoothstep(-63.3, -62.6, xz.x + wobble));
 
-  // ---- 裂缝：磨损大的地方 + 运气不好的板才裂；其中一部分用沥青胶补过（更宽、更黑的一道）----
-  // 裂缝的花样存在细节图里，4.76 米就重复一次，从高处往下看会看出一排排一模一样的纹路。
-  // 所以每块板各自从图上随机的一处取（一半的板还把图转 90 度）：每块板裂得都不一样，而且裂缝到板缝就断——真的水泥板也是这样。
-  // 取图的位置在板缝处是突变的，显卡没法靠“和邻居比一比”选贴图的级别，要用 textureGrad 把“一个像素跨多大”直接告诉它
-  bool quarterTurn = slabRand.z > 0.5;
-  vec2 crackUv = (quarterTurn ? xz.yx : xz) * 0.21 + slabRand.xy * 7.0;
-  float ridge = textureGrad(uDetail, crackUv, (quarterTurn ? stepX.yx : stepX) * 0.21, (quarterTurn ? stepY.yx : stepY) * 0.21).b;
-  float crackArea = smoothstep(0.6, 0.76, mk.a * 0.7 + slabRand.x * 0.45);
-  float crackAA = min(apx * 4.0, 0.25) + 0.004;            // 裂缝边缘的软硬：离得越远越软（裂缝图上每米的变化量大约是 3）
-  float crack = smoothstep(0.955 - crackAA, 0.975, ridge) * crackArea;
-  float seal = smoothstep(0.928 - crackAA, 0.948, ridge) * crackArea * step(0.72, slabRand.y) * (1.0 - 0.5 * conc);   // 水泥面上补得少：浅色的地面上一道道黑胶太抢眼
+  // ---- 裂缝：磨得狠的地方 + 运气不好的板才裂，一块板最多一条（外加一个分叉）；其中一部分用沥青胶补过 ----
+  // “这块板裂不裂”要整块板说了算，所以磨损不能用这个像素的，得到掩码上取板心那一点的
+  // （用 textureLod 指定取第 0 级：板心的坐标在板缝处是突变的，让显卡自己挑级别的话会沿着板缝出一圈杂点）
+  vec2 slabCenter = (slabId + 0.5) * ${float(SLAB.size)} - vec2(${float(SLAB.offsetX)}, ${float(SLAB.offsetZ)});
+  float slabWear = textureLod(uMask, (slabCenter - uMaskRect.xy) * uMaskRect.zw, 0.0).a;
+  float crack = 0.0, seal = 0.0, seep = 0.0;
+  if (slabWear * 0.7 + slabRand.x * 0.45 > 0.66) {
+    vec3 line = gSlabCrack((fract(sj) - 0.5) * ${float(SLAB.size)}, gHash3(slabId * 1.3 + 71.0), gHash3(slabId.yx * 2.1 + 19.0), stepX, stepY);
+    float sealed = step(0.72, fract(slabRand.x * 13.7));   // 裂了的板里大约三成补过
+    seal = line.y * sealed;
+    crack = line.x * (1.0 - seal);                         // 补过的地方裂缝被胶盖住了
+    seep = line.z * (1.0 - sealed);
+  }
 
-  // ---- 修补块：沥青路面上大约七块板里有一块被挖开重铺过，留下一个矩形的黑补丁，四周一圈沥青胶 ----
+  // ---- 修补块：沥青路面上大约七块板里有一块被挖开重铺过，留下一个矩形的补丁 ----
+  // 补丁要是个个一样大、一样黑，从高处看就是一排复制出来的方块。所以让它们各不相同：
+  //   形状  三成是横穿整块板的窄条（埋管线时开的沟），其余是 1–3 米见方的块；
+  //   新旧  mendAge 0 = 刚补的，又黑又毛、四周一圈封边的沥青胶；1 = 补了好些年，颜色已经快和老路面一样、封边也磨没了
   vec3 mendRand = gHash3(slabId * 1.7 + 11.0);
-  vec2 mendHalf = 0.5 + vec2(mendRand.z, fract(mendRand.z * 7.7)) * 0.9;
+  vec3 mendRand2 = gHash3(slabId.yx * 2.9 + 37.0);
+  bool trench = mendRand2.x < 0.3;
+  vec2 mendHalf = trench ? vec2(0.3 + 0.35 * mendRand.z, 4.5) : 0.5 + vec2(mendRand.z, mendRand2.y);
+  if (trench && mendRand2.y < 0.5) mendHalf = mendHalf.yx; // 沟有横着开的，也有竖着开的
   vec2 pq = abs(fract(sj) * ${float(SLAB.size)} - (1.6 + mendRand.xy * 2.8)) - mendHalf;
   float mendSd = max(pq.x, pq.y) + (d1.a - 0.5) * 0.03;   // 到补丁边缘的距离：负 = 在补丁里
   float hasMend = step(0.86, slabRand.z) * (1.0 - conc);
+  float mendAge = mendRand2.z;
   float mend = (1.0 - smoothstep(-apx, apx, mendSd)) * hasMend;
-  tar = max(tar, gBand(mendSd, 0.018, apx) * hasMend);
+  tar = max(tar, gBand(mendSd, 0.018, apx) * hasMend * (1.0 - smoothstep(0.35, 0.8, mendAge)));
+  crack *= 1.0 - mend; seal *= 1.0 - mend; seep *= 1.0 - mend;    // 重铺的时候裂缝一起挖掉了
 
   // ---- 岸桥轨道：嵌在地面里的钢轨。槽宽 ±19 厘米，中间是 ±3.7 厘米、被车轮磨亮的轨头 ----
   float inYard = step(abs(xz.y), 98.6);
@@ -265,8 +334,9 @@ const SHADER_BODY = /* glsl */ `
   alb += ${vec3(LOOK.aggregate)} * smoothstep(0.58, 0.78, d2.a) * (1.0 - conc * 0.6);
   float polish = smoothstep(0.38, 0.72, mk.a);             // 被车流磨光的车道：颜色深一点，也更亮
   alb *= mix(1.0, 0.78, polish);
-  alb = mix(alb, ${vec3(LOOK.patch)} * (0.75 + 0.5 * grain), mend * 0.85);
-  alb = mix(alb, ${vec3(LOOK.tar)}, max(max(tar, seal * 0.4) * 0.94, crack * 0.9));
+  alb = mix(alb, ${vec3(LOOK.patch)} * (0.75 + 0.5 * grain), mend * mix(0.85, 0.3, mendAge));
+  alb *= 1.0 - 0.18 * seep;
+  alb = mix(alb, ${vec3(LOOK.tar)}, max(max(tar * 0.94, seal * mix(${float(LOOK.sealAsphalt)}, ${float(LOOK.sealConcrete)}, conc)), crack * ${float(LOOK.crackDarken)}));
   alb *= 1.0 - 0.62 * mk.b;                                // 油渍
 
   // ---- 喷涂图：模板字和箭头（r 黄 g 白）、轮胎橡胶（b）。两条走廊并排存在一张图里 ----
@@ -291,7 +361,7 @@ const SHADER_BODY = /* glsl */ `
   float chip = chipN * 0.62 + d1.a * 0.38;
   float wear = clamp(mk.a * 1.25 - 0.22 + mp.b * 0.6, 0.0, 1.0);        // 磨损掩码，被轮胎擦过的地方更狠
   float wearT = mix(0.24, 0.55, wear);                                   // 噪声低于这个值的地方漆已经掉了
-  float keep = smoothstep(wearT - 0.045, wearT + 0.045, chip) * (1.0 - max(max(tar, crack), max(mend * 0.9, railBed)));
+  float keep = smoothstep(wearT - 0.045, wearT + 0.045, chip) * (1.0 - max(max(tar, max(crack, seal)), max(mend * mix(0.9, 0.3, mendAge), railBed)));
   float edgeN = (chipN - 0.5) * 0.55 * (1.0 - kw * 2.0);                 // 把模板字的边缘推得毛一点
   float paintY = max(lines.x, smoothstep(0.5 - kw, 0.5 + kw, mp.r + edgeN)) * keep;
   float paintW = max(lines.y, smoothstep(0.5 - kw, 0.5 + kw, mp.g + edgeN)) * keep;
@@ -332,7 +402,7 @@ const SHADER_BODY = /* glsl */ `
 
   // ---- 粗糙度：干 0.74 → 潮 0.42 → 浸透 0.2 → 水膜 0.13 → 水 0.055，每一段都是平滑过渡 ----
   float rough = mix(0.74, 0.42, damp) + (grain - 0.5) * 0.24 + (d1.g - 0.5) * 0.16 + conc * 0.03 - paint * 0.05;
-  rough -= polish * 0.07 + mk.b * 0.16 + max(tar, seal) * 0.1 - mend * 0.05;   // 磨光的车道、油渍、沥青胶更亮；新补的沥青更毛
+  rough -= polish * 0.07 + mk.b * 0.16 + max(tar, seal) * 0.1 - mend * 0.05 * (1.0 - mendAge);   // 磨光的车道、油渍、沥青胶更亮；新补的沥青更毛
   rough = mix(rough, 0.2 + (grain - 0.5) * 0.14, soak * 0.9);
   rough = mix(rough, 0.13, film * 0.8);
   rough += smoothstep(10.0, 80.0, dist) * 0.04;            // 远处略糙一点，压住闪烁
@@ -563,7 +633,7 @@ export function buildGround(quayX: number) {
         // 加早了会被倒影整个盖掉，那样涟漪只有在灯的倒影里才看得出来，暗处的水塘就像没在下雨
         reflectedLight.indirectSpecular += gCrest * (irradiance + iblIrradiance) * ${float(LOOK.crestSkyGain)};`);
   };
-  groundMat.customProgramCacheKey = () => 'wet-ground-4';
+  groundMat.customProgramCacheKey = () => 'wet-ground-5';
 
   const ground = new THREE.Mesh(new THREE.PlaneGeometry(462, 600), groundMat);
   ground.rotation.x = -Math.PI / 2;
