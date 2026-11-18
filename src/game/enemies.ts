@@ -628,6 +628,20 @@ export class Enemies {
     }
   }
 
+  /**
+   * 召集：把离 pos 超过 minDist 米、还在巡逻的敌人叫到 pos 来看看。
+   * 和 alert() 的区别：alert 是"附近有动静，听得见的都过去"；这个反过来，专门叫远处什么都没听见的，
+   * 而且只动巡逻中的 —— 已经在调查 / 搜索的不打扰，不然它们会一次次拿到玩家的最新位置，变成全知。
+   * 任务导演在"场上满员、增援进不来"时用它（见 mission.ts 的 direct()）。
+   */
+  regroup(pos: THREE.Vector3, minDist: number) {
+    for (const e of this.list) {
+      if (!e.alive || e.mode !== 'patrol' || e.pos.distanceTo(pos) < minDist) continue;
+      e.lastKnown.set(pos.x, Math.max(0, pos.y), pos.z);
+      e.mode = 'investigate'; e.modeT = 9 + rnd() * 4 + this.travelTime(e, pos);
+    }
+  }
+
   // ------------------------------------------------------------------ 4. 攻击令牌
 
   /**

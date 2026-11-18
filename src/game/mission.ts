@@ -32,6 +32,8 @@ const DIRECTOR = {
   pursuitMinAlive: 4,   // 场上少于这个数才补
   pursuitExtra: 5,      // 追击阶段一共最多补几只
   pursuitAlert: 4,      // 不补怪的时候，每隔这么久把全场的敌人往玩家这边叫一次
+  // 场上满员、增援排着队进不来的时候：每隔 regroupEvery 秒，把离玩家 regroupBeyond 米以外还在闲逛的敌人叫过来（原因见 direct()）
+  regroupEvery: 4, regroupBeyond: 50,
   // 刷出一只增援时，把多大范围内的敌人都叫过来。参考是 60 米（它的地图只有 80×60，等于全图）；我们的地图大约是它的两倍半见方
   spawnAlertRadius: 150, pursuitAlertRadius: 220,
   noiseEvery: 0.3,      // 枪声最多每 0.3 秒"通报"一次（传多远由敌人那边的 SENSE.hearRadius 定，45 米）
@@ -57,6 +59,7 @@ export class Mission {
   private pursuitT = 0; private pursuitLeft = 0;
   private spotted = false;                       // "你已被发现"的无线电只说一次
   private heardShots = 0; private noiseT = 0;
+  private regroupT = 0;                          // 下一次"满员时召集"最早在什么时候
 
   constructor(private port: Port, private enemies: Enemies, private ui: UI, private audio: GameAudio, private weapon: Weapon, private player: Player) {
     enemies.onKill = (e, weak) => {
@@ -86,7 +89,7 @@ export class Mission {
     this.time = 0; this.cut = 0; this.won = false; this.hold = 0; this.holdRelay = null; this.prompt = null;
     this.stats = { shots: 0, hits: 0, kills: 0 };
     this.events = []; this.lowHpT = 0; this.evacHintT = 0;
-    this.queue = []; this.announce = false; this.pursuitT = 0; this.pursuitLeft = 0; this.spotted = false; this.heardShots = 0; this.noiseT = 0;
+    this.queue = []; this.announce = false; this.pursuitT = 0; this.pursuitLeft = 0; this.spotted = false; this.heardShots = 0; this.noiseT = 0; this.regroupT = 0;
     this.port.relays.forEach((r) => r.reset());
     this.at(1.6, () => this.radio('激战队员，这里是指挥中心。港区主控已封锁泊位。切断堆场、仓库、码头的三处中继。'));
     // 开局的三只巡逻兵：三处中继附近各放一只（哪只守哪处是随机的）。它们不知道玩家在哪，可以摸过去打个措手不及
@@ -116,7 +119,15 @@ export class Mission {
     for (let i = 0; i < this.queue.length; i++) {
       const item = this.queue[i];
       if (item.t > this.time) continue;
-      if (alive >= DIRECTOR.maxAlive) { item.t += 1; continue; }                 // 场上满了：过 1 秒再看
+      if (alive >= DIRECTOR.maxAlive) {
+        item.t += 1;                                                             // 场上满了：过 1 秒再看
+        // 满员时把远处闲逛的敌人往玩家这边叫。不这么做的话有一种僵局：玩家从上一场战斗里跑开（我们的地图大，跑得掉），
+        // 被甩掉的敌人找不到人就在原地巡逻，可它们还占着名额，新的增援进不来，场面就一直冷着。
+        // 只叫 50 米以外、处于巡逻状态的：近处的敌人听得见枪声，不需要帮忙；正在调查 / 搜索的也不打扰，免得它们永远"知道"玩家在哪。
+        // 参考的地图只有 80×60 米，谁也跑不出别人的视线，所以它没有这一步。
+        if (this.time >= this.regroupT) { this.regroupT = this.time + DIRECTOR.regroupEvery; enemies.regroup(player.pos, DIRECTOR.regroupBeyond); }
+        continue;
+      }
       const e = enemies.spawnAround(item.kind, player, { minDist: DIRECTOR.spawnMin, maxDist: DIRECTOR.spawnMax });
       if (!e) { item.t += 1.5; if (++item.tries > 6) this.queue.splice(i, 1); break; }   // 没找到合适的位置：稍后重试，试太多次就算了
       this.queue.splice(i, 1);
