@@ -90,7 +90,7 @@ export function buildPort(progress: (msg: string) => void): Port {
   };
 
   // ---------------------------------------------------------------- 集装箱
-  // 全场的箱子都交给一个 ContainerField：它负责实例化绘制、按远近切换精模 / 简模、登记碰撞盒（containerfield.ts）。
+  // 全场的箱子都交给一个 ContainerField：它负责实例化绘制、按远近在精模 / 中模 / 简模三档之间切换、登记碰撞盒（containerfield.ts）。
   // 这里先把它建出来，岸桥、货轮、堆场各自往里"报"箱子（堆场和零散箱子的清单在 layout/containers.ts）；
   // 等全部报完，在下面"室外场地的陈设"那里统一 build()
   const containers = new ContainerField({ seed: 4207 });
@@ -176,7 +176,7 @@ export function buildPort(progress: (msg: string) => void): Port {
     box(trolleyX, 26.3, cz, 2.5, 0.45, 12.4, RAIL);                               // 吊具
     for (const s of [-1, 1]) box(trolleyX, 26.3, cz + s * 6.1, 2.6, 0.7, 0.3, CRANE_D);
     // 吊具下吊着一只 40 尺箱，箱顶贴着吊具的底面（y = 26）。它悬在二十多米高的地方，谁也走不到跟前：永远用简模，也不登记碰撞
-    containers.add({ size: 40, x: trolleyX, y: 26 - CONTAINER_SIZES[40].height, z: cz, yaw: Math.PI / 2, color: cargo, lodOnly: true, solid: false });
+    containers.add({ size: 40, x: trolleyX, y: 26 - CONTAINER_SIZES[40].height, z: cz, yaw: Math.PI / 2, color: cargo, seed: 0, wear: 0.5, lodOnly: true, solid: false });
     // 楼梯塔：贴着陆侧门腿，一段一段折返上到大梁
     const SZ = cz - Z - 1.5;
     for (const dx of [-2.2, 2.2]) for (const dz of [-0.7, 0.7]) beam(X1 + dx, 0, SZ + dz, X1 + dx, TOP + 1.2, SZ + dz, 0.14, CRANE);
@@ -410,7 +410,7 @@ export function buildPort(progress: (msg: string) => void): Port {
       // （地图上能直着看进门洞的最远的地方是南围墙根，离车间 92 米，所以这个距离上不会看到东西突然冒出来）
       indoor.visible = interior.distanceToPoint(focus) < INDOOR_DRAW_RANGE;
       stage.cull(focus); // 室外的道具也一样：离得远的整片不画（layout/stage.ts）。全场只有十来片，每帧算一遍不费事
-      containers.update(focus); // 集装箱：近处的换成精模，远处的换回简模。它自己会控制节奏，每帧调没关系
+      containers.update(focus); // 集装箱：按离玩家的远近重新分档（精模 / 中模 / 简模）。它自己会控制节奏，每帧调没关系
       if (t - lastSort > 0.4) {
         lastSort = t;
         // 按水平距离排：高杆灯挂在 13 米高处，要是算直线距离，它永远排在两米高的投光灯后面

@@ -27,16 +27,18 @@ type ColorName = keyof typeof CONTAINER_COLORS;
  * 四家船公司各自的"涂装"。
  *   brand   它的标是哪一个（container.ts 里 SHIPPING_LINES 的下标）
  *   colors  它的箱子刷什么颜色；写了两遍的是主色，抽到的机会多一倍
- *   seeds   它的箱子用哪几套"花样"（凹坑和锈迹的位置、喷在门上的箱主代号；一共 6 套，见 container.ts）
+ *   seeds   它的箱子用哪几套"花样"（凹坑和锈迹的位置、喷在门上的箱主代号）
  * 颜色、标、花样绑在一起有两个好处：一是像真的 —— 红箱子永远是"激战远洋"的；
- * 二是省：同一种 规格 × 花样 × 做旧 × 标 的箱子共用一份几何、一次画完，组合越少，绘制调用越少。
+ * 二是省：同一种 规格 × 花样 × 做旧 的箱子共用一份几何、一次画完（containerfield.ts），组合越少，绘制调用越少。
+ * container.ts 一共备了 6 套花样，这里只用前 3 套：3 种规格 × 3 套花样 × 3 档做旧 = 27 种箱体，再乘上八种颜色和掉不掉头，
+ * 已经很难在场上找出两只一模一样的；而每多用一套花样，每一遍就要多画 9 个批次。
  * "激战太平洋"的标是藏青色的，只有喷在浅色箱子上才看得见，所以白和黄归它。
  */
 const LINES: readonly { brand: number; colors: readonly ColorName[]; seeds: readonly number[] }[] = [
-  { brand: 0, colors: ['blue', 'blue', 'grey'], seeds: [0, 4] },   // 激战北航
-  { brand: 1, colors: ['red', 'red', 'green'], seeds: [1, 5] },    // 激战远洋
+  { brand: 0, colors: ['blue', 'blue', 'grey'], seeds: [0, 1] },   // 激战北航
+  { brand: 1, colors: ['red', 'red', 'green'], seeds: [1, 2] },    // 激战远洋
   { brand: 2, colors: ['white', 'yellow'], seeds: [2, 0] },        // 激战太平洋
-  { brand: 3, colors: ['teal', 'orange'], seeds: [3, 5] },         // 激战联运
+  { brand: 3, colors: ['teal', 'orange'], seeds: [0, 1] },         // 激战联运
 ];
 type Line = (typeof LINES)[number];
 
