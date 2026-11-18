@@ -1309,7 +1309,7 @@ export class Enemies {
       audio.gullDie(vol, pan);
     } else if (e.kind === 'hound') {
       e.vy = 0; e.es = 'move'; e.crouch = 0;
-      e.dieRoll = (rnd() < 0.5 ? -1 : 1) * (0.2 + rnd() * 0.22);     // 最后歪向哪一侧、歪多少
+      e.dieRoll = (rnd() < 0.5 ? -1 : 1) * (0.25 + rnd() * 0.3);     // 最后歪向哪一侧、歪多少（14°~31°）
       e.diePitch = (rnd() - 0.5) * 0.25;
       e.sR.v += e.dieRoll * 3; e.sP.v += (rnd() - 0.5) * 2;          // 给弹簧一脚：倒下时会先晃过头再回来
       // 四只脚各自往外滑开：左右 16~36 厘米、前后 5~27 厘米。身体落下去的同时腿被这样"劈"开
