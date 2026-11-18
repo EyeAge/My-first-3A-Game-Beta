@@ -28,6 +28,7 @@ import { corrugationNormal, signTexture, windowsTexture } from './textures';
 export const QUAY_X = 62;
 export const BOUNDS = { minX: -110, maxX: QUAY_X, minZ: -100, maxZ: 100 };
 const CW = 2.44, CH = 2.59, CL = 12.19; // 40 尺集装箱的宽、高、长
+const INDOOR_DRAW_RANGE = 100;          // 离车间多少米以内才画屋里的东西
 
 export type { Relay }; // 中继柜的接口定义在 relay.ts；从这里再导出一次，用到它的地方（mission.ts）不用改
 export interface Port {
@@ -42,6 +43,11 @@ export interface Port {
   reflection: ReflectionUniforms;
   /** 室内范围（维修车间）。体积光、枪身的环境光都要知道"哪里算屋里"。 */
   interior: THREE.Box3;
+  /**
+   * 车间里面的东西（陈设、道具、叉车、乙号中继）。它们只有隔着门洞才看得见，所以单独收成一组：
+   * 画湿地面的倒影时可以整组跳过（main.ts），人离得很远时也整组不画（见 update）。
+   */
+  indoor: THREE.Group;
   /** 给雨用的：哪个盒子里不下雨、屋顶哪里有洞、哪条屋檐在滴水。 */
   shelter: RainShelter;
   /** 拍室内环境探针的位置（屋子正中、一人多高）。 */
@@ -506,7 +512,7 @@ export function buildPort(progress: (msg: string) => void): Port {
   const order = lampPos.map((_, i) => i);
   let lastSort = -1;
   return {
-    group, colliders, nav, relays, evacPos, sun, ground, reflection, interior, shelter,
+    group, colliders, nav, relays, evacPos, sun, ground, reflection, interior, indoor, shelter,
     probePos: new THREE.Vector3((interior.min.x + interior.max.x) / 2, 2.4, (interior.min.z + interior.max.z) / 2),
     playerStart: new THREE.Vector3(-18, 0, 93),
     setLampCount(n) { lampCount = n; lastSort = -1; },
@@ -514,6 +520,9 @@ export function buildPort(progress: (msg: string) => void): Port {
       flare.uniforms.uTime.value = t;
       shop.update?.(t); // 排风扇
       for (const r of relays) r.update(t); // 中继柜的灯、天线、柜门
+      // 屋里的东西有十几万个三角形、七十来个网格。隔着 100 米，门洞在画面上只剩指甲盖大，里面又暗，画了也看不出来 —— 干脆不画。
+      // （地图上能直着看进门洞的最远的地方是南围墙根，离车间 92 米，所以这个距离上不会看到东西突然冒出来）
+      indoor.visible = interior.distanceToPoint(focus) < INDOOR_DRAW_RANGE;
       if (t - lastSort > 0.4) {
         lastSort = t;
         order.sort((a, b) => lampPos[a].distanceToSquared(focus) - lampPos[b].distanceToSquared(focus));
