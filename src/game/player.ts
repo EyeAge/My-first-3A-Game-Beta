@@ -68,7 +68,7 @@ export class Player {
     this.pitch -= (input.lookDY * sens + input.keyLookY * 1.6 * dt) * (s.invertY ? -1 : 1);
     this.pitch = clamp(this.pitch, -1.5, 1.5);
     this.recoilP = damp(this.recoilP, 0, 9, dt); this.recoilY = damp(this.recoilY, 0, 9, dt);
-    this.shake = Math.max(0, this.shake - dt * 2.2);
+    this.shake = Math.max(0, this.shake - dt * 1.7);
     this.damageFlash = Math.max(0, this.damageFlash - dt * 1.4);
 
     // ---- 期望速度
@@ -116,7 +116,8 @@ export class Player {
     const wasAir = !this.onGround;
     if (ny <= ground) {
       this.landed = wasAir && this.vel.y < -4;
-      if (this.landed) this.addShake(0.12);
+      // 落地的震动看摔得多重：平地起跳落回来（每秒 6 米多）不震；从一层箱顶跳下来（每秒 10 米）轻轻一震，越高越重
+      if (this.landed && this.vel.y < -7.5) this.addShake(Math.min(0.5, (-this.vel.y - 7.5) * 0.06));
       ny = ground; this.vel.y = 0; this.onGround = true;
     } else { this.onGround = false; this.landed = false; }
     this.pos.y = ny;
@@ -141,11 +142,13 @@ export class Player {
     const bobY = Math.sin(this.stepPhase * Math.PI * 2) * 0.035 * this.bob;
     const bobX = Math.cos(this.stepPhase * Math.PI) * 0.02 * this.bob;
     cam.position.set(this.pos.x, this.pos.y + this.eye + bobY, this.pos.z);
-    const sh = this.shake * this.shake * 0.05;
+    // 镜头震动。shake 是"受了多大的惊"（0..1），实际晃多少用它的平方：小震几乎不动，大震才明显。
+    // 三个方向各用两个不成倍数的频率叠在一起，晃起来就不是规则的来回摆；歪头（绕前后轴）的幅度最大，最有"被震到"的感觉
+    const k = this.shake * this.shake;
     cam.rotation.set(
-      this.pitch + this.recoilP + Math.sin(t * 71) * sh,
-      this.yaw + this.recoilY + Math.sin(t * 53 + 1) * sh,
-      bobX * 0.4 + Math.sin(t * 61 + 2) * sh * 0.6, 'YXZ');
+      this.pitch + this.recoilP + k * 0.03 * (Math.sin(t * 43.1) + 0.6 * Math.sin(t * 71.7 + 1.3)),
+      this.yaw + this.recoilY + k * 0.03 * (Math.sin(t * 37.3 + 2.1) + 0.6 * Math.sin(t * 83.9)),
+      bobX * 0.4 + k * 0.045 * (Math.sin(t * 29.7 + 0.7) + 0.5 * Math.sin(t * 61.3 + 4)), 'YXZ');
   }
 }
 const _eye = new THREE.Vector3();

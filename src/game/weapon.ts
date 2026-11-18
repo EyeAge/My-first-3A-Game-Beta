@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { clamp, damp } from '../core/math';
+import { clamp, damp, lerp } from '../core/math';
 import type { Input } from '../core/input';
 import { MuzzleFlash } from '../render/muzzleflash';
 import type { Colliders, RayHit } from '../world/colliders';
@@ -144,6 +144,7 @@ export class Weapon {
         this.heat = Math.min(1.3, this.heat + 0.05); this.sinceShot = 0;
         const k = 1 - this.ads * 0.45;
         player.kick((0.011 + Math.random() * 0.006) * k, (Math.random() - 0.5) * 0.012 * k);
+        player.addShake(0.12 * lerp(1, 0.55, this.ads) * (player.crouching ? 0.85 : 1));   // 每一枪镜头都抖一下：开镜、蹲着时轻一些
         this.kickZ += 0.028; this.kickR += 0.035; this.boltK = 1; this.bloom = Math.min(3, this.bloom + 0.55);
       } else if (input.pressed('MouseFire') || this.cooldown < -0.25) { this.cooldown = 0.25; audio.empty(); }
     }
