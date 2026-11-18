@@ -829,6 +829,95 @@ export function gateArm(o: GateArmOpts = {}): PropModel {
   });
 }
 
+// ====================================================================== 冷藏箱机组
+
+export interface ReeferUnitOpts extends SiteOpts { /** 默认机组的正面朝 -x（挂在冷藏箱 -x 那一头）；flip 为真时朝 +x。 */ flip?: boolean }
+
+/**
+ * 冷藏箱机组，0.5 × 2.3 × 2.3 米：挂在冷藏集装箱端头的那一整面"空调"。
+ * 上面两只冷凝风扇，中间两组百叶，下面是敞开的压缩机舱和一只灰色电控箱 —— 箱上有一块亮着的琥珀色小屏幕和一颗绿灯。
+ * 3 个个体。压缩机和管线比外框再凸出去十来厘米，碰撞盒只算到外框。
+ */
+export function reeferUnit(o: ReeferUnitOpts = {}): PropModel {
+  const flip = !!o.flip, v = variantOf(o.seed, 3);
+  return cached(`reefer_unit|${flip}|${v}${tag(o)}`, () => {
+    const k = new Kit('reefer_unit', v, { interior: o.interior }), wob = v * 2.3;
+    const shell: Tint = (_x, y, z) => { const s = (0.86 + 0.18 * vnoise(z * 2 + wob, y * 2)) * (0.62 + 0.38 * sstep(0, 0.6, y)); return [s, s * 0.985, s * 0.955]; };
+    // 风扇筒里面、百叶后面、压缩机舱的背景，都是一片"黑洞"面片（见 voidBlack）
+    const hole = { rot: [0, HALF_PI, 0] as V3, raw: true };
+    /** 机壳正面所在的 x。下面所有零件都从这个面往外量。 */
+    const FACE = 0.13;
+    // 电控箱的灰、阀帽和把手的红、插头的蓝，都从同一个白漆材质染出来（见 toward），不为几个小零件各开一种材质
+    const WHITE = paintColor('paint_white');
+    const grey = toward(paintColor('paint_grey'), WHITE), red = toward(paintColor('paint_red'), WHITE), blue = toward(paintColor('paint_blue'), WHITE);
+    // 所有零件按"正面朝 +x"来搭；默认情况下再整体转 180°，让正面朝 -x
+    if (!flip) k.push([0, 0, 0], [0, Math.PI, 0]);
+
+    // ---- 机壳、一圈外框、两道横档、框上的螺栓
+    k.box('paint_white', 0.38, 2.3, 2.3, -0.06, 1.15, 0, { c: 0.012, tint: shell });
+    for (const s of [-1, 1]) k.box('paint_white', 0.12, 2.3, 0.09, 0.19, 1.15, s * 1.105, { c: 0.012, tint: shell });
+    k.box('paint_white', 0.12, 0.09, 2.12, 0.19, 2.255, 0, { c: 0.012, tint: shell });
+    k.box('paint_white', 0.12, 0.1, 2.12, 0.19, 0.05, 0, { c: 0.012, tint: shell });
+    for (const y of [1.42, 0.9]) k.box('paint_white', 0.1, 0.06, 2.12, 0.18, y, 0, { c: 0.01, tint: shell });
+    for (const y of [0.3, 0.9, 1.5, 2.1]) for (const s of [-1, 1]) stud(k, 'steel_galv', 0.014, 0.012, [0.255, y, s * 1.105], { dir: 'x' });
+    for (const z of [-0.8, -0.3, 0.3, 0.8]) for (const y of [0.05, 2.255]) stud(k, 'steel_galv', 0.014, 0.012, [0.255, y, z], { dir: 'x' });
+
+    // ---- 上部：两只冷凝风扇
+    for (const s of [-1, 1]) {
+      const z = s * 0.53, y = 1.83;
+      k.add(voidBlack(), new THREE.CircleGeometry(0.33, 18), { raw: true }, matrixOf([FACE + 0.008, y, z], [0, HALF_PI, 0])); // 风筒里面：一片涂黑的圆
+      // 风筒：一圈安装法兰 + 往外收的筒壁 + 筒口的唇边 + 内壁。车削轮廓里连写两个相同的点 = 硬棱
+      k.lathe('paint_white', [[0.36, 0], [0.36, 0.014], [0.36, 0.014], [0.345, 0.014], [0.345, 0.014], [0.335, 0.1], [0.335, 0.1], [0.32, 0.1], [0.32, 0.1], [0.32, 0]], FACE, y, z, { axis: 'x', seg: 18, tint: shell });
+      for (let i = 0; i < 3; i++) k.box('steel_dark', 0.012, 0.6, 0.12, FACE + 0.04, y, z, { plain: true, rot: [(i * Math.PI) / 3 + s * 0.4, 0.5, 0] }); // 3 根通长的扇叶 = 6 片
+      k.cyl('steel_dark', 0.07, 0.06, FACE + 0.05, y, z, { axis: 'x', seg: 10 });                                                             // 轮毂
+      for (let i = 0; i < 4; i++) k.box('steel_galv', 0.005, 0.66, 0.005, FACE + 0.098, y, z, { plain: true, rot: [(i * Math.PI) / 4, 0, 0] }); // 护网：辐条
+      for (const r of [0.12, 0.22, 0.32]) k.torus('steel_galv', r, 0.003, FACE + 0.1, y, z, { axis: 'x', seg: 16, tubeSeg: 3 }); // 护网：3 圈同心圆
+    }
+    fitLabel(k, '激战船用制冷', { color: 'black', font: 'sans', distress: 0.2 }, 1.2, 0.05, [0.251, 2.255, 0], [0, HALF_PI, 0]);
+
+    // ---- 中部：两组百叶，各 9 片斜叶 + 中间一根竖档
+    for (const s of [-1, 1]) {
+      k.plane(voidBlack(), 0.98, 0.44, [FACE + 0.008, 1.16, s * 0.53], hole);
+      for (let i = 0; i < 9; i++) k.box('paint_white', 0.06, 0.006, 0.98, FACE + 0.035, 0.965 + i * 0.049, s * 0.53, { plain: true, rot: [0, 0, -0.75], tint: shell });
+      k.box('paint_white', 0.05, 0.46, 0.03, FACE + 0.03, 1.16, s * 0.53, { c: 0.005, tint: shell });
+    }
+
+    // ---- 下部左边：敞开的压缩机舱。黑色卧式压缩机、铝储液罐、三根黄铜管、一只红色阀帽
+    k.plane(voidBlack(), 1, 0.76, [FACE + 0.008, 0.49, -0.53], hole);
+    k.cyl('steel_dark', 0.15, 0.46, FACE + 0.1, 0.36, -0.58, { axis: 'z', seg: 14, open: true });
+    for (const s of [-1, 1]) k.sph('steel_dark', 0.15, FACE + 0.1, 0.36, -0.58 + s * 0.23, { scale: [1, 1, 0.45], seg: 10 });
+    k.box('steel_dark', 0.26, 0.03, 0.5, FACE + 0.1, 0.19, -0.58, { c: 0.006 });
+    k.cyl('aluminium', 0.07, 0.4, FACE + 0.07, 0.5, -0.17, { seg: 10 });
+    const pipe = { seg: 5, cast: false };
+    k.hose('brass', [[FACE + 0.1, 0.5, -0.5], [FACE + 0.1, 0.68, -0.5], [FACE + 0.08, 0.78, -0.4], [FACE + 0.08, 0.8, -0.2], [FACE + 0.07, 0.72, -0.17]], 0.012, { steps: 12, ...pipe });
+    k.hose('brass', [[FACE + 0.12, 0.42, -0.36], [FACE + 0.14, 0.6, -0.33], [FACE + 0.1, 0.84, -0.34], [FACE + 0.06, 0.88, -0.6], [FACE + 0.03, 0.88, -0.9]], 0.009, { steps: 12, ...pipe });
+    k.hose('brass', [[FACE + 0.1, 0.36, -0.82], [FACE + 0.1, 0.36, -0.93], [FACE + 0.06, 0.6, -0.96], [FACE + 0.04, 0.86, -0.96]], 0.012, { steps: 10, ...pipe });
+    k.box('paint_white', 0.04, 0.05, 0.05, FACE + 0.12, 0.6, -0.33, { c: 0.008, tint: red });
+
+    // ---- 下部右边：灰色电控箱。屏幕和指示灯都是发光面片
+    const BOX_Z = 0.55, door = FACE + 0.12; // door = 电控箱门板正面所在的 x
+    k.box('paint_white', 0.11, 0.56, 0.74, FACE + 0.055, 0.5, BOX_Z, { c: 0.012, tint: grey });
+    k.box('paint_white', 0.012, 0.5, 0.68, FACE + 0.114, 0.5, BOX_Z, { c: 0.004, tint: [grey[0] * 1.1, grey[1] * 1.1, grey[2] * 1.1] });
+    k.box('steel_dark', 0.006, 0.11, 0.26, door + 0.003, 0.66, BOX_Z - 0.1, { plain: true });                                   // 屏幕四周的黑色面板
+    k.plane(emissive(0xffb45a, 2.4), 0.15, 0.05, [door + 0.011, 0.665, BOX_Z - 0.06], { rot: [0, HALF_PI, 0], raw: true });                  // 琥珀色显示屏
+    k.plane(emissive(0x58ff7a, 3), 0.014, 0.014, [door + 0.011, 0.66, BOX_Z - 0.2], { rot: [0, HALF_PI, 0], raw: true });                    // 绿色运行灯
+    for (let col = 0; col < 4; col++) for (let row = 0; row < 2; row++) k.box('steel_dark', 0.008, 0.03, 0.03, door + 0.002, 0.5 - row * 0.045, BOX_Z - 0.04 - col * 0.045, { plain: true }); // 8 个按键
+    k.box('paint_white', 0.03, 0.09, 0.03, door + 0.01, 0.42, BOX_Z + 0.22, { c: 0.006, tint: red });                                                     // 红色把手
+    k.cyl('steel_galv', 0.012, 0.1, door + 0.004, 0.5, BOX_Z + 0.325, { seg: 6 });                                                           // 合页销
+    sticker(k, 'hazard_voltage', 0.11, [door + 0.0015, 0.64, BOX_Z + 0.2], [0, HALF_PI, 0]);
+    // 电缆：两根从电控箱顶上爬出去，一根粗的电源线从箱底垂下来、盘一圈、接一只蓝色插头
+    k.hose('rubber', [[FACE + 0.06, 0.78, BOX_Z + 0.2], [FACE + 0.06, 0.95, BOX_Z + 0.25], [FACE + 0.05, 1.4, BOX_Z + 0.5], [FACE + 0.05, 1.5, BOX_Z]], 0.012, { steps: 12, ...pipe });
+    k.hose('rubber', [[FACE + 0.06, 0.78, BOX_Z - 0.2], [FACE + 0.06, 0.92, BOX_Z - 0.3], [FACE + 0.05, 0.93, -0.1]], 0.01, { steps: 8, ...pipe });
+    k.cyl('steel_galv', 0.022, 0.04, FACE + 0.06, 0.2, BOX_Z + 0.2, { seg: 8 });
+    k.hose('rubber', [[FACE + 0.06, 0.2, BOX_Z + 0.2], [FACE + 0.08, 0.12, BOX_Z + 0.1], [FACE + 0.1, 0.16, BOX_Z - 0.15], [FACE + 0.1, 0.2, BOX_Z - 0.3], [FACE + 0.1, 0.13, BOX_Z - 0.36], [FACE + 0.09, 0.12, BOX_Z - 0.1], [FACE + 0.09, 0.14, BOX_Z + 0.05]], 0.016, { steps: 20, seg: 6, cast: false });
+    k.box('paint_white', 0.07, 0.07, 0.12, FACE + 0.09, 0.14, BOX_Z + 0.1, { c: 0.015, tint: blue });
+    sticker(k, 'grime_streak', 0.8, [0.2512, 0.5, -1.105], [0, HALF_PI, 0], 0.08);
+
+    if (!flip) k.pop();
+    return k.finish({ size: [0.5, 2.3, 2.3], grime: 0.6, boxes: [{ min: [-0.25, 0, -1.15], max: [0.25, 2.3, 1.15], surface: 'metal' }] });
+  });
+}
+
 // ====================================================================== 登记表
 
 /**
@@ -841,4 +930,5 @@ export const SITE: Record<string, (o?: any) => PropModel> = {
   light_mast: lightMast,
   fence_panel: fencePanel, gate_post: gatePost, sliding_gate: slidingGate,
   guard_booth: guardBooth, gate_arm: gateArm,
+  reefer_unit: reeferUnit,
 };
