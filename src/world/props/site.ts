@@ -918,11 +918,292 @@ export function reeferUnit(o: ReeferUnitOpts = {}): PropModel {
   });
 }
 
+// ====================================================================== 中继柜
+
+/** 中继柜指示灯的三种状态色：正常（琥珀）、切断中闪亮的那半拍、已切断（红）。 */
+export const RELAY_COLORS = { live: 0xffa028, cutting: 0xffd9a0, cut: 0xff2814 } as const;
+/**
+ * 中继柜里会动、会变色的零件叫什么名字。拿到柜子的 group 以后，用 group.getObjectByName(名字) 取。
+ * （同样的内容也写在 group.userData 里；用 relayParts() 可以一次取齐。）
+ */
+export const RELAY_PART_NAMES = {
+  /** 三组指示灯，各是一个独立的小网格、各有自己的材质：灯条、左仓里的 20 颗设备灯、顶上的信标灯。 */
+  lamps: ['relay_lamp_strips', 'relay_lamp_rack', 'relay_lamp_beacon'],
+  /** 左门（会弹开的那扇）。原点在门轴上，开门是 rotation.y = -角度。 */
+  door: 'relay_door',
+  /** 抛物面天线。原点在桅杆顶的转轴上，绕 y 轴转。 */
+  dish: 'relay_dish',
+} as const;
+
+export interface RelayCabinetOpts extends SiteOpts { /** 门上喷的编号（"中继 X"里的 X）。不给就按 seed 取 甲 / 乙 / 丙。 */ id?: string }
+
+/** 指示灯的材质：和 emissive() 一样是"不受光照、颜色直接超过 1"的发光体，但每只柜子、每组灯各有一份，好单独变色。 */
+function relayLampMaterial() {
+  const m = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(RELAY_COLORS.live).multiplyScalar(4),
+    // 灯条紧贴在深色底条上（只高出半毫米）。polygonOffset 让显卡在比较远近时把它往前挪一点点，贴得再近也不会和底下的面打架
+    polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+  });
+  m.name = 'relay_lamp';
+  return m;
+}
+
+/**
+ * 中继柜（任务目标），正面朝 +z。占地 1.36 × 0.96 米，柜顶 1.67 米，桅杆顶 2.5 米，鞭状天线到 3.15 米。
+ *
+ * 和别的道具不同，它每次调用都新建一个（不走缓存），并且不是"一坨合并好的静态网格"：
+ * 左门、抛物面天线各是一个独立的小组（Group），三组指示灯各是一个独立的网格、各带自己的材质。
+ * 这样游戏逻辑可以按状态让灯变色、让天线转、让门弹开 —— 状态机本身不在这里，这里只把"把手"留好：
+ *   group.userData = { lamps: 三组灯的名字, door: 左门的名字, dish: 天线的名字,
+ *                      beacon: 信标灯的位置（挂点光用）, interact: 交互点（柜前 0.75 米、1 米高） }
+ * 因为带子组，它不能交给 PropField 做实例化，要用 placeOnce 摆。
+ */
+export function relayCabinet(o: RelayCabinetOpts = {}): PropModel {
+  const seed = Math.abs((o.seed ?? 0) | 0), wob = seed * 1.9, id = o.id || '甲乙丙'[seed % 3];
+  const kitOpt = { interior: o.interior };
+  const k = new Kit('relay_cabinet', seed, kitOpt);        // 不动的部分
+  const door = new Kit(RELAY_PART_NAMES.door, seed, kitOpt); // 左门：在"门自己的坐标"里搭，门轴是 x=0 那条竖线
+  const dish = new Kit(RELAY_PART_NAMES.dish, seed, kitOpt); // 抛物面天线
+  const strips = new Kit('relay_lamp_strips'), rack = new Kit('relay_lamp_rack'), beacon = new Kit('relay_lamp_beacon');
+  const stripGlow = relayLampMaterial(), rackGlow = relayLampMaterial(), beaconGlow = relayLampMaterial();
+
+  /** 柜体的范围：x ±0.5，y 从 BOTTOM 到 TOP，z 从 BACK 到 FRONT；SKIN 是钢板的厚度。 */
+  const BOTTOM = 0.18, TOP = 1.62, BACK = -0.3, FRONT = 0.3, SKIN = 0.025, MID = (BOTTOM + TOP) / 2, HEIGHT = TOP - BOTTOM;
+  const cabinet: Tint = (x, y, z) => { const s = (0.88 + 0.2 * vnoise(x * 3 + wob, y * 3 + z * 2)) * (0.6 + 0.4 * sstep(0.16, 0.7, y)); return [s, s, s * 0.98]; };
+  const doorPaint: Tint = (x, y) => { const s = 0.9 + 0.14 * vnoise(x * 4 + wob, y * 3); return [s, s, s]; };
+  const DARK: Rgb = [0.035, 0.035, 0.04], skin = { c: 0.006, tint: cabinet };
+
+  // ---- 水泥基座：正面一条黄黑斜纹，四角地脚螺栓 + 垫片
+  concreteBlock(k, 1.36, 0.16, 0.96, 0, 0.08, 0, { c: 0.025, spot: seed, tint: (x, y, z) => { const s = 0.6 + 0.38 * sstep(0, 0.15, y) + 0.1 * vnoise(x * 5, z * 5); return [s, s, s * 0.97]; } });
+  sticker(k, 'caution_stripes', 0.1, [0, 0.085, 0.4815], undefined, 1.2);
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    k.box('steel_galv', 0.1, 0.012, 0.1, sx * 0.44, 0.166, sz * 0.36, { plain: true });
+    stud(k, 'steel_galv', 0.016, 0.03, [sx * 0.44, 0.185, sz * 0.36]);
+  }
+
+  // ---- 柜体：背板、两侧板、顶底板、中间一片竖隔板（分成左右两仓）、正面上沿的眉板和下沿的踢脚
+  k.box('paint_grey', 1, HEIGHT, SKIN, 0, MID, BACK + SKIN / 2, skin);
+  for (const s of [-1, 1]) k.box('paint_grey', SKIN, HEIGHT, 0.6, s * (0.5 - SKIN / 2), MID, 0, skin);
+  k.box('paint_grey', 1, SKIN, 0.6, 0, BOTTOM + SKIN / 2, 0, skin);
+  k.box('paint_grey', 1, SKIN, 0.6, 0, TOP - SKIN / 2, 0, skin);
+  k.box('paint_grey', SKIN, HEIGHT, 0.58, 0, MID, 0, { c: 0.004, tint: cabinet });
+  k.box('paint_grey', 1, 0.12, SKIN, 0, TOP - 0.06, FRONT - SKIN / 2, skin);
+  k.box('paint_grey', 1, 0.07, SKIN, 0, BOTTOM + 0.035, FRONT - SKIN / 2, skin);
+  k.box('steel_dark', 1.04, 0.04, 0.64, 0, BOTTOM - 0.01, 0, { c: 0.008 });                      // 底下一圈深色底座
+  k.box('paint_grey', 1.12, 0.05, 0.74, 0, TOP + 0.025, 0.01, { c: 0.012, tint: cabinet });      // 外挑的顶盖（挡雨）
+  for (const s of [-1, 1]) k.hose('steel_galv', [[s * 0.4 - 0.04, TOP + 0.05, 0.2], [s * 0.4 - 0.03, TOP + 0.1, 0.2], [s * 0.4 + 0.03, TOP + 0.1, 0.2], [s * 0.4 + 0.04, TOP + 0.05, 0.2]], 0.008, { steps: 6, seg: 4 }); // 两只吊环
+
+  // ---- 左仓（门弹开以后看得见）：内壁刷黑，5 层机架设备，层与层之间绕着跳线
+  const liner = { tint: [0.16, 0.16, 0.17] as Rgb };
+  k.plane('paint_grey', 0.45, HEIGHT - 0.06, [-0.25, MID, BACK + SKIN + 0.006], liner);
+  k.plane('paint_grey', 0.55, HEIGHT - 0.06, [-0.5 + SKIN + 0.006, MID, 0], { rot: [0, HALF_PI, 0], ...liner });
+  k.plane('paint_grey', 0.55, HEIGHT - 0.06, [-SKIN / 2 - 0.006, MID, 0], { rot: [0, -HALF_PI, 0], ...liner });
+  for (let unit = 0; unit < 5; unit++) {
+    const y = 0.42 + unit * 0.22;
+    k.box('steel_dark', 0.42, 0.17, 0.4, -0.25, y, -0.05, { c: 0.008 });
+    k.box('aluminium', 0.4, 0.02, 0.012, -0.25, y + 0.06, 0.152, { plain: true });                                   // 拉手
+    for (let i = 0; i < 4; i++) rack.plane(rackGlow, 0.012, 0.012, [-0.41 + i * 0.035, y - 0.04, 0.1512], { raw: true });         // 4 颗指示灯
+    for (let i = 0; i < 3; i++) k.box('steel_dark', 0.03, 0.022, 0.006, -0.2 + i * 0.06, y - 0.03, 0.151, { plain: true, tint: 0.2 }); // 3 个网口
+  }
+  for (let i = 0; i < 4; i++) {
+    const y = i * 0.22;
+    k.hose('rubber', [[-0.2 + (i % 3) * 0.06, 0.39 + y, 0.15], [-0.14 + (i % 3) * 0.05, 0.36 + y, 0.24], [-0.07, 0.55 + y, 0.22], [-0.2 + ((i + 1) % 3) * 0.06, 0.61 + y, 0.15]], 0.007, { steps: 9, seg: 4 });
+  }
+
+  // ---- 两扇门。长得一样，只是把手和合页左右对调，所以写成一个函数搭两次
+  const DOOR_W = 0.474, DOOR_H = 1.3, DOOR_Y = 0.9;
+  /** 在 kit 里搭一扇门：门板从 x0 到 x0 + DOOR_W，外表面朝 +z；hingeRight 为真时合页在右边、把手在左边。 */
+  const addDoor = (kit: Kit, x0: number, hingeRight: boolean, tint: Tint) => {
+    const cx = x0 + DOOR_W / 2;
+    kit.box('paint_grey', DOOR_W, DOOR_H, 0.024, cx, DOOR_Y, 0, { c: 0.006, tint });
+    kit.box('paint_grey', DOOR_W - 0.07, DOOR_H - 0.07, 0.006, cx, DOOR_Y, 0.013, { c: 0.003, tint });            // 门板上压出来的一圈凸台
+    for (const y of [DOOR_Y + 0.36, DOOR_Y - 0.4]) {                                                              // 上下两组百叶
+      kit.box('paint_grey', DOOR_W - 0.14, 0.3, 0.006, cx, y, 0.019, { plain: true, tint: DARK });   // 深色衬底
+      for (let i = 0; i < 7; i++) kit.box('paint_grey', DOOR_W - 0.13, 0.034, 0.005, cx, y - 0.125 + i * 0.042, 0.029, { plain: true, rot: [0.75, 0, 0], tint });
+      for (const s of [-1, 1]) kit.box('paint_grey', 0.02, 0.31, 0.02, cx + (s * (DOOR_W - 0.13)) / 2, y, 0.024, { c: 0.003, tint });
+    }
+    const handleX = hingeRight ? x0 + 0.07 : x0 + DOOR_W - 0.07;
+    kit.box('steel_dark', 0.045, 0.2, 0.02, handleX, DOOR_Y - 0.02, 0.026, { c: 0.006 });
+    kit.box('steel_galv', 0.028, 0.13, 0.018, handleX, DOOR_Y, 0.042, { c: 0.006 });
+    stud(kit, 'steel_galv', 0.012, 0.012, [handleX, DOOR_Y - 0.09, 0.04], { sides: 8, dir: 'z' });                // 锁芯
+    const hingeX = hingeRight ? x0 + DOOR_W : x0;
+    for (const y of [DOOR_Y - 0.5, DOOR_Y, DOOR_Y + 0.5]) kit.cyl('steel_galv', 0.011, 0.09, hingeX, y, 0.016, { seg: 6 });
+  };
+  // 右门：固定不动，直接搭进柜体。上面喷编号和一行小字，贴高压警示
+  k.push([0, 0, FRONT - 0.004]);
+  addDoor(k, 0.013, true, cabinet);
+  const rightX = 0.013 + DOOR_W / 2;
+  fitLabel(k, `中继 ${id}`, { color: 'yellow', font: 'stencil', distress: 0.15 }, DOOR_W - 0.1, 0.12, [rightX, DOOR_Y + 0.02, 0.018]);
+  fitLabel(k, '港区主控上行链路', { color: 'white', font: 'sans', distress: 0.15 }, DOOR_W - 0.1, 0.034, [rightX, DOOR_Y - 0.1, 0.018]);
+  sticker(k, 'hazard_voltage', 0.13, [rightX + 0.1, DOOR_Y + 0.14, 0.018]);
+  k.pop();
+  // 左门：活动件。外面贴"注意安全"和"检修前请断电"；里面有加强筋和一只图纸袋（门开了才看得见）
+  addDoor(door, 0, false, doorPaint);
+  sticker(door, 'hazard_general', 0.13, [DOOR_W / 2, DOOR_Y + 0.1, 0.018]);
+  fitLabel(door, '检修前请断电', { color: 'white', font: 'sans', distress: 0.15 }, DOOR_W - 0.1, 0.03, [DOOR_W / 2, DOOR_Y - 0.03, 0.018]);
+  for (const y of [DOOR_Y + 0.55, DOOR_Y - 0.55]) door.box('paint_grey', DOOR_W - 0.1, 0.03, 0.014, DOOR_W / 2, y, -0.018, { c: 0.003, tint: doorPaint });
+  for (const x of [0.07, DOOR_W - 0.07]) door.box('paint_grey', 0.03, 1.1, 0.014, x, DOOR_Y, -0.018, { c: 0.003, tint: doorPaint });
+  door.box('steel_dark', 0.24, 0.3, 0.02, DOOR_W / 2, DOOR_Y - 0.05, -0.02, { c: 0.004 });
+  door.label('接线图 SLT-R4', { color: 'white', font: 'sans', distress: 0.1 }, 0.2, 0.03, [DOOR_W / 2, DOOR_Y + 0.03, -0.0305], [0, Math.PI, 0]);
+  for (const y of [DOOR_Y + 0.36, DOOR_Y - 0.4]) door.box('paint_grey', DOOR_W - 0.14, 0.3, 0.004, DOOR_W / 2, y, -0.014, { plain: true, tint: DARK }); // 百叶从里面看也是黑的
+
+  // ---- 两侧的散热器：一块铝背板 + 13 片竖鳍片，顶上一条遮雨檐
+  for (const s of [-1, 1]) {
+    k.box('aluminium', 0.012, 0.98, 0.5, s * 0.506, 1.06, 0, { plain: true });
+    for (let i = -6; i <= 6; i++) k.box('aluminium', 0.06, 0.94, 0.007, s * 0.54, 1.06, i * 0.038, { plain: true, tint: k.range(0.8, 1) });
+    k.box('paint_grey', 0.075, 0.03, 0.52, s * 0.54, 1.56, 0, { c: 0.006, tint: cabinet });
+  }
+
+  // ---- 右侧三根粗电缆：从侧板上的格兰头出来，下弯，钻进地面（落点各有一个法兰）
+  for (let i = 0; i < 3; i++) {
+    const z = -0.17 + i * 0.17, y = 0.44 - i * 0.02, groundX = 0.86 + i * 0.07;
+    k.hose('rubber', [[0.5, y, z], [0.6, y, z], [0.72 + i * 0.04, y - 0.06, z], [groundX - 0.02, 0.16, z + 0.02], [groundX, -0.03, z + 0.02]], 0.04, { steps: 12, seg: 7 });
+    stud(k, 'steel_galv', 0.055, 0.05, [0.515, y, z], { sides: 8, hex: true, dir: 'x' });
+    stud(k, 'steel_galv', 0.063, 0.03, [groundX, 0.015, z + 0.02], { sides: 8 });
+  }
+  // ---- 背后：一根贴地甩出去的电缆、一只小接线盒、一根爬上柜顶的细线
+  k.hose('rubber', [[-0.3, 0.35, BACK], [-0.3, 0.33, BACK - 0.1], [-0.34, 0.2, BACK - 0.2], [-0.5, 0.165, BACK - 0.3], [-0.9, 0.02, BACK - 0.36], [-1.5, 0.018, BACK - 0.2]], 0.022, { steps: 18, seg: 5 });
+  k.box('steel_dark', 0.3, 0.22, 0.1, 0.2, 0.75, BACK - 0.05, { c: 0.012 });
+  k.hose('rubber', [[0.2, 0.86, BACK - 0.06], [0.2, 1.2, BACK - 0.04], [-0.1, 1.55, BACK - 0.03], [-0.3, 1.66, -0.16]], 0.012, { steps: 10, seg: 4 });
+
+  // ---- 格构桅杆（柜顶左后角）：三根主肢围成一个三角，中间 5 层"斜缀条 + 横缀条"把它们拉在一起
+  const MAST_X = -0.3, MAST_Z = -0.14, MAST_BASE = TOP + 0.05, MAST_TOP = 2.5;
+  const legs = [0, 1, 2].map((i) => [MAST_X + Math.cos(i * 2.094 + 0.52) * 0.085, MAST_Z + Math.sin(i * 2.094 + 0.52) * 0.085]);
+  k.box('steel_galv', 0.24, 0.012, 0.24, MAST_X, MAST_BASE + 0.006, MAST_Z, { plain: true });
+  const TIERS = 5, tier = (MAST_TOP - MAST_BASE) / TIERS;
+  for (let i = 0; i < 3; i++) {
+    const a = legs[i], b = legs[(i + 1) % 3];
+    k.tube('steel_galv', [a[0], MAST_BASE, a[1]], [a[0], MAST_TOP, a[1]], 0.011, { seg: 5 });
+    for (let t = 0; t < TIERS; t++) {
+      k.tube('steel_galv', [a[0], MAST_BASE + t * tier, a[1]], [b[0], MAST_BASE + (t + 1) * tier, b[1]], 0.005, { seg: 3 });
+      k.tube('steel_galv', [a[0], MAST_BASE + (t + 1) * tier, a[1]], [b[0], MAST_BASE + (t + 1) * tier, b[1]], 0.005, { seg: 3 });
+    }
+  }
+  k.cyl('steel_galv', 0.11, 0.014, MAST_X, MAST_TOP + 0.007, MAST_Z, { seg: 10 });               // 顶板
+  k.cyl('steel_dark', 0.06, 0.1, MAST_X, MAST_TOP + 0.06, MAST_Z, { r2: 0.05, seg: 10 });        // 转台
+  // ---- 两根鞭状天线（柜顶右后）：底座 + 弹簧节 + 一根由粗到细的鞭
+  const addWhip = (x: number, z: number, tipY: number) => {
+    k.cyl('steel_dark', 0.02, 0.07, x, TOP + 0.085, z, { r2: 0.016, seg: 8 });
+    k.cyl('steel_galv', 0.011, 0.06, x, TOP + 0.15, z, { seg: 6 });
+    k.tube('steel_dark', [x, TOP + 0.17, z], [x + 0.02, tipY, z - 0.015], 0.005, { r2: 0.0018, seg: 5, cap: true });
+  };
+  addWhip(0.4, -0.24, 3.15);
+  addWhip(0.26, -0.24, 2.72);
+  // ---- 蘑菇头天线（柜顶右前）
+  k.cyl('steel_dark', 0.03, 0.26, 0.42, TOP + 0.18, 0.18, { seg: 8 });
+  k.add('steel_dark', new THREE.SphereGeometry(0.03, 8, 4, 0, TAU, 0, HALF_PI), {}, matrixOf([0.42, TOP + 0.31, 0.18]));
+
+  // ---- 抛物面天线（活动件）。先搭在它最终的位置上，最后再把原点挪到转轴上（见 rehome）
+  const DISH: V3 = [MAST_X, MAST_TOP + 0.11, MAST_Z];
+  dish.push(DISH);
+  // 浅碟：车削轮廓先沿"碗的内面"从中心走到边缘，再沿"碗的背面"走回中心。车出来碗口朝上，再转到朝前、略微上仰
+  dish.lathe('aluminium', [[0, 0], [0.06, 0.006], [0.12, 0.024], [0.18, 0.054], [0.215, 0.078], [0.222, 0.078], [0.185, 0.05], [0.12, 0.016], [0.06, -0.003], [0, -0.01]], 0, 0.3, 0.02, { seg: 18, rot: [HALF_PI - 0.12, 0, 0] });
+  dish.cyl('aluminium', 0.03, 0.2, 0, 0.1, 0, { r2: 0.022, seg: 8 });                            // 支座
+  dish.box('aluminium', 0.07, 0.1, 0.06, 0, 0.26, -0.02, { c: 0.01 });
+  for (const a of [0.5, 2.6, 4.7]) dish.tube('aluminium', [Math.cos(a) * 0.2, 0.3 + Math.sin(a) * 0.2, 0.09], [0, 0.325, 0.25], 0.0045, { seg: 4 }); // 三根馈源支杆
+  dish.cyl('aluminium', 0.016, 0.05, 0, 0.325, 0.25, { axis: 'z', r2: 0.022, seg: 8 });          // 馈源头
+  dish.pop();
+
+  // ---- 状态灯条：每条灯都是"一根深色底条 + 贴在上面的一片发光面"
+  k.box('steel_dark', 0.9, 0.07, 0.03, 0, TOP - 0.06, FRONT + 0.012, { c: 0.008 });              // 正面眉板上的一条
+  strips.plane(stripGlow, 0.84, 0.036, [0, TOP - 0.06, FRONT + 0.0275], { raw: true });
+  for (let i = 1; i < 6; i++) k.box('steel_dark', 0.008, 0.05, 0.006, -0.42 + i * 0.14, TOP - 0.06, FRONT + 0.028, { plain: true }); // 5 道分隔，把它切成 6 格
+  k.box('steel_dark', 0.6, 0.06, 0.03, 0, TOP - 0.06, BACK - 0.012, { c: 0.008 });               // 背面的一条
+  strips.plane(stripGlow, 0.54, 0.03, [0, TOP - 0.06, BACK - 0.0275], { rot: [0, Math.PI, 0], raw: true });
+  for (const s of [-1, 1]) {
+    // 正面两条竖边：一根转了 45° 的方条卡在柜角上，灯贴在它朝外的那个斜面上（斜面离方条中心 1.5 厘米）
+    k.box('steel_dark', 0.03, 1.2, 0.03, s * 0.5, 0.86, FRONT, { c: 0.008, rot: [0, Math.PI / 4, 0] });
+    const out = (0.015 + 0.0015) * Math.SQRT1_2;
+    strips.plane(stripGlow, 0.014, 1.14, [s * (0.5 + out), 0.86, FRONT + out], { rot: [0, (s * Math.PI) / 4, 0], raw: true });
+    // 两侧各一条竖的（贴在侧板上，散热器和柜角之间）和柜顶边上一条横的
+    strips.plane(stripGlow, 0.014, 0.9, [s * 0.5015, 1.06, 0.266], { rot: [0, s * HALF_PI, 0], raw: true });
+    k.box('steel_dark', 0.03, 0.06, 0.46, s * 0.587, TOP - 0.01, 0, { c: 0.008 });
+    strips.plane(stripGlow, 0.4, 0.032, [s * 0.6025, TOP - 0.01, 0], { rot: [0, s * HALF_PI, 0], raw: true });
+  }
+  // ---- 信标灯：桅杆旁一根细杆，顶上一只发光圆柱，上下各一片深色盖板
+  const BEACON: V3 = [-0.1, 2.68, MAST_Z]; // 桅杆往 +x 20 厘米
+  k.cyl('steel_dark', 0.028, 0.02, BEACON[0], TOP + 0.06, BEACON[2], { seg: 8 });
+  k.tube('steel_galv', [BEACON[0], TOP + 0.06, BEACON[2]], [BEACON[0], 2.64, BEACON[2]], 0.009, { seg: 5 });
+  beacon.cyl(beaconGlow, 0.045, 0.1, BEACON[0], 2.69, BEACON[2], { seg: 10, raw: true });
+  for (const y of [2.747, 2.633]) k.cyl('steel_dark', 0.05, 0.014, BEACON[0], y, BEACON[2], { seg: 10 });
+
+  // ---- 污迹
+  sticker(k, 'rust_run', 0.5, [0.5135, 0.3, 0.2], [0, HALF_PI, 0], 0.14);
+  sticker(k, 'grime_streak', 0.6, [-0.2, 1.2, BACK - 0.001], [0, Math.PI, 0], 0.2);
+
+  const model = k.finish({
+    size: [1.36, 3.15, 0.96], grime: 0.7,
+    boxes: [
+      { min: [-0.68, 0, -0.48], max: [0.68, 0.16, 0.48], surface: 'concrete' },                           // 基座
+      { min: [-0.57, 0.16, -0.32], max: [0.57, 1.67, 0.33], surface: 'metal' },                           // 柜体
+      { min: [-0.42, 1.67, -0.26], max: [-0.18, 2.5, -0.02], surface: 'metal', bulletOnly: true },        // 桅杆：只挡子弹
+    ],
+  });
+  const root = model.group;
+  // 活动件：各自收成一个小组，原点放在转轴上
+  const doorGroup = door.finish({ boxes: [], grime: 0.6 }).group;
+  doorGroup.position.set(-0.487, 0, FRONT - 0.004);
+  const dishGroup = rehome(dish.finish({ boxes: [], grime: 0.6 }).group, DISH);
+  root.add(doorGroup, dishGroup);
+  // 三组灯：从各自的零件箱里取出那唯一的一个网格，起好名字，直接挂在柜子下面
+  for (const lampKit of [strips, rack, beacon]) {
+    const mesh = lampKit.finish({ boxes: [], grime: 0 }).group.children[0];
+    mesh.name = lampKit.name;
+    root.add(mesh);
+  }
+  // dynamic 标记：提醒调用方这些东西每帧可能在变，不要和静态网格合并
+  for (const name of [...RELAY_PART_NAMES.lamps, RELAY_PART_NAMES.door, RELAY_PART_NAMES.dish]) root.getObjectByName(name)!.userData.dynamic = true;
+  root.userData = { lamps: [...RELAY_PART_NAMES.lamps], door: RELAY_PART_NAMES.door, dish: RELAY_PART_NAMES.dish, beacon: BEACON, interact: [0, 1, 0.75], id };
+  return model;
+}
+
+/** 把一组网格的原点挪到 pivot：几何体整体往回平移，再把这个组放到 pivot。画面上纹丝不动，但之后转这个组，就是绕 pivot 转了。 */
+function rehome(group: THREE.Group, pivot: V3) {
+  for (const child of group.children) (child as THREE.Mesh).geometry.translate(-pivot[0], -pivot[1], -pivot[2]);
+  group.position.set(pivot[0], pivot[1], pivot[2]);
+  return group;
+}
+
+/** 中继柜上那些会动、会变色的零件，一次取齐。 */
+export interface RelayParts {
+  /** 三组指示灯：灯条、设备灯、信标灯。 */
+  lamps: THREE.Mesh[];
+  /** 左门：rotation.y = -开门角度（弧度，0 是关着）。 */
+  door: THREE.Object3D;
+  /** 抛物面天线：绕 y 轴转。 */
+  dish: THREE.Object3D;
+  /** 信标灯的位置（柜子自己的坐标）。 */
+  beacon: V3;
+  /** 交互点（柜子自己的坐标）：柜子正前方 0.75 米、1 米高。 */
+  interact: V3;
+}
+/** 从一只中继柜（relayCabinet 返回的模型的 group）里取出活动零件。 */
+export function relayParts(group: THREE.Object3D): RelayParts {
+  return {
+    lamps: RELAY_PART_NAMES.lamps.map((name) => group.getObjectByName(name) as THREE.Mesh),
+    door: group.getObjectByName(RELAY_PART_NAMES.door)!,
+    dish: group.getObjectByName(RELAY_PART_NAMES.dish)!,
+    beacon: group.userData.beacon as V3,
+    interact: group.userData.interact as V3,
+  };
+}
+/**
+ * 把一只中继柜的三组灯一起设成某个颜色和亮度。
+ * gain 是亮度倍数：正常呼吸时在 2.5–8.5 之间，切断的一瞬间是 9，0 就是全灭。
+ */
+export function setRelayLamps(group: THREE.Object3D, color: number, gain: number) {
+  for (const name of RELAY_PART_NAMES.lamps) {
+    const mesh = group.getObjectByName(name) as THREE.Mesh | undefined;
+    if (mesh) (mesh.material as THREE.MeshBasicMaterial).color.setHex(color).multiplyScalar(Math.max(0, gain));
+  }
+}
+
 // ====================================================================== 登记表
 
 /**
  * 所有场地道具，按参考道具表里的名字登记。摆放的代码可以用名字取：SITE.jersey_barrier({ seed: 2 })。
  * 门柱、推拉门、通道牌在参考里是关卡代码现搭的，没有道具名，这三个名字是我们起的。
+ * relay_node 是 relay_cabinet 在参考里的旧名。
  */
 export const SITE: Record<string, (o?: any) => PropModel> = {
   jersey_barrier: jerseyBarrier, bollard_post: bollardPost, bollard_mooring: bollardMooring,
@@ -931,4 +1212,5 @@ export const SITE: Record<string, (o?: any) => PropModel> = {
   fence_panel: fencePanel, gate_post: gatePost, sliding_gate: slidingGate,
   guard_booth: guardBooth, gate_arm: gateArm,
   reefer_unit: reeferUnit,
+  relay_cabinet: relayCabinet, relay_node: relayCabinet,
 };
