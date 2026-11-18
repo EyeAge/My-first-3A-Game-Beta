@@ -187,6 +187,17 @@ function loft(profile: [number, number][], stations: number[], place: (w: number
   return g;
 }
 
+/**
+ * 一片铁丝网：其实就是一张分了格的平面，贴上镂空的铁丝网贴图。
+ * bulge(x, y) 给出每个顶点往前后鼓出多少 —— 真的网不是绷得平平的，鼓一点点，反光才有变化。
+ */
+function wireMesh(w: number, h: number, cols: number, rows: number, bulge: (x: number, y: number) => number) {
+  const g = new THREE.PlaneGeometry(w, h, cols, rows), p = g.getAttribute('position');
+  for (let i = 0; i < p.count; i++) p.setZ(i, bulge(p.getX(i), p.getY(i)));
+  g.computeVertexNormals();
+  return g;
+}
+
 // ====================================================================== 水泥隔离墩
 
 export interface JerseyBarrierOpts extends SiteOpts { /** 顶面和上部两个斜面贴黄黑警示条。 */ stripe?: boolean }
@@ -529,13 +540,109 @@ export function lightMast(o: LightMastOpts = {}): PropModel {
   });
 }
 
+// ====================================================================== 铁丝网围栏
+
+export interface FencePanelOpts extends SiteOpts {
+  /** 两头哪边有立柱。一长排围栏里，每片只带左柱，最后一片两头都带，立柱才不会重复。默认 both。 */
+  posts?: 'both' | 'left' | 'right' | 'none';
+  /** 柱顶挂刺丝的支臂朝哪边斜：-1（默认）朝 -z，1 朝 +z。应该朝"外面"。 */
+  lean?: 1 | -1;
+  /** 这一片有多长（米），默认 3。围栏段的总长不是 3 的整数倍时，用它把每片搭成正好的长度，而不是去拉伸模型。 */
+  length?: number;
+}
+
+/**
+ * 铁丝网围栏的一跨，长边沿 x，高 2.4 米。网面在立柱的 +z 一侧，刺丝支臂朝 -z 斜出去。
+ * 碰撞盒只挡人：铁丝网挡不住子弹，也挡不住视线。
+ */
+export function fencePanel(o: FencePanelOpts = {}): PropModel {
+  const posts = o.posts ?? 'both', lean = o.lean === 1 ? 1 : -1, v = variantOf(o.seed, 3);
+  const length = Math.round(clamp(o.length ?? 3, 1, 6) * 100) / 100, half = length / 2;
+  return cached(`fence_panel|${posts}|${lean}|${length}|${v}${tag(o)}`, () => {
+    const k = new Kit('fence_panel', v, { interior: o.interior });
+    const thin = { cast: false }; // 细铁丝在阴影贴图里连一个像素都占不到，投影只会带来闪烁
+    const postXs = posts === 'both' ? [-half, half] : posts === 'left' ? [-half] : posts === 'right' ? [half] : [];
+    for (const x of postXs) {
+      concreteBlock(k, 0.32, 0.09, 0.32, x, 0.035, 0, { c: 0.02, spot: v * 2 + (x > 0 ? 1 : 0), tint: (_x, y) => 0.6 + 0.4 * sstep(0, 0.08, y) }); // 水泥脚
+      k.cyl('steel_galv', 0.03, 2.0, x, 1.04, 0, { seg: 8, open: true });                                            // 立柱
+      stud(k, 'steel_galv', 0.05, 0.012, [x, 0.086, 0], { sides: 8 });                                               // 底法兰
+      stud(k, 'steel_galv', 0.034, 0.05, [x, 2.03, 0], { sides: 8 });                                                // 柱帽
+      for (const y of [0.2, 1.05, 1.9]) k.cyl('steel_galv', 0.034, 0.03, x, y, 0, { seg: 8, open: true, cast: false }); // 3 道绑带箍
+      k.tube('steel_galv', [x, 2.02, 0], [x, 2.38, lean * 0.36], 0.019, { seg: 5, cap: true });                      // 斜出去的刺丝支臂
+    }
+    k.tube('steel_galv', [-half, 2, 0.036], [half, 2, 0.036], 0.021, { seg: 6 });                                    // 顶横杆
+    for (const y of [0.09, 1.02]) k.tube('steel_galv', [-half, y, 0.012], [half, y, 0.012], 0.0035, { seg: 3, ...thin }); // 两道张紧钢丝
+    for (const s of [-1, 1]) k.box('steel_galv', 0.008, 1.9, 0.02, s * (half - 0.038), 1.03, 0.012, { plain: true }); // 两端压网的扁铁
+    // 网面：每半米一格。越靠中间鼓得越多（两端被扁铁压住了），最多 ±1 厘米
+    const meshW = length - 0.08;
+    const mesh = wireMesh(meshW, 1.93, Math.max(2, Math.round(length * 2)), 3, (x, y) => 0.02 * (vnoise(x * 1.3 + v * 7.1, y * 1.5) - 0.5) * (1 - Math.abs(x) / (meshW / 2)));
+    // 网面不投影：阴影贴图一个像素有好几厘米，分辨不出网眼，投出来要么是一整块实心的黑影，要么是乱闪的噪点
+    k.add('chainlink', mesh, thin, matrixOf([0, 1.025, 0.012]));
+    // 支臂上 3 道刺丝，每 18 厘米一个小刺。刺只有 3 厘米长，用一小片两面可见的薄片表示就够了
+    for (let row = 0; row < 3; row++) {
+      const along = 0.3 + row * 0.33, y = 2.02 + along * 0.36, z = lean * along * 0.36;
+      k.tube('steel_galv', [-half, y, z], [half, y, z], 0.0032, { seg: 3, ...thin });
+      for (let x = -half + 0.08 + (row % 2) * 0.09; x < half - 0.05; x += 0.18) {
+        const a = k.rng() * Math.PI, dy = Math.cos(a) * 0.016, dz = Math.sin(a) * 0.016;
+        k.strip('steel_galv', [[x, y - dy, z - dz], [x, y + dy, z + dz]], [0.003, 0, 0]);
+      }
+    }
+    for (let i = 0; i < 5; i++) k.box('steel_galv', 0.012, 0.012, 0.03, -half * 0.8 + i * half * 0.4, 2, 0.02, { plain: true, ...thin }); // 把网扎在顶横杆上的扎丝卡
+    return k.finish({ size: [length, 2.4, 0.08], boxes: [{ min: [-half, 0, -0.05], max: [half, 2.4, 0.05], surface: 'metal', playerOnly: true }] });
+  });
+}
+
+// ====================================================================== 大门：门柱、推拉门扇
+
+/** 大门门柱：0.22 米见方、3.4 米高的深色方钢柱，下面 1.2 米套一段黄黑警示套。 */
+export function gatePost(o: SiteOpts = {}): PropModel {
+  const v = variantOf(o.seed, 2);
+  return cached(`gate_post|${v}${tag(o)}`, () => {
+    const k = new Kit('gate_post', v, { interior: o.interior });
+    k.box('steel_dark', 0.22, 3.4, 0.22, 0, 1.7, 0, { c: 0.02 });
+    k.box('hazard_stripes', 0.26, 1.2, 0.26, 0, 0.6, 0, { c: 0.02 });
+    k.box('steel_dark', 0.26, 0.02, 0.26, 0, 3.41, 0, { c: 0.006 }); // 柱帽：盖住方管的管口，雨水才不会灌进去
+    return k.finish({ size: [0.26, 3.42, 0.26], boxes: [{ min: [-0.13, 0, -0.13], max: [0.13, 3.4, 0.13], surface: 'metal', noNav: true }] });
+  });
+}
+
+export interface SlidingGateOpts extends SiteOpts { /** 带不带地上的轨道，默认带。 */ track?: boolean }
+
+/**
+ * 推拉大门的门扇：6 米长、2.2 米高的方管框 + 铁丝网，底下两只橡胶轮骑在地轨上。门扇沿 x，原点在门扇正中。
+ * 这是"拉开以后停在一边"的样子：门洞在 -x 那一头。地轨从门扇这头一直铺过门洞，
+ * 所以它不以原点为中心 —— 从 x = -9.6 到 +3.2。"禁止驶入"的牌子朝 +z。
+ */
+export function slidingGate(o: SlidingGateOpts = {}): PropModel {
+  const track = o.track !== false;
+  return cached(`sliding_gate|${track}${tag(o)}`, () => {
+    const k = new Kit('sliding_gate', 0, { interior: o.interior });
+    const MID_Y = 1.25;
+    k.add('chainlink', wireMesh(6, 2.1, 12, 3, (x, y) => 0.012 * (vnoise(x * 1.1 + 3.3, y * 1.4) - 0.5)), { cast: false }, matrixOf([0, MID_Y, 0]));
+    for (const x of [-3, 0, 3]) k.box('steel_galv', 0.06, 2.2, 0.06, x, MID_Y, 0, { c: 0.006 });        // 3 根竖框
+    for (const y of [0.18, MID_Y, 2.32]) k.box('steel_galv', 6.06, 0.06, 0.06, 0, y, 0, { c: 0.006 });  // 3 根横框
+    for (const x of [-3, 3]) k.tube('steel_galv', [x, 0.2, 0], [0, 2.3, 0], 0.018, { seg: 6 });         // 2 根斜撑：没有它们，6 米长的门扇会被自重拉成平行四边形
+    for (const x of [-2.4, 2.4]) {
+      k.cyl('rubber', 0.09, 0.05, x, 0.1, 0, { axis: 'z', seg: 10 });
+      k.box('steel_galv', 0.04, 0.12, 0.075, x, 0.13, 0, { plain: true });                              // 轮叉
+    }
+    if (track) k.box('steel_dark', 12.8, 0.03, 0.1, -3.2, 0.015, 0, { plain: true, cast: false });
+    // "禁止驶入"：一块铝牌挂在门扇正中，贴纸贴在牌子上
+    k.box('aluminium', 0.74, 0.74, 0.004, 0, 1.5, 0.034, { plain: true });
+    sticker(k, 'no_entry', 0.7, [0, 1.5, 0.0375]);
+    return k.finish({ size: [6.06, 2.35, 0.1], boxes: [{ min: [-3.03, 0, -0.05], max: [3.03, 2.35, 0.05], surface: 'metal', playerOnly: true }] });
+  });
+}
+
 // ====================================================================== 登记表
 
 /**
  * 所有场地道具，按参考道具表里的名字登记。摆放的代码可以用名字取：SITE.jersey_barrier({ seed: 2 })。
+ * 门柱、推拉门、通道牌在参考里是关卡代码现搭的，没有道具名，这三个名字是我们起的。
  */
 export const SITE: Record<string, (o?: any) => PropModel> = {
   jersey_barrier: jerseyBarrier, bollard_post: bollardPost, bollard_mooring: bollardMooring,
   sign_post: signPost, lane_sign: laneSign,
   light_mast: lightMast,
+  fence_panel: fencePanel, gate_post: gatePost, sliding_gate: slidingGate,
 };
