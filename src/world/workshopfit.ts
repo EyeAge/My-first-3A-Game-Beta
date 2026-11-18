@@ -44,6 +44,13 @@ const DARK_WOOD = hex(0x8a786a);
 const DECK = { x0: -15.73, x1: -10.25, z0: -27.73, z1: -23.75, top: 2.6 } as const;
 /** 办公室：墙的外轮廓、窗台和窗顶的高度、屋顶的高度、墙厚。西、北两面直接借用车间的墙，所以只有南、东两面墙。 */
 const ROOM = { x0: -15.68, x1: -10.3, z0: -27.68, z1: -23.8, sill: 3.5, head: 4.45, top: 5, wall: 0.07 } as const;
+/** 走道：两节各 3 米长、1.2 米宽的格栅板首尾相接，板面和楼面一样高。 */
+const WALK = { x0: -15.75, x1: -9.75, z: -23.15, top: 2.6 } as const;
+/**
+ * 钢梯：摆在 (x, z)，整体绕竖轴转了 180°（所以是从东头起步、朝西往上走）。
+ * 12 级踏步，每级升 0.2 米、进 0.2 米；最后迈上 2.6 米高的顶平台，正好接走道的东端。
+ */
+const STAIR = { x: -8.25, z: -23.15, steps: 12, rise: 0.2, run: 0.2, start: -1.5 } as const;
 
 // ------------------------------------------------------------------ 小工具
 type BoxOpt = NonNullable<Parameters<Kit['box']>[7]>;
@@ -181,6 +188,126 @@ function buildMezzanine(k: Kit, boxes: LocalBox[]) {
   collide(boxes, DECK.x0, 2.48, DECK.z0, DECK.x1, DECK.top, DECK.z1, { noNav: true });
 }
 
+// ------------------------------------------------------------------ 走道
+/**
+ * 一节走道：3 × 1.2 米的钢格栅，放在当前坐标系的原点（板面在 y = 0.05）。
+ * 格栅是真的一根根扁钢：31 根顺着走道的（立着放，4 毫米厚），30 根横着的细方钢压在上面。
+ * 这些细条不投影子：它们比阴影贴图的一个像素还细，投出来只会是一片闪烁的噪点。
+ */
+function addCatwalk(k: Kit) {
+  const top = 0.05;
+  for (let i = 0; i <= 30; i++) k.box('steel_galv', 2.98, 0.03, 0.004, 0, top - 0.015, -0.51 + i * 0.034, { plain: true, cast: false, tint: 0.75 + 0.25 * ((i * 7) % 5) / 4 });
+  for (let i = 0; i < 30; i++) k.box('steel_galv', 0.006, 0.006, 1.04, -1.45 + i * 0.1, top - 0.004, 0, { plain: true, cast: false });
+  for (const s of [-1, 1]) {
+    k.box('steel_galv', 2.99, 0.032, 0.005, 0, top - 0.016, s * 0.525, { plain: true });       // 格栅的包边
+    k.box('steel_galv', 0.005, 0.032, 1.05, s * 1.493, top - 0.016, 0, { plain: true });
+    k.box('steel_dark', 3, 0.18, 0.06, 0, top - 0.09, s * 0.565, { c: 0.008 });                // 两侧的槽钢边梁
+  }
+  for (const x of [-1.45, -0.5, 0.5, 1.45]) k.box('steel_dark', 0.05, 0.1, 1.08, x, top - 0.085, 0, { c: 0.006 });   // 横撑
+  // 栏杆只装在南侧（+z）：北侧是办公室的墙
+  const z = 0.565;
+  k.box('steel_dark', 3, 0.1, 0.008, 0, top + 0.05, 0.535, { plain: true });                   // 踢脚板：挡住脚边的东西别滚下去
+  for (const x of [-1.42, 0, 1.42]) {
+    k.box('paint_yellow', 0.045, 1.07, 0.045, x, top + 0.52, z, { c: 0.006 });
+    k.box('steel_dark', 0.09, 0.012, 0.09, x, top + 0.006, z, { plain: true });
+  }
+  k.tube('paint_yellow', [-1.5, top + 1.05, z], [1.5, top + 1.05, z], 0.021, { seg: 7, cap: true });
+  k.tube('paint_yellow', [-1.5, top + 0.55, z], [1.5, top + 0.55, z], 0.016, { seg: 6, cap: true });
+}
+
+function buildCatwalk(k: Kit, boxes: LocalBox[]) {
+  for (const x of [-14.25, -11.25]) k.at([x, WALK.top - 0.05, WALK.z], null, () => addCatwalk(k));
+  // 南侧底下的三根立柱和一根通长的边梁（北侧搭在夹层楼面的梁上）
+  const postZ = WALK.z + 0.5;
+  for (const x of [-15.6, -12.75, -9.85]) {
+    post(k, 'paint_grey', 0.1, 0.1, x, FLOOR, 2.34, postZ, { bevel: 0.01 });
+    k.box('steel_dark', 0.2, 0.012, 0.2, x, FLOOR + 0.006, postZ, { plain: true });
+    collide(boxes, x - 0.06, 0, postZ - 0.06, x + 0.06, 2.48, postZ + 0.06, { noNav: true });
+  }
+  slab(k, 'paint_grey', WALK.x0, 2.34, postZ - 0.06, WALK.x1, 2.48, postZ + 0.06, { c: 0.006 });
+
+  // 走道东头北侧有半米的豁口（楼面只到 x = −10.25，再往东是空的），补一小段栏杆接到钢梯平台的栏杆上
+  const gapZ = WALK.z - 0.565;
+  k.box('paint_yellow', 0.045, 1.07, 0.045, -10.2, WALK.top + 0.52, gapZ, { c: 0.006 });
+  for (const [h, r] of [[1.05, 0.021], [0.55, 0.016]]) k.tube('paint_yellow', [-10.2, WALK.top + h, gapZ], [-9.72, WALK.top + h - 0.05 + (h > 1 ? 0 : 0.02), STAIR.z - 0.485], r, { seg: 6, cap: true });
+
+  // 碰撞：板是实的；栏杆只挡人（playerOnly）—— 参考里栏杆是一堵 1 米高的实心墙，站在走道上往下打，子弹会被看不见的墙挡住
+  collide(boxes, WALK.x0, WALK.top - 0.08, WALK.z - 0.6, WALK.x1, WALK.top, WALK.z + 0.6, { noNav: true });
+  collide(boxes, WALK.x0, WALK.top, WALK.z + 0.53, WALK.x1, WALK.top + 1.05, WALK.z + 0.6, { noNav: true, playerOnly: true });
+  collide(boxes, -10.25, WALK.top, WALK.z - 0.6, WALK.x1, WALK.top + 1.05, WALK.z - 0.54, { noNav: true, playerOnly: true });
+}
+
+// ------------------------------------------------------------------ 钢梯
+function buildStairs(k: Kit, boxes: LocalBox[]) {
+  const { steps, rise, run, start } = STAIR;
+  const flightEnd = start + steps * run;   // 最后一级踏步结束、顶平台开始的地方（钢梯自己的坐标里 x = 0.9）
+  const top = (steps + 1) * rise;          // 顶平台的高度 2.6：12 级踏步之后再迈一步
+  /** 踏步前缘连成的那条斜线在 x 处有多高。栏杆、斜梁都平行于它。 */
+  const noseLine = (x: number) => ((x - start) / run) * rise + rise;
+
+  // 钢梯在自己的坐标系里搭：原点在占地中心的地面上，从 x = −1.5 起步，朝 +x 往上走。整体转 180° 摆到位。
+  // 它的 y = 0 是室外地面，不是地坪面：这样顶平台正好是 2.6 米，和走道齐平；第一级离地坪只有 17 厘米。
+  k.at([STAIR.x, 0, STAIR.z], [0, Math.PI, 0], () => {
+    for (let i = 0; i < steps; i++) {
+      const x = start + i * run, y = (i + 1) * rise;
+      k.box('diamond_plate', 0.25, 0.03, 0.9, x + 0.125, y - 0.015, 0, { c: 0.005 });                       // 踏板：比一级的进深多出 5 厘米，伸到上一级的下面
+      k.box('paint_yellow', 0.035, 0.034, 0.9, x + 0.016, y - 0.015, 0, { c: 0.006 });         // 前缘的黄色防滑条
+      for (const s of [-1, 1]) k.box('steel_dark', 0.2, 0.05, 0.01, x + 0.13, y - 0.05, s * 0.452, { plain: true });   // 托着踏板的角码
+    }
+    for (const s of [-1, 1]) {
+      k.bar('steel_dark', [start + 0.07, 0.13, s * 0.465], [flightEnd + 0.04, 2.5, s * 0.465], 0.24, 0.014, { c: 0.004 });   // 斜梁：一条 24 厘米宽的扁钢
+      k.box('steel_galv', 0.3, 0.012, 0.12, start + 0.06, FLOOR + 0.006, s * 0.465, { plain: true });
+      for (const dx of [-0.08, 0.1]) k.cyl('steel_galv', 0.012, 0.02, start + 0.06 + dx, FLOOR + 0.02, s * 0.5, { seg: 6, cast: false });
+    }
+    // 顶平台：一块花纹板，四边的框梁，两条腿，腿之间一个 X 形的拉撑
+    k.box('diamond_plate', 0.64, 0.035, 0.96, flightEnd + 0.3, top - 0.0175, 0, { c: 0.005 });
+    k.box('paint_yellow', 0.035, 0.038, 0.96, flightEnd + 0.016, top - 0.0175, 0, { c: 0.006 });
+    for (const s of [-1, 1]) k.box('steel_dark', 0.66, 0.16, 0.06, flightEnd + 0.3, top - 0.115, s * 0.47, { c: 0.008 });
+    k.box('steel_dark', 0.06, 0.16, 0.96, 1.47, top - 0.115, 0, { c: 0.008 });
+    k.box('steel_dark', 0.06, 0.12, 0.9, flightEnd + 0.02, top - 0.1, 0, { c: 0.008 });
+    for (const s of [-1, 1]) {
+      post(k, 'steel_dark', 0.08, 0.08, 1.44, FLOOR, top - 0.19, s * 0.45);
+      k.box('steel_galv', 0.18, 0.012, 0.18, 1.44, FLOOR + 0.006, s * 0.45, { plain: true });
+      k.bar('steel_dark', [1.44, 1.5, s * 0.45], [flightEnd + 0.1, top - 0.2, s * 0.45], 0.05, 0.05);     // 斜撑：从腿上顶住平台的前沿
+      // X 形拉撑：两条扁钢，宽的一面在两条腿所在的平面里，前后错开 1 厘米免得在交叉点互相穿过
+      k.bar('steel_dark', [1.44 + s * 0.005, 0.15, -s * 0.42], [1.44 + s * 0.005, 2.2, s * 0.42], 0.008, 0.045, { plain: true });
+    }
+    k.box('steel_dark', 0.06, 0.06, 0.82, 1.44, 1.2, 0, { c: 0.006 });
+
+    // 栏杆：两侧各 5 根立柱、两道扶手。扶手先顺着楼梯斜上去，到平台拐成水平
+    const x0 = start + 0.1, x3 = flightEnd + 0.03, x4 = 1.47, y0 = noseLine(x0);
+    /** 扶手的基准线在 x 处的高度（两道扶手分别在它上面 1 米和 0.52 米）。 */
+    const railLine = (x: number) => (x >= x3 ? top : y0 + ((top - y0) * (x - x0)) / (x3 - x0));
+    for (const s of [-1, 1]) {
+      const z = s * 0.485;
+      for (const x of [x0, start + 0.9, start + 1.7, x3, x4]) {
+        const foot = (x >= x3 ? top : noseLine(x) - (x > x0 ? 0.1 : 0)) - 0.12;   // 立柱的下端夹在斜梁（或平台框梁）的外侧
+        k.tube('paint_yellow', [x, foot, z], [x, railLine(x) + 1, z], 0.019, { seg: 7 });   // 立柱一直顶到上扶手（参考里中间两根短了 9 厘米，扶手悬在柱顶上方）
+        k.box('steel_dark', 0.07, 0.1, 0.012, x, foot + 0.02, z - s * 0.012, { plain: true });
+      }
+      for (const [h, r] of [[1, 0.021], [0.52, 0.016]]) {
+        k.path('paint_yellow', [[x0, y0 + h, z], [x3, top + h, z], [x4, top + h, z]], r, { seg: 7 });
+        for (const x of [x0, x4]) k.sph('paint_yellow', r * 1.05, x, railLine(x) + h, z, { seg: 7 });   // 两头的球节
+      }
+      k.box('steel_dark', 0.6, 0.1, 0.008, flightEnd + 0.3, top + 0.05, s * 0.476, { plain: true });        // 平台的踢脚板
+    }
+  });
+
+  // ---- 碰撞：一级踏步一个盒子（从地面一直到这一级的顶面）。人走路时可以直接迈上不高的台阶，20 厘米一级就这样一级级走上去
+  const wx = (x: number) => STAIR.x - x;   // 钢梯自己的 x → 世界 x（转了 180°，所以是减）
+  for (let i = 0; i < steps; i++) collide(boxes, wx(start + i * run), 0, STAIR.z - 0.5, wx(start + (i + 1) * run), (i + 1) * rise, STAIR.z + 0.5);
+  collide(boxes, wx(flightEnd), top - 0.2, STAIR.z - 0.5, wx(1.5), top, STAIR.z + 0.5);
+  for (const s of [-1, 1]) {
+    collide(boxes, wx(1.4), 0, STAIR.z + s * 0.45 - 0.04, wx(1.48), top - 0.2, STAIR.z + s * 0.45 + 0.04);
+    // 栏杆只挡人。盒子贴在栏杆的外侧（内侧面离中线 0.5 米），给 0.72 米宽的人留出 1 米的通道，不然上楼梯要对得很准
+    const z0 = STAIR.z + s * 0.5, z1 = STAIR.z + s * 0.56;
+    collide(boxes, wx(flightEnd), top, z0, wx(1.5), top + 1.02, z1, { playerOnly: true });
+    // 斜的那一段：每 3 级合用一个盒子，从这 3 级里最低一级的顶面，到最高一级的顶面再加 1 米。
+    // （参考里这一段没有碰撞，人可以从楼梯侧面穿过栏杆走出去。）
+    for (let i = 0; i < steps; i += 3) collide(boxes, wx(start + i * run), (i + 1) * rise, z0, wx(start + (i + 3) * run), (i + 3) * rise + 1, z1, { playerOnly: true });
+  }
+}
+
 // ------------------------------------------------------------------ 组装
 export function buildWorkshopFit(): WorkshopFit {
   // 全部放进同一只零件箱：同一种材质的零件（不管是办公室的还是货架的）最后合成一个网格，整套陈设只有二十来次绘制调用。
@@ -189,6 +316,8 @@ export function buildWorkshopFit(): WorkshopFit {
   const boxes: LocalBox[] = [];
 
   buildMezzanine(k, boxes);
+  buildCatwalk(k, boxes);
+  buildStairs(k, boxes);
 
   // 碰撞盒是上面手工登记的那一份，所以不要零件箱自动量的外包盒（boxes: []）
   const group = k.finish({ boxes: [], grime: 0.9 }).group;
