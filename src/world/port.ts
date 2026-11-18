@@ -194,8 +194,10 @@ export function buildPort(progress: (msg: string) => void): Port {
     for (const x of [28, 46, 70, 92]) for (const s of [-1, 1]) { box(x, GB - 0.5, cz + s * 3.9, 0.7, 0.3, 0.5, 0x1c1e20); glow(x, GB - 0.68, cz + s * 3.9, 0.56, 0.06, 0.36, 0.55, 0.5, 0.42); flareList.push({ x, y: GB - 0.75, z: cz + s * 3.9, r: 1.3, g: 1.1, b: 0.85, size: 1.5 }); }
     craneLights.push(new THREE.Vector3(54, 62.9, cz), new THREE.Vector3(104.5, GT + 0.8, cz), new THREE.Vector3(21.5, GT + 0.8, cz));
   };
-  // 两台岸桥：[在码头上的位置 z, 小车停在大梁上的位置 x]。码头的摆放清单（layout/quay.ts）要知道门腿在哪，好在腿脚下立防撞柱
-  const CRANES = [[-42, 78], [20, 86]] as const;
+  // 两台岸桥：[在码头上的位置 z, 小车停在大梁上的位置 x]。码头的摆放清单（layout/quay.ts）要知道门腿在哪，好在腿脚下立防撞柱。
+  // 一号的小车停在船上方（x = 78），吊具下的箱子正悬在甲板那个卸了一半的缺口上面；
+  // 二号正对着船楼，小车要是也停在船那边，吊具和吊着的箱子就整个埋进船楼里了，所以它停在码头这一侧（x = 46），箱子悬在两条轨道中间
+  const CRANES = [[-42, 78], [20, 46]] as const;
   CRANES.forEach(([cz, trolleyX], i) => crane(cz, trolleyX, i ? CONTAINER_COLORS.teal : CONTAINER_COLORS.orange));
 
   // ---------------------------------------------------------------- 货轮
