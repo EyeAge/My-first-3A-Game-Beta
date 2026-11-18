@@ -3,7 +3,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { clamp, lerp, mulberry32, vnoise } from '../core/math';
 import { decal, label, labelMaterial, type Patch } from '../render/labels';
 import { surface, type SurfaceName } from '../render/surfaces';
-import { Kit, type LocalBox, type PropModel, type Rgb, type V3 } from './kit';
+import { Kit, type LocalBox, type PropModel, type Rgb, type Tint, type V3 } from './kit';
 
 // 集装箱。
 //
@@ -24,6 +24,7 @@ import { Kit, type LocalBox, type PropModel, type Rgb, type V3 } from './kit';
 //
 //   4. 同一只箱子有两份几何：精模（detail，20 尺箱六千、40 尺箱七千多个三角形）和简模（lod，两百个三角形以内的平板盒子）。
 //      离得远的箱子用简模，颜色和脏污照样有，只是没有起伏和小零件。
+//      两份几何的漆面贴图是对齐的（见 addPanel），切换的时候斑驳不会跳。
 //
 // 坐标约定：长边沿 x，箱门在 +x 端，前端板在 -x 端；宽沿 z；底面在 y=0，原点在占地中心。
 
@@ -400,11 +401,51 @@ interface Core { body: THREE.BufferGeometry; metal: THREE.BufferGeometry | null;
 
 /** 零件箱的种子：规格、花样、做旧三样都算进去，于是每个变体的贴图挪位都不一样，摞在一起的箱子不会在同一个位置掉同一块漆。 */
 const kitSeed = (v: ContainerVariant) => v.seed + Math.round(v.wear * 2) * 10 + (v.size === 20 ? 0 : v.size === 40 ? 100 : 200);
+/**
+ * 几张大板的编号：两块侧板各切成十来张、箱顶十来张、前端板一张。编号只是给 addPanel 算贴图位移用的，互相不重复就行。
+ */
+const SLOT = { side: (side: number, i: number) => (side > 0 ? 0 : 40) + i, roof: (i: number) => 80 + i, front: 120 };
+/** 侧板切成哪几张。两头各多伸 2 厘米，插进角柱里（角柱的棱是倒过角的，板如果刚好只到角柱的边，倒角那里会露出一条能看穿箱子的细缝）。 */
+const sideSheets = (plan: Plan) => sheets(embed(plan.sideKnots, 0.02), 16); // 16 格 = 4 个波纹周期，1.1 米一张
+/** 箱顶切成哪几张。 */
+const roofSheets = (plan: Plan) => sheets(ribKnots(-plan.half + 0.062, plan.half - 0.13, ROOF_RIB, -plan.half + 0.1), 20); // 20 格 = 5 个波纹周期，一米一张
+/** 一串板各自占哪一段 [起, 止]；第一张的起点和最后一张的终点换成 from / to（简模的平板要一直铺到箱子的边上）。 */
+const spans = (list: [number, number][][], from: number, to: number) => list.map((sheet, i): [number, number] => [i === 0 ? from : sheet[0][0], i === list.length - 1 ? to : sheet[sheet.length - 1][0]]);
+
+/**
+ * 把一张大板（侧板、箱顶、前端板）放进零件箱，并且自己指定它的漆面贴图挪到哪里。
+ *
+ * 平时这件事是零件箱替我们做的：它按"这是第几个零件"给每个零件的贴图随机挪一个位置（kit.ts），免得每块板在同一个地方掉同一块漆。
+ * 可是同一只箱子有精模和简模两份几何，零件的个数和顺序各不相同 —— 同一张板在两份几何里会被挪到两个不同的地方。
+ * 于是箱子在远近之间切换的那一刻，整面漆的斑驳会"唰"地换一套，比波纹消失还显眼。
+ *
+ * 所以这几张大板不让零件箱挪（shift: false），改成按"哪个变体的第几张板"算一个固定的位移：
+ * 两份几何里同一张板算出来的位移相同，漆面就严丝合缝地接得上。
+ *
+ * 位移怎么加上去：零件箱是按几何体"摆放之前"的位置铺贴图的。那就先把板平移 t，让它照这个位置铺，
+ * 再用摆放矩阵把板挪回原处 —— 形状一点没动，贴图挪了 t。
+ */
+function addPanel(k: Kit, v: ContainerVariant, slot: number, g: THREE.BufferGeometry, tint: Tint) {
+  const rng = mulberry32(kitSeed(v) * 977 + slot * 131 + 7);
+  const t: V3 = [rng() * 7.3, rng() * 7.3, rng() * 7.3]; // 最多挪 7.3 米，和零件箱自己挪的幅度一样
+  k.add(BODY, g.translate(t[0], t[1], t[2]), { tint, shift: false }, new THREE.Matrix4().makeTranslation(-t[0], -t[1], -t[2]));
+}
+
 /** 零件箱搭完以后，取出某种材质合并成的那一块几何（零件箱给网格起的名字是"模型名:材质名"）。 */
 function partOf(model: PropModel, name: SurfaceName) {
   const found = (model.group.children as THREE.Mesh[]).filter((c) => c.name.endsWith(`:${name}`)).map((c) => c.geometry);
   return found.length > 1 ? mergeGeometries(found) : found[0] ?? null; // 同一种材质里有的零件投影、有的不投影时，零件箱会分成两块，这里并回去
 }
+
+/** 前端板外平面的 x（p 是半个箱长）。 */
+const frontX = (p: number) => -(p - 0.014);
+/** 前端板的截面：竖棱沿 z 排开。两边各多伸 2.5 厘米插进角柱。 */
+const frontKnots = () => embed(ribKnots(-1.064, 1.064, END_RIB, -1.034), 0.025);
+/** 前端板的漆：基础明暗，槽里压暗。 */
+const frontPaint = (plan: Plan) => (x: number, y: number, z: number): Rgb => {
+  const c = plan.shade(x, y, z), g = sstep(0.008, 0.038, x - frontX(plan.half));
+  return [c[0] * (1 - 0.17 * g), c[1] * (1 - 0.18 * g), c[2] * (1 - 0.18 * g)];
+};
 
 function buildCore(plan: Plan): Core {
   const { v, L, H, half: p, top, shade } = plan, hc = v.size === 'hc', open = v.doors > 0;
@@ -445,12 +486,10 @@ function buildCore(plan: Plan): Core {
     for (const e of [-1, 1]) k.box(body, 0.018, 0.13, 0.01, x + e * 0.19, 0.078, sz * (HALF_W - 0.003), { plain: true, ...paint });
   }
 
-  // ---- 两块侧板：波纹截面 × 几排顶点。有坑的地方把顶点往里压。
-  //      板的两头各多伸 2 厘米，插进角柱里面：角柱的棱是倒过角的，板如果刚好只到角柱的边，倒角那里会露出一条能看穿箱子的细缝
-  const sideKnots = plan.sideKnots, sealed = embed(sideKnots, 0.02);
-  for (const side of [-1, 1]) for (const sheet of sheets(sealed, 16)) { // 16 格 = 4 个波纹周期，1.1 米一张
-    k.add(body, ribbedSheet(sheet, (x) => plan.rows(x, side), (x, rib, y) => [x, y, side * (PANEL_Z - rib - plan.dentAt(x, y, side))], [0, 0, side]), { tint: plan.sidePaint });
-  }
+  // ---- 两块侧板：波纹截面 × 几排顶点。有坑的地方把顶点往里压
+  for (const side of [-1, 1]) sideSheets(plan).forEach((sheet, i) => {
+    addPanel(k, v, SLOT.side(side, i), ribbedSheet(sheet, (x) => plan.rows(x, side), (x, rib, y) => [x, y, side * (PANEL_Z - rib - plan.dentAt(x, y, side))], [0, 0, side]), plan.sidePaint);
+  });
   // ---- 通风器：侧板靠上的小盖板，上面三道细缝。20 尺箱每侧一个，40 尺箱每侧两个
   for (const sz of [-1, 1]) for (const e of L > 7 ? [-1, 1] : [1]) {
     const x = sz * e * (p - 0.62), y = H - 0.165;
@@ -459,18 +498,14 @@ function buildCore(plan: Plan): Core {
   }
   // ---- 前端板：竖棱沿 z 排开，比侧板的波纹深一点。两边同样插进角柱 2 厘米；
   //      下沿比侧板多往下伸 6 厘米，藏到前下梁的背后 —— 前下梁只有 5 厘米厚，挡不住波纹凹进去的那一半，不伸下去的话槽底会漏光
-  const endX = -(p - 0.014); // 前端板外平面的 x
-  k.add(body, ribbedSheet(embed(ribKnots(-1.064, 1.064, END_RIB, -1.034), 0.025), [PANEL_Y0 - 0.06, PANEL_Y0, 1.25, top], (z, rib, y) => [endX + rib, y, z], [-1, 0, 0]), {
-    tint: (x, y, z) => { const c = shade(x, y, z), g = sstep(0.008, 0.038, x - endX); return [c[0] * (1 - 0.17 * g), c[1] * (1 - 0.18 * g), c[2] * (1 - 0.18 * g)]; },
-  });
+  addPanel(k, v, SLOT.front, ribbedSheet(frontKnots(), [PANEL_Y0 - 0.06, PANEL_Y0, 1.25, top], (z, rib, y) => [frontX(p) + rib, y, z], [-1, 0, 0]), frontPaint(plan));
   // ---- 箱顶：横棱沿 x 排开。20 尺箱在中线多一排顶点并且抬高 6 毫米（顶板略微起拱，好排水）。
   //      两边压进上侧梁的倒角里 6 毫米，理由同上
   const roofY = H - 0.008, roofZ = HALF_W - 0.06;
-  for (const sheet of sheets(ribKnots(-p + 0.062, p - 0.13, ROOF_RIB, -p + 0.1), 20)) { // 20 格 = 5 个波纹周期，一米一张
-    k.add(body, ribbedSheet(sheet, L > 7 ? [-roofZ, roofZ] : [-roofZ, 0, roofZ], (x, rib, z) => [x, roofY - rib + (Math.abs(z) < 0.01 ? 0.006 : 0), z], [0, 1, 0]), {
-      tint: (x, y, z) => plan.roofPaint(x, z, sstep(0.004, 0.018, roofY + (Math.abs(z) < 0.01 ? 0.006 : 0) - y)),
-    });
-  }
+  roofSheets(plan).forEach((sheet, i) => {
+    addPanel(k, v, SLOT.roof(i), ribbedSheet(sheet, L > 7 ? [-roofZ, roofZ] : [-roofZ, 0, roofZ], (x, rib, z) => [x, roofY - rib + (Math.abs(z) < 0.01 ? 0.006 : 0), z], [0, 1, 0]),
+      (x, y, z) => plan.roofPaint(x, z, sstep(0.004, 0.018, roofY + (Math.abs(z) < 0.01 ? 0.006 : 0) - y)));
+  });
   // ---- 箱底：一块朝下的暗板。箱子摞起来、或者被吊在半空的时候，从下面往上看不能看穿
   k.plane(body, L - 0.06, CONTAINER_WIDTH - 0.06, [0, 0.02, 0], { rot: [Math.PI / 2, 0, 0], tint: 0.3 });
 
@@ -685,36 +720,43 @@ function buildMarks(plan: Plan, brand: number): THREE.BufferGeometry | null {
 
 // ====================================================================== 简模
 
+/** 波纹槽里的压暗，精模是一道一道的；没有波纹的平板只能取平均：斜面和内平面合起来占一个周期的将近一半。 */
+const grooveShare = (c: Corrugation) => (c.slope + (c.period - c.flat - 2 * c.slope)) / c.period;
+/** 简模侧面的几排高度：泥污在 0.44 米以下最浓，锈条集中在离箱顶半米以内，中间一大段没什么变化。精模的侧板也有这几排。 */
+const coarseRows = (lo: number, hi: number, H: number) => [lo, 0.44, H - 0.5, hi];
+
 /**
- * 远处用的简模：一个平板盒子，两百个三角形以内。
+ * 远处用的简模：一个平板盒子，两百个三角形上下。
  * 没有波纹、没有门上的小零件，但顶点色照样写（泥污、锈条、箱顶褪色），所以远看颜色和精模是接得上的。
- * 各个面都放在精模对应面的"波纹中线"上 —— 它同时还替精模投影子（见 containerfield.ts），不能比精模鼓出来太多。
+ * 各个面都放在精模对应面的"波纹中线"上 —— 它同时还替近处的箱子投影子（见 containerfield.ts），不能比精模鼓出来太多。
+ * 侧面、箱顶和精模切成同样的几张板，贴图也挪到同样的位置（见 addPanel）。
  */
 function buildLod(plan: Plan) {
-  const { L, H, half: p, shade, wear } = plan;
-  const k = new Kit('container-lod', kitSeed(plan.v)), body = BODY;
-  const z = PANEL_Z - SIDE_RIB.depth / 2, x0 = -(p - 0.035), x1 = p - 0.049, cols = L > 7 ? 10 : 6, colW = (x1 - x0) / cols;
-  // 波纹槽里的压暗，精模是一道一道的，这里只能取平均：斜面和内平面合起来占一个周期的将近一半
-  const grooves = (c: Corrugation) => (c.slope + (c.period - c.flat - 2 * c.slope)) / c.period;
-  const sideGroove = grooves(SIDE_RIB);
+  const { v, H, half: p, shade, wear } = plan;
+  const k = new Kit('container-lod', kitSeed(v)), body = BODY;
+  const z = PANEL_Z - SIDE_RIB.depth / 2, x0 = -(p - 0.035), x1 = p - 0.049;
+  const sides = spans(sideSheets(plan), x0, x1), sheetW = (x1 - x0) / sides.length;
+  const sideGroove = grooveShare(SIDE_RIB);
   const sideTint = (x: number, y: number, zz: number): Rgb => {
     const side = zz > 0 ? 1 : -1, c = shade(x, y, zz);
     c[0] *= 1 - 0.17 * sideGroove; c[1] *= 1 - 0.18 * sideGroove; c[2] *= 1 - 0.18 * sideGroove;
-    // 锈条比顶点的间距窄得多，会从两列顶点之间漏掉。所以把每一道摊宽到一列的宽度，浓度按比例调淡，总量不变
+    // 锈条比顶点的间距窄得多，会从两列顶点之间漏掉。所以把每一道摊宽到一张板的宽度，浓度按比例调淡，总量不变
     const hang = sstep(H - 0.75, H, y);
     if (hang > 0) for (const s of plan.streaks) if (s.side === side) {
-      const wide = Math.max(s.halfWidth, colW), t = Math.abs(x - s.x) / wide;
+      const wide = Math.max(s.halfWidth, sheetW), t = Math.abs(x - s.x) / wide;
       if (t < 1) stain(c, RUST_TINT, hang * hang * s.strength * (1 - t * t) * (0.45 + 0.55 * wear) * (s.halfWidth / wide));
     }
     return c;
   };
-  // 侧面和箱顶也切成两格一张（理由见 sheets()）：简模是平板，漆面贴图每 2.5 米重复一次的样子比精模更显眼
-  for (const side of [-1, 1]) for (const sheet of sheets(flatKnots(x0, x1, cols), 2)) k.add(body, ribbedSheet(sheet, [0, 0.3, 0.62, H - 0.7, H], (x, _d, y) => [x, y, side * z], [0, 0, side]), { tint: sideTint });
-  const roofGroove = grooves(ROOF_RIB), endGroove = grooves(END_RIB);
-  for (const sheet of sheets(flatKnots(x0, x1, L > 7 ? 8 : 4), 2)) k.add(body, ribbedSheet(sheet, [-z, z], (x, _d, zz) => [x, H, zz], [0, 1, 0]), { tint: (x, _y, zz) => plan.roofPaint(x, zz, roofGroove) });
-  k.add(body, ribbedSheet(flatKnots(-z, z, 2), [0, H / 2, H], (zz, _d, y) => [x0, y, zz], [-1, 0, 0]), {
-    tint: (x, y, zz) => { const c = shade(x, y, zz); return [c[0] * (1 - 0.17 * endGroove), c[1] * (1 - 0.18 * endGroove), c[2] * (1 - 0.18 * endGroove)]; },
+  for (const side of [-1, 1]) sides.forEach(([a, b], i) => {
+    addPanel(k, v, SLOT.side(side, i), ribbedSheet([[a, 0], [b, 0]], coarseRows(0, H, H), (x, _d, y) => [x, y, side * z], [0, 0, side]), sideTint);
   });
+  const roofGroove = grooveShare(ROOF_RIB), endGroove = grooveShare(END_RIB);
+  spans(roofSheets(plan), x0, x1).forEach(([a, b], i) => {
+    addPanel(k, v, SLOT.roof(i), ribbedSheet([[a, 0], [b, 0]], [-z, z], (x, _d, zz) => [x, H, zz], [0, 1, 0]), (x, _y, zz) => plan.roofPaint(x, zz, roofGroove));
+  });
+  addPanel(k, v, SLOT.front, ribbedSheet(flatKnots(-z, z, 2), [0, H / 2, H], (zz, _d, y) => [x0, y, zz], [-1, 0, 0]),
+    (x, y, zz) => { const c = shade(x, y, zz); return [c[0] * (1 - 0.17 * endGroove), c[1] * (1 - 0.18 * endGroove), c[2] * (1 - 0.18 * endGroove)]; });
   k.add(body, ribbedSheet(flatKnots(-z, z, 2), [0, 0.3, 0.62, H], (zz, _d, y) => [x1, y, zz], [1, 0, 0]), { tint: (x, y, zz) => { const c = shade(x, y, zz); return [c[0] * 0.94, c[1] * 0.94, c[2] * 0.94]; } });
   k.plane(body, x1 - x0, 2 * z, [(x0 + x1) / 2, 0, 0], { rot: [Math.PI / 2, 0, 0], tint: 0.3 });
   return (k.finish({ grime: 0 }).group.children[0] as THREE.Mesh).geometry;
