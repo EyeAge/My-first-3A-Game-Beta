@@ -285,7 +285,8 @@ async function boot() {
     audio.setInterior(indoors);
     audio.update(dt);
 
-    if (state === 'playing' || state === 'paused') {
+    // 阵亡后界面出来之前的那一秒半里 HUD 还在：继续刷新它，血条才会落到 0，而不是停在挨最后一下之前的数
+    if (state === 'playing' || state === 'paused' || (state === 'dead' && deadT <= DEATH_SCREEN_AFTER)) {
       camera.getWorldDirection(fwd);
       frame.heading = (Math.atan2(fwd.x, -fwd.z) * 180) / Math.PI;
       frame.hp = player.hp; frame.ammo = weapon.ammo; frame.reserve = weapon.reserve; frame.reloadP = weapon.reloadProgress;
