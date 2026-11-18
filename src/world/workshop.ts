@@ -271,7 +271,7 @@ function skirt(c: Ctx, along: 'x' | 'z', face: number, out: number, s0: number, 
   span(c.inn, 'concrete_painted', along, trim0 ? s0 + half : a, trim1 ? s1 - half : b, mid, back, FLOOR - 0.2, SKIRT_H, { c: 0.015 });
 }
 
-const SHEET_W = 0.762;   // 一张波纹板的宽度：正好是贴图的一格，里面有 10 道波
+const SHEET_W = 0.762;   // 一张波纹板的宽度：10 道波（波距 76.2 毫米）
 const BITE = 0.0015;     // 两个零件相接的地方互相咬进去这么多，免得接缝漏像素
 /** 每张板自己的深浅。大多数只差几个百分点；偶尔一张锈得发褐，偶尔一张是后来换的新板，比别的亮。 */
 function sheetTint(key: number, index: number): Tint {

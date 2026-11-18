@@ -35,6 +35,10 @@ export interface SurfaceDef {
   /** 凹凸的强弱倍数。 */
   nrm: number;
   transparent?: boolean; alphaCut?: boolean; doubleSide?: boolean;
+  /** 提前几级换用小贴图（见 surfpatch.ts 里 SURF_LOD 的说明）。只给花纹很规则、远看会出摩尔纹的质感用。 */
+  lodBias?: number;
+  /** 一张贴图里有几道竖条纹（波纹板是 8 道波）。给了这个数，远处会把条纹状的凹凸平滑地抹掉，不出摩尔纹。 */
+  stripes?: number;
 }
 
 /**
@@ -84,7 +88,7 @@ export const SURFACES = {
   steel_bare: def('brushed', { tint: 1, color: 0xb4b8bb, wet: W_METAL, macro: M_SMALL }),
   steel_rust: def('rust', { wet: W_RUST }),
   diamond_plate: def('diamond', { wet: W_METAL }),
-  corrugated_roof: def('corrugated', { wet: W_METAL }),
+  corrugated_roof: def('corrugated', { wet: W_METAL, lodBias: 1, stripes: 8 }),
   chainlink: def('chainlink', { tint: 3, wet: W_NONE, macro: M_OFF, alphaCut: true, doubleSide: true }),
   aluminium: def('brushed', { tint: 1, color: 0xc4c8cb, rough: 1.15, wet: W_METAL, macro: M_SMALL }),
   brass: def('brushed', { tint: 1, color: 0xc29a45, rough: 0.9, wet: W_METAL, macro: [0.1, 0.08, 20, 0] }),
@@ -217,6 +221,8 @@ function dress(mat: THREE.MeshStandardMaterial) {
   if (world) defines.SURF_WORLD = '';
   if (fx) defines.SURF_FX = '';
   if (cut) defines.SURF_ACUT = '';
+  if (d.lodBias) defines.SURF_LOD = d.lodBias.toFixed(2);
+  if (d.stripes) defines.SURF_STRIPES = d.stripes.toFixed(1);
   if (DEBUG_VIEW) defines.SURF_DEBUG = '';
   (mat as THREE.MeshStandardMaterial & { defines: typeof defines }).defines = defines; // three.js 的类型声明里漏了这个字段
   const uniforms: SurfaceUniforms = {
@@ -227,7 +233,7 @@ function dress(mat: THREE.MeshStandardMaterial) {
   };
   mat.onBeforeCompile = (shader) => patchSurfaceShader(shader, uniforms);
   // three.js 靠这个字符串判断"两个材质能不能共用一个程序"。颜色、湿度这些都是 uniform，不影响程序本身
-  mat.customProgramCacheKey = () => `surf1|${d.tint}${tri ? 't' : ''}${world ? 'w' : ''}${fx ? 'f' : ''}${cut ? 'a' : ''}${DEBUG_VIEW ? 'd' : ''}`;
+  mat.customProgramCacheKey = () => `surf1|${d.tint}${tri ? 't' : ''}${world ? 'w' : ''}${fx ? 'f' : ''}${cut ? 'a' : ''}${d.lodBias ? 'l' + d.lodBias : ''}${d.stripes ? 's' + d.stripes : ''}${DEBUG_VIEW ? 'd' : ''}`;
   mat.userData.set = set.key; mat.userData.tile = set.tile; mat.userData.interior = !!o.interior;
   mat.needsUpdate = true;
 }

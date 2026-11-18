@@ -112,10 +112,22 @@ const FRAG_MAP = /* glsl */ `
   surfOrm = surfTriSample(roughnessMap);
 #else
   surfUv = vMapUv;   // 模型的贴图坐标单位是米；three.js 已经替我们乘过贴图的 repeat（= 1 / 一张图铺多少米）
-  vec4 sampledDiffuseColor = texture2D(map, surfUv);
-  surfOrm = texture2D(roughnessMap, surfUv);
+  // SURF_LOD：让显卡提前换用更小（更糊）的那级贴图。波纹板这种"一条亮一条暗"的规则花纹，缩到每个波只剩三四个像素时
+  // 会和屏幕的像素格子"打架"，墙上出现斜着的摩尔纹；提前一级换小图，波纹在快要打架之前就已经化成均匀的灰
+  #ifndef SURF_LOD
+    #define SURF_LOD 0.0
+  #endif
+  vec4 sampledDiffuseColor = texture2D(map, surfUv, SURF_LOD);
+  surfOrm = texture2D(roughnessMap, surfUv, SURF_LOD);
   #ifdef USE_NORMALMAP_TANGENTSPACE
-    surfNormalTexel = texture2D(normalMap, surfUv).xyz;
+    surfNormalTexel = texture2D(normalMap, surfUv, SURF_LOD).xyz;
+    #ifdef SURF_STRIPES
+      // 条纹状的凹凸（波纹板）还要单独处理：一个像素里装下的条纹超过 1/7 道，就开始把凹凸淡掉；到 1/3 道时完全抹平。
+      // 光靠缩小图不够 —— 法线记的是坡度（左坡朝左、右坡朝右），缩小图里它一直保持着一左一右的强反差，直到小到和屏幕像素"打架"。
+      // 抹平后的法线故意留短一点（0.8 而不是 1）：下面"远处防闪"那段会把它当成"这里原本有凹凸"，把高光摊开，墙面不会突然变成镜子
+      { float stripesPerPixel = fwidth(surfUv.x) * SURF_STRIPES;
+        surfNormalTexel = mix(surfNormalTexel, vec3(0.5, 0.5, 0.9), smoothstep(0.14, 0.34, stripesPerPixel)); }
+    #endif
   #endif
 #endif
 #ifdef SURF_FX

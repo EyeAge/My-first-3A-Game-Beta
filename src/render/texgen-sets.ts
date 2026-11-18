@@ -357,20 +357,24 @@ void surf(vec2 uv){
 }
 `,
 
-  // 瓦楞屋面板。0.762 米宽里 10 个波；2.286 米长一张板，板与板搭接处往上是滴水端，容易锈；
-  // 每 5 个波峰有一颗自攻钉。
+  // 瓦楞屋面板。波距 76.2 毫米；2.286 米长一张板，板与板搭接处往上是滴水端，容易锈；每 4 个波峰有一颗自攻钉。
+  //
+  // 一张贴图里放 8 个波（所以贴图宽 8 × 0.0762 = 0.6096 米），而不是照参考放 10 个。原因在缩小图（mipmap）：
+  // 显卡把贴图一次次对半缩小，远处用小图。8 是 2 的整数次幂，缩到"一个像素正好盖住半个波"时，波峰波谷刚好
+  // 平均成一片均匀的灰；10 个波缩到 16 像素宽时每个波只有 1.6 像素，对不齐，平均出来的是一种更粗的假条纹，
+  // 远处的墙上就会出现一圈圈的摩尔纹。
   corrugated: /* glsl */ `
 void surf(vec2 uv){
   // 波形：cz 在波峰是 1，波谷是 0
-  float w = uv.x * 10.0; float cz = 0.5 + 0.5 * cos(w * TAU);
+  float w = uv.x * 8.0; float cz = 0.5 + 0.5 * cos(w * TAU);
   float big = fbm(uv, vec2(2.0), 4, 1.0), fine = fbm(uv, vec2(160.0, 480.0), 2, 3.0);
   float streak = fbm(uv, vec2(40.0, 1.0), 3, 6.0), streak2 = fbm(uv, vec2(10.0, 1.0), 3, 16.0);
   // 搭接线，和它上方 32 厘米的锈区
   float lapV = smoothstep(0.004, 0.0015, abs(uv.y - 0.012) * 2.286);
   float lapZone = smoothstep(0.32, 0.0, (uv.y - 0.012) * 2.286) * step(0.012, uv.y);       // drip end of the upper sheet
-  // 自攻钉：每 5 个波峰一颗，钉头 6–8 毫米，外面一圈垫圈
-  float fi = floor(w + 0.5); float onC = step(mod(fi, 5.0), 0.5);
-  float fd = length(vec2((w - fi) / 10.0 * 0.762, (uv.y - 0.5) * 2.286));
+  // 自攻钉：每 4 个波峰一颗，钉头 6–8 毫米，外面一圈垫圈
+  float fi = floor(w + 0.5); float onC = step(mod(fi, 4.0), 0.5);
+  float fd = length(vec2((w - fi) * 0.0762, (uv.y - 0.5) * 2.286));
   float fast = onC * smoothstep(0.008, 0.006, fd), washer = onC * smoothstep(0.014, 0.011, fd) * (1.0 - fast);
   float rg = fbm(uv, vec2(90.0, 270.0), 3, 15.0);
   float which = smoothstep(0.45, 0.7, fbm(uv, vec2(3.0, 1.0), 3, 5.0));

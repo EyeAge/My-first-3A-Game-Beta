@@ -44,7 +44,7 @@ export const SETS = {
   brushed: { fn: 'brushed', size: 0.5, tile: 0.5, bump: 0.4 },
   rust: { fn: 'rust', size: 0.5, tile: 1.2, bump: 3 },
   diamond: { fn: 'diamond', size: 0.5, tile: 0.5, bump: 2 },
-  corrugated: { fn: 'corrugated', size: 0.5, tile: [0.762, 2.286], bump: 19 },
+  corrugated: { fn: 'corrugated', size: 0.5, tile: [0.6096, 2.286], bump: 19 },
   chainlink: { fn: 'chainlink', size: 0.5, tile: 0.5, bump: 5 },
   hazard: { fn: 'hazard', size: 0.5, tile: 1, bump: 2.5 },
   gunmetal: { fn: 'gunmetal', size: 0.5, tile: 0.25, bump: 0.3, param: [0.6] },
