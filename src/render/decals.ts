@@ -98,6 +98,7 @@ export class Decals {
   readonly mesh: THREE.InstancedMesh;
   private attr: THREE.InstancedBufferAttribute; // 每个实例：图集偏移 u、v，透明度
   private born = new Float32Array(MAX).fill(-1e9);
+  private peak = new Float32Array(MAX).fill(1);   // 每个贴花没开始淡出时的不透明度
   private cursor = 0; private time = 0;
 
   constructor() {
@@ -116,17 +117,20 @@ export class Decals {
     this.mesh.instanceMatrix.needsUpdate = true; this.attr.needsUpdate = true;
   }
 
-  /** 在 pos 处、法线为 n 的表面上贴一个。 */
-  add(pos: THREE.Vector3, nx: number, ny: number, nz: number, kind: DecalKind) {
+  /**
+   * 在 pos 处、法线为 n 的表面上贴一个。
+   * size 是边长（米），不给就按种类在各自的范围里随机；alpha 是不透明度（沙袋、轮胎上的印子要淡一些）。
+   */
+  add(pos: THREE.Vector3, nx: number, ny: number, nz: number, kind: DecalKind, size?: number, alpha = 1) {
     const i = this.cursor; this.cursor = (this.cursor + 1) % MAX;
     const cells = CELLS[kind], cell = cells[(Math.random() * cells.length) | 0];
-    const [s0, s1] = SIZE[kind], s = s0 + Math.random() * (s1 - s0);
+    const [s0, s1] = SIZE[kind], s = size ?? s0 + Math.random() * (s1 - s0);
     _n.set(nx, ny, nz);
     _q.setFromUnitVectors(_z, _n).multiply(_r.setFromAxisAngle(_z, Math.random() * 6.283)); // 贴到表面上，再绕法线随机转个角度
     // 沿法线抬起一点；每个贴花抬的高度略有不同，叠在一起时也不会互相闪烁
     _p.copy(pos).addScaledVector(_n, 0.008 + i * 0.00003);
     this.mesh.setMatrixAt(i, _m.compose(_p, _q, _s.set(s, s, 1)));
-    this.attr.setXYZ(i, cell[0], cell[1], 1);
+    this.attr.setXYZ(i, cell[0], cell[1], alpha); this.peak[i] = alpha;
     this.born[i] = this.time;
     this.mesh.instanceMatrix.needsUpdate = true; this.attr.needsUpdate = true;
   }
@@ -137,7 +141,7 @@ export class Decals {
     for (let i = 0; i < MAX; i++) {
       const cur = this.attr.getZ(i);
       if (cur <= 0) continue;
-      const a = Math.min(1, Math.max(0, (LIFE - (this.time - this.born[i])) / FADE));
+      const a = this.peak[i] * Math.min(1, Math.max(0, (LIFE - (this.time - this.born[i])) / FADE));
       if (a !== cur) { this.attr.setZ(i, a); dirty = true; }
     }
     if (dirty) this.attr.needsUpdate = true;

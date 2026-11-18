@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { clamp, damp } from '../core/math';
 import type { Input } from '../core/input';
+import { MuzzleFlash } from '../render/muzzleflash';
 import type { Colliders, RayHit } from '../world/colliders';
 import { QUAY_X } from '../world/port';
 import type { Enemies, World } from './enemies';
@@ -25,7 +26,9 @@ export class Weapon {
   private cooldown = 0; private meleeT = 0;
   private kickZ = 0; private kickR = 0; private bloom = 0;
   private swayX = 0; private swayY = 0;
-  private flash: THREE.Mesh; private flashT = 0;
+  private flash = new MuzzleFlash();
+  // 枪管的热度：每开一枪 +0.05，每秒散掉 0.2。连射一秒多以后枪口开始发红；停手时如果还很热，枪口会冒一阵细烟
+  private heat = 0; private sinceShot = 9; private smokeLeft = 0; private smokeTick = 0;
   private muzzle = new THREE.Object3D();
   private dot: THREE.Object3D;
   private mag: THREE.Object3D; private bolt: THREE.Object3D; private handle: THREE.Object3D; private left: THREE.Object3D;
@@ -45,12 +48,8 @@ export class Weapon {
     g.add(torch, torch.target);
     // 夜里枪身是黑的，只靠环境光看不出细节：在枪的左上方挂一盏只照得到一米多远的小灯，专门给枪打轮廓光
     const fill = new THREE.PointLight(0xfff0dc, 2.2, 2, 2); fill.position.set(-0.25, 0.35, -0.15); this.view.add(fill);
-    // 枪口焰：两片交叉的发光面片，只显示一两帧
-    const flashMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(9, 5, 1.6), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false });
-    this.flash = new THREE.Mesh(new THREE.PlaneGeometry(0.16, 0.16), flashMat);
-    const f2 = new THREE.Mesh(new THREE.PlaneGeometry(0.07, 0.3), flashMat); f2.rotation.y = Math.PI / 2; f2.position.z = -0.08;
-    this.flash.add(f2);
-    this.flash.position.set(0, 0, built.muzzleZ - 0.06); this.flash.visible = false; g.add(this.flash);
+    // 枪口焰：挂在枪口上的一个专用小网格，形状由着色器现算，每一枪都不一样（见 render/muzzleflash.ts）
+    this.flash.mesh.position.set(0, 0, built.muzzleZ); g.add(this.flash.mesh);
 
     g.traverse((o) => { if ((o as THREE.Mesh).isMesh) (o as THREE.Mesh).frustumCulled = false; });
     // 把枪沿前后方向压扁一些：等效于给枪模单独用一个更窄的视野，避免近大远小被夸张得变形
@@ -58,12 +57,13 @@ export class Weapon {
     this.view.add(g);
   }
 
-  reset() { this.lightOn = false; this.torch.intensity = 0; this.ammo = MAG; this.reserve = 120; this.reloading = 0; this.cooldown = 0; this.ads = 0; this.bloom = 0; this.hitMarker = 0; }
+  reset() { this.lightOn = false; this.torch.intensity = 0; this.ammo = MAG; this.reserve = 120; this.reloading = 0; this.cooldown = 0; this.ads = 0; this.bloom = 0; this.hitMarker = 0; this.heat = 0; this.smokeLeft = 0; }
   addReserve(n: number, cap = 180) { this.reserve = Math.min(cap, this.reserve + n); }
   get reloadProgress() { return this.reloading > 0 ? 1 - this.reloading / RELOAD : 0; }
 
   update(dt: number, t: number, input: Input, player: Player, colliders: Colliders, enemies: Enemies, world: World, stats: Stats, wantAds: boolean) {
     const { effects, decals, audio, camera } = world;
+    effects.colliders ??= colliders;      // 特效要查"这里晒不晒得到太阳""脚下地面多高"，把碰撞世界交给它（只在第一次赋值）
     this.cooldown -= dt; this.meleeT -= dt;
     this.hitMarker = Math.max(0, this.hitMarker - dt * 4);
     this.ads = damp(this.ads, wantAds && this.reloading <= 0 && !player.sprinting ? 1 : 0, 14, dt);
@@ -117,28 +117,46 @@ export class Weapon {
           stats.hits++;
           this.hitMarker = 1; this.hitWeak = eh.weak;
           if (eh.weak) audio.weak(); else audio.hit();
-          effects.sparks(_p, -d.x, 0.3, -d.z, eh.weak ? 12 : 6);
+          effects.impact(_p, -d.x, -d.y, -d.z, 'enemy', d);     // 敌人身上没有现成的法线，就当被打的那一面正对着子弹
           enemies.damage(eh.enemy, eh.weak ? 58 : 24, eh.weak);
         } else if (water) {
-          effects.splash(_p, 0.8);
+          effects.impact(_p, 0, 1, 0, 'water');
         } else if (wallT < 300) {
-          effects.sparks(_p, this.hit.nx, this.hit.ny, this.hit.nz, 7);
-          effects.dust(_p, this.hit.nx, this.hit.ny, this.hit.nz);
-          decals.add(_p, this.hit.nx, this.hit.ny, this.hit.nz, this.hit.ny > 0.5 && _p.y < 0.05 ? 'ground' : 'metal');
+          // 打到的是什么材质，由碰撞盒上的标记说了算。没标记的：地面当水泥，其余的当金属（港区里没标记的大多是集装箱和钢架）
+          const ground = this.hit.ny > 0.5 && _p.y < 0.05;
+          const surface = this.hit.surface ?? (ground ? 'concrete' : 'metal');
+          effects.impact(_p, this.hit.nx, this.hit.ny, this.hit.nz, surface, d);
+          // 弹孔：金属是带亮边的孔，水泥和木头是崩坑（木头上的小一些），沙袋、轮胎只留一小块发黑的印子
+          if (surface === 'metal') decals.add(_p, this.hit.nx, this.hit.ny, this.hit.nz, 'metal');
+          else if (surface === 'dirt' || surface === 'rubber') decals.add(_p, this.hit.nx, this.hit.ny, this.hit.nz, 'scorch', 0.2, 0.8);
+          else decals.add(_p, this.hit.nx, this.hit.ny, this.hit.nz, 'ground', surface === 'wood' ? 0.16 + Math.random() * 0.06 : undefined);
           const [vol, pan] = enemies.spatial(_p);
           if (vol > 0.55) audio.impact(vol * 0.6, pan);
         }
         audio.shot();
         input.rumble(0.12, 0.45, 45);
-        effects.flash(_m, 260, 0.05);
-        this.flash.visible = true; this.flashT = 0.035;
-        this.flash.rotation.z = Math.random() * 6.283; this.flash.scale.setScalar(0.8 + Math.random() * 0.6);
+        effects.flash(_m, 45, 0.05, 0xffb060, 9);              // 枪口的闪光照亮周围：亮度 45，照 9 米，0.05 秒熄灭
+        this.flash.fire(this.ads);
+        this.heat = Math.min(1.3, this.heat + 0.05); this.sinceShot = 0;
         const k = 1 - this.ads * 0.45;
         player.kick((0.011 + Math.random() * 0.006) * k, (Math.random() - 0.5) * 0.012 * k);
         this.kickZ += 0.028; this.kickR += 0.035; this.boltK = 1; this.bloom = Math.min(3, this.bloom + 0.55);
       } else if (input.pressed('MouseFire') || this.cooldown < -0.25) { this.cooldown = 0.25; audio.empty(); }
     }
-    if (this.flashT > 0) { this.flashT -= dt; if (this.flashT <= 0) this.flash.visible = false; }
+    this.flash.update(dt, this.heat);
+    // 枪口余烟：连射之后刚停手（0.11 秒没再开枪）而枪管还热，就冒一阵细烟，越热冒得越久
+    const wasFiring = this.sinceShot <= 0.11;
+    this.sinceShot += dt;
+    if (wasFiring && this.sinceShot > 0.11 && this.heat > 0.4) this.smokeLeft = Math.min(1.6, this.heat * 1.3);
+    if (this.smokeLeft > 0) {
+      this.smokeLeft -= dt; this.smokeTick -= dt;
+      if (this.smokeTick <= 0) {
+        this.smokeTick = 0.085;
+        this.muzzle.getWorldPosition(_m);
+        effects.puff(_m, { size: 0.1 + this.smokeLeft * 0.06, life: 1.3, rise: 0.5, count: 1, alpha: 0.22 });
+      }
+    }
+    this.heat = Math.max(0, this.heat - dt * 0.2);
 
     // ---- 枪模动画：开镜位移、惯性晃动、后坐、换弹、冲刺放低
     this.kickZ = damp(this.kickZ, 0, 16, dt); this.kickR = damp(this.kickR, 0, 14, dt);
