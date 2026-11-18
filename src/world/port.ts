@@ -4,7 +4,13 @@ import { Colliders } from './colliders';
 import { buildDetails, type BoxSpec } from './details';
 import { NavGrid } from './nav';
 import { weathered } from '../render/weathered';
-import { barrierMesh, coneMesh, crateMesh, drumMesh, flares, lightCones } from './props';
+import { barrierMesh, flares, lightCones } from './props';
+import { buildAnnex } from './annex';
+import { buildForklift } from './forklift';
+import { placeOnce, PropField } from './propfield';
+import { barrel, cableReel, cardboardBoxes, crateStack, crateWood, ibcTote, jerryCan, pallet, palletStack, sandbags, tarpCargo, tireStack, trafficCone } from './props/cargo';
+import type { RainShelter } from './rain';
+import { buildWorkshop, placeWorkshop } from './workshop';
 import type { ReflectionUniforms } from '../render/reflection';
 import { buildGround } from './ground';
 import { SUN_COLOR, SUN_INTENSITY } from './atmosphere';
@@ -34,6 +40,12 @@ export interface Port {
   sun: THREE.DirectionalLight;
   ground: THREE.Mesh;
   reflection: ReflectionUniforms;
+  /** 室内范围（维修车间）。体积光、枪身的环境光都要知道"哪里算屋里"。 */
+  interior: THREE.Box3;
+  /** 给雨用的：哪个盒子里不下雨、屋顶哪里有洞、哪条屋檐在滴水。 */
+  shelter: RainShelter;
+  /** 拍室内环境探针的位置（屋子正中、一人多高）。 */
+  probePos: THREE.Vector3;
   setLampCount(n: number): void;
   update(t: number, focus: THREE.Vector3): void;
 }
@@ -118,9 +130,13 @@ export function buildPort(progress: (msg: string) => void): Port {
   const segZs = [-63.4, -31.7, 0, 31.7, 63.4];
   for (const bx of blockXs) for (const sz of segZs) {
     if (bx === 8 && sz === 0) continue; // 留出甲号中继所在的空场
+    // 车间东门正对着这个堆位。太阳只有 13° 高，一只 2.6 米高的箱子就能拖出 11 米长的影子，
+    // 码在这里的箱子会把门口整个罩进阴影里 —— 所以空出来当门前的场地
+    if (bx === -58 && sz === 0) continue;
     const blockColor = rng() < 0.35 ? pick(rng, PALETTE) : undefined; // 有些堆位是同一家船公司的货
     for (let row = -1; row <= 1; row++) for (const bay of [-1, 1]) {
-      const h = rng() < 0.07 ? 0 : rng() < 0.12 ? 4 : 1 + Math.floor(rng() * 3);
+      let h = rng() < 0.07 ? 0 : rng() < 0.12 ? 4 : 1 + Math.floor(rng() * 3);
+      if (bx === -44 && sz === 0) h = Math.min(h, 2); // 再往东一排离门 32 米：码两层以内，影子够不到门
       stack(bx + row * (CW + 0.2), sz + bay * (CL / 2 + 0.15), h, 0, blockColor);
     }
   }
@@ -269,23 +285,35 @@ export function buildPort(progress: (msg: string) => void): Port {
   br2.rotation.y = Math.PI; br2.position.set(84, 31.7, 12.97);
   group.add(win, win2, br, br2);
 
-  // ---------------------------------------------------------------- 仓库
-  const wallMat = new THREE.MeshStandardMaterial({ color: 0x59636a, roughness: 0.55, metalness: 0.25, normalMap: corrugationNormal(110) });
-  const wh = new THREE.Mesh(new THREE.BoxGeometry(32, 11, 72), wallMat);
-  wh.position.set(-90, 5.5, 0); wh.castShadow = wh.receiveShadow = true;
-  group.add(wh);
-  colliders.add(-90, 5.5, 0, 32, 11, 72);
-  box(-90, 11.3, 0, 33.4, 0.7, 73.4, 0x30363a);
-  for (const z of [-22, 22]) { box(-73.9, 3.2, z, 0.25, 6.4, 8, 0x23282c); box(-73.8, 6.6, z, 0.4, 0.5, 8.6, 0xb38d2c); }
+  // ---------------------------------------------------------------- 维修车间和附属库房
+  progress('正在搭建维修车间');
+  // 车间是按参考的坐标搭的（workshop.ts），这里整体平移 (−88, +19.5) 挪到地图西侧，占 x −104…−76、z −8.5…8.5。
+  // 朝向不变：东门（z −2.5…2.5）正对堆场和太阳，贴着海面来的晨光能从门洞一直照到屋子深处；南面是卷帘门。
+  // 屋外那根电缆从门前的路灯杆顶拉到东南檐角（坐标是车间自己的，所以要减去平移量）
+  const shop = placeWorkshop(buildWorkshop({ mastCables: [[[-63.4 + 88, 9.3, 0 - 19.5], [12.3, 7.3, -11.3], 1]] }), -88, 19.5);
+  group.add(shop.group);
+  for (const b of shop.boxes) {
+    if (b.max[1] < 0.3) continue; // 3 厘米厚的地坪：不登记碰撞，直接走上去就行（和 propfield.ts 里"又矮又贴地的不登记"是同一个道理）
+    colliders.add((b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, (b.min[2] + b.max[2]) / 2, b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2], b);
+  }
+  // 屋里的 4 盏点光：太阳照不到的角落靠它们给一层暖色的底光。它们很弱（正下方地面的照度大约只有太阳的九分之一），不投影
+  for (const l of shop.lights) {
+    const lamp = new THREE.PointLight(l.color, l.intensity, l.distance, 2);
+    lamp.position.set(l.pos[0], l.pos[1], l.pos[2]);
+    group.add(lamp);
+  }
+  const interior = new THREE.Box3(new THREE.Vector3(...shop.interior.min), new THREE.Vector3(...shop.interior.max));
+  const shelter: RainShelter = { boxes: [interior], holes: shop.roofHoles, eave: { x0: interior.min.x, x1: interior.max.x, z: interior.max.z + 0.28, y: 7 } };
+  // 北边隔一条 4 米的夹道是三号库房：进不去，当背景
+  group.add(placeOnce(buildAnnex(), -90, -23.5, 0, colliders));
   const plane = (tex: THREE.Texture, w: number, h: number, x: number, y: number, z: number, ry: number, emissive = 0) => {
     const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshStandardMaterial({ map: tex, roughness: 0.6, metalness: 0.1, emissiveMap: emissive ? tex : null, emissive: new THREE.Color(emissive ? 0xffffff : 0), emissiveIntensity: emissive }));
     m.position.set(x, y, z); m.rotation.y = ry;
     group.add(m);
     return m;
   };
-  plane(signTexture(['四号泊位维修车间', '激战港区 · 港务局'], { w: 1024, h: 180, bg: '#1b2227', fg: '#e8e4da', size: 84 }), 17, 3, -73.85, 8.9, 0, Math.PI / 2, 0.25);
-  plane(signTexture(['危险', '请勿靠近 · 自动作业车辆'], { stripe: true }), 2.4, 1.2, -73.85, 2.4, 11, Math.PI / 2);
-  plane(signTexture(['门禁控制', '仅限授权人员'], { bg: '#b53a24', fg: '#f3ece0' }), 2.0, 1.0, -73.85, 2.4, -11, Math.PI / 2);
+  plane(signTexture(['危险', '请勿靠近 · 自动作业车辆'], { stripe: true }), 2.4, 1.2, -75.9, 2.6, -13.6, Math.PI / 2);
+  plane(signTexture(['门禁控制', '仅限授权人员'], { bg: '#b53a24', fg: '#f3ece0' }), 2.0, 1.0, -75.9, 2.6, -33.2, Math.PI / 2);
 
   // ---------------------------------------------------------------- 围墙与岸壁
   const WALL = 0x4a4d4e;
@@ -307,26 +335,28 @@ export function buildPort(progress: (msg: string) => void): Port {
 
   // ---------------------------------------------------------------- 中继
   const relays: Relay[] = [];
-  const relayDefs: [string, string, number, number, number][] = [['甲号中继 · 堆场', '甲', 8, 0, 0], ['乙号中继 · 仓库', '乙', -72.4, 0, Math.PI / 2], ['丙号中继 · 码头', '丙', 48, -8, 0]];
+  // 乙号在车间正中：屋脊线的正下方、东门和南门两条通道的交点上，从两个门口都能一眼看到。东墙破口漏进来的那束光正好罩着它
+  const relayDefs: [string, string, number, number, number, boolean][] = [['甲号中继 · 堆场', '甲', 8, 0, 0, false], ['乙号中继 · 车间', '乙', -90, 0, Math.PI / 2, true], ['丙号中继 · 码头', '丙', 48, -8, 0, false]];
   const beamGeo = new THREE.CylinderGeometry(0.16, 0.16, 70, 6, 1, true);
-  relayDefs.forEach(([name, short, x, z, ry], id) => {
+  relayDefs.forEach(([name, short, x, z, ry, indoor], id) => {
+    const top = indoor ? 4.6 : 8.5; // 天线杆：屋里的那根矮一截，不然要顶到屋架
     colliders.add(x, 1.1, z, 1.5, 2.2, 1.5);
     box(x, 1.1, z, 1.4, 2.2, 1.0, 0x2c3338);
     box(x, 2.3, z, 1.6, 0.12, 1.2, 0x1b1f22);
-    beam(x, 2.3, z, x, 8.5, z, 0.14, 0x565c60);
-    box(x, 8.0, z, 1.6, 0.9, 0.2, 0x9a9d9a);
+    beam(x, 2.3, z, x, top, z, 0.14, 0x565c60);
+    box(x, top - 0.5, z, 1.6, 0.9, 0.2, 0x9a9d9a);
     const sign = plane(signTexture([name, '港区主控上行链路 · 检修前请断电'], { bg: '#1b2227', fg: '#ffb347', size: 70 }), 1.25, 0.62, x, 1.55, z, ry, 0.6);
     sign.position.x += Math.sin(ry) * 0.52; sign.position.z += Math.cos(ry) * 0.52;
     if (ry === 0) { const s2 = sign.clone(); s2.rotation.y = Math.PI; s2.position.z = z - 0.52; group.add(s2); }
     const lampMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(5, 0.5, 0.3) });
     const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.16, 10, 8), lampMat);
-    lamp.position.set(x, 8.75, z);
+    lamp.position.set(x, top + 0.25, z);
     group.add(lamp);
     // 一束直通天空的信号光柱，隔着几排集装箱也能看见中继在哪
     const shaftMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(1.6, 0.5, 0.12), transparent: true, opacity: 0.32, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false });
     const shaft = new THREE.Mesh(beamGeo, shaftMat);
     shaft.position.set(x, 8.5 + 35, z);
-    group.add(shaft);
+    if (!indoor) group.add(shaft); // 屋里的中继不要光柱：它会穿过屋顶
     const relay: Relay = {
       id, name, short, pos: new THREE.Vector3(x, 1.2, z), cut: false,
       setCut() { this.cut = true; lampMat.color.setRGB(0.3, 4, 1.2); shaft.visible = false; },
@@ -366,27 +396,74 @@ export function buildPort(progress: (msg: string) => void): Port {
   group.add(lightCones(lampPos));
   let lampCount = 6;
 
-  // ---------------------------------------------------------------- 杂物：护栏、油桶、木箱、路锥
-  const drums: { x: number; z: number; c: number; rot: number }[] = [];
-  const cones: { x: number; z: number; rot: number; tilt: number }[] = [];
+  // ---------------------------------------------------------------- 杂物
+  // 道具不是均匀撒的，而是"一组一组"摆：每一组像是有人干活干到一半留下的 —— 叉车叉着货停在半路、
+  // 几只油桶码在托盘上旁边倒了一只、木箱堆边上靠着两块托盘。这样既是掩体，也让场地像真的有人用过。
   const barriers: { x: number; z: number; alongX: boolean }[] = [];
-  const crateList: { x: number; y: number; z: number; s: number; h: number; c: number; rot: number }[] = [];
   const barrier = (x: number, z: number, alongX: boolean) => { barriers.push({ x, z, alongX }); colliders.add(x, 0.45, z, alongX ? 2.4 : 0.6, 0.9, alongX ? 0.6 : 2.4); };
-  const crates = (x: number, z: number, n: number) => {
-    for (let i = 0; i < n; i++) { const s = 1.1 + rng() * 0.2; crateList.push({ x: x + (i % 2) * 1.3, y: 0.55 + Math.floor(i / 2) * 1.12, z: z + (rng() - 0.5) * 0.2, s, h: 1.1, c: pick(rng, [0xffffff, 0xd8d0c0, 0xb9c4a8]), rot: (rng() - 0.5) * 0.16 }); }
-    colliders.add(x + 0.65, Math.ceil(n / 2) * 0.56, z, 2.6, Math.ceil(n / 2) * 1.12, 1.4);
-  };
-  const drumCluster = (x: number, z: number, n: number) => {
-    for (let i = 0; i < n; i++) drums.push({ x: x + (i % 3) * 0.66, z: z + Math.floor(i / 3) * 0.66, c: pick(rng, [0x1f5488, 0x9a3b26, 0x2f6240, 0x70787c]), rot: rng() * 6.283 });
-    colliders.add(x + 0.66, 0.46, z + (Math.ceil(n / 3) - 1) * 0.33, 2.0, 0.92, Math.ceil(n / 3) * 0.66 + 0.1);
-  };
   for (const z of [70, 22, -24, -70]) { barrier(-21.5, z, true); barrier(-14.5, z - 9, true); }
   for (const z of [60, 34, -4, -56, -84]) { barrier(38 + rng() * 14, z, rng() < 0.5); barrier(34 + rng() * 20, z + 6, rng() < 0.5); }
   barrier(-66, 20, false); barrier(-70, -26, false); barrier(8, -8.5, true); barrier(8, 8.5, true);
-  crates(-16.6, 54, 4); crates(-20.6, -48, 3); crates(42, 40, 4); crates(52, -52, 3); crates(-68, -8, 4); crates(38, -14, 2); crates(50, 76, 4);
-  drumCluster(-24.4, 8, 6); drumCluster(-12.6, -40, 5); drumCluster(30, 30, 6); drumCluster(54, 4, 4); drumCluster(-64.5, 30, 6); drumCluster(44, -86, 5);
-  for (let i = 0; i < 26; i++) cones.push({ x: -25 + rng() * 14, z: -95 + rng() * 190, rot: rng() * 6.283, tilt: rng() < 0.12 ? 1 : 0 });
-  for (let i = 0; i < 16; i++) cones.push({ x: 30 + rng() * 28, z: -95 + rng() * 190, rot: rng() * 6.283, tilt: rng() < 0.12 ? 1 : 0 });
+
+  const props = new PropField();
+  const jit = (a: number) => (rng() - 0.5) * 2 * a;        // ±a 之间的随机数：东西不会摆得横平竖直
+  const COLORS = ['blue', 'red', 'green', 'yellow'] as const;
+  /** 一小片油桶：n 只立着的挤在一起，外加一只倒在旁边的。 */
+  const barrels = (x: number, z: number, n: number, fallen = true) => {
+    for (let i = 0; i < n; i++) props.place(barrel({ color: pick(rng, COLORS), seed: i, open: rng() < 0.15 }), x + (i % 3) * 0.66 + jit(0.04), z + Math.floor(i / 3) * 0.66 + jit(0.04), rng() * 6.28);
+    if (fallen) props.place(barrel({ color: pick(rng, COLORS), lying: true, seed: n }), x + 2.3 + jit(0.3), z + 0.4 + jit(0.4), rng() * 6.28);
+  };
+  /** 木箱堆：一摞三只的塔，旁边一两只单的，再靠一摞托盘。 */
+  const crates = (x: number, z: number, yaw: number, extra = 2) => {
+    const c = Math.cos(yaw), s = Math.sin(yaw), at = (dx: number, dz: number): [number, number] => [x + dx * c + dz * s, z - dx * s + dz * c];
+    props.place(crateStack({ seed: Math.floor(rng() * 4) }), ...at(0, 0), yaw + jit(0.06));
+    for (let i = 0; i < extra; i++) props.place(crateWood({ seed: i + Math.floor(rng() * 3) }), ...at(1.7 + i * 1.5, jit(0.25)), yaw + jit(0.2));
+    props.place(palletStack({ count: 3 + Math.floor(rng() * 5), seed: Math.floor(rng() * 3) }), ...at(-1.8, 0.2), yaw + jit(0.15));
+  };
+  /** 一排路锥，从 (x, z) 起朝 yaw 方向每隔 gap 米一只，偶尔倒一只。 */
+  const cones = (x: number, z: number, yaw: number, n: number, gap = 2.2) => {
+    for (let i = 0; i < n; i++) {
+      const lying = rng() < 0.14;
+      props.place(trafficCone({ lying, seed: i }), x + Math.cos(yaw) * gap * i + jit(0.12), z - Math.sin(yaw) * gap * i + jit(0.12), lying ? rng() * 6.28 : jit(0.3));
+    }
+  };
+
+  // 主干道两侧
+  crates(-16.8, 54, 0.05); barrels(-24.6, 8, 5); crates(-20.8, -48, 3.1, 1); barrels(-12.8, -40, 4);
+  cones(-25.2, 62, Math.PI / 2, 5); cones(-10.8, -8, -Math.PI / 2, 4); cones(-25.2, -66, Math.PI / 2, 4, 2.6);
+  props.place(tarpCargo({ seed: 1 }), -11.6, 28, Math.PI / 2 + jit(0.05));
+  props.place(cableReel({ seed: 0 }), -24.2, -20, 0.4); props.place(cableReel({ seed: 1 }), -23.9, -22.6, 1.9);
+  // 码头前沿
+  crates(42, 40, 1.57); crates(52, -52, 0.1, 1); crates(50, 76, -0.2); barrels(30, 30, 6); barrels(54, 4, 3); barrels(44, -86, 5, false);
+  props.place(ibcTote({ seed: 0 }), 56.4, 6.2, 0.04); props.place(ibcTote({ seed: 1 }), 56.5, 7.6, -0.03);
+  props.place(tarpCargo({ seed: 2 }), 38.6, -14, 0.08); props.place(tireStack({ count: 4 }), 41.4, -15.2, 0.7); props.place(tireStack({ count: 2, seed: 1 }), 42.5, -14.3, 2.1);
+  props.place(sandbags({ courses: 4 }), 47.5, 70.5, 0.02); props.place(sandbags({ courses: 3, seed: 1 }), 53.8, 82, Math.PI / 2);
+  cones(31.5, -6, Math.PI / 2, 4, 3); cones(31.5, 52, Math.PI / 2, 3, 3);
+  // 甲号中继旁：一台叉着木箱停在半路的叉车。货叉朝着 (cos yaw, −sin yaw)，托盘和木箱就顺着这个方向放在叉面上
+  {
+    const x = 5.9, z = 4.6, yaw = -0.22, fx = x + Math.cos(yaw) * 1.42, fz = z - Math.sin(yaw) * 1.42;
+    group.add(placeOnce(buildForklift({ seed: 6, forksUp: 0.3 }), x, z, yaw, colliders));
+    props.place(pallet({ seed: 1 }), fx, fz, yaw, 0.535);
+    props.place(crateWood({ seed: 2 }), fx, fz, yaw + 0.05, 0.679);
+    props.place(palletStack({ count: 5 }), 3.4, 7.6, 0.3); props.place(pallet({ broken: true }), 2.2, 6.1, 1.1);
+  }
+  // 车间东门外的空场：只放矮的东西 —— 高的会挡住照进门的阳光
+  props.place(sandbags({ courses: 3 }), -66.5, -5.2, Math.PI / 2 + 0.06); props.place(sandbags({ courses: 3, seed: 1 }), -58.8, 6.4, 0.1);
+  props.place(pallet({ seed: 2 }), -70.2, 6.6, 0.25); props.place(cardboardBoxes({ seed: 1 }), -70.2, 6.6, 0.3, 0.144);
+  props.place(crateWood({ seed: 1 }), -61.5, -8.6, 0.4); props.place(crateWood({ seed: 3 }), -59.9, -9.1, -0.2);
+  cones(-73, -4.2, 0, 3, 2.4); cones(-73, 4.2, 0, 3, 2.4); barrels(-55.6, -3.5, 3);
+  props.place(jerryCan({ color: 'red' }), -60.7, -7.5, 0.8); props.place(jerryCan({ color: 'olive' }), -60.9, -7.1, 2.2);
+  // 车间南面的水泥场院：卷帘门外是装卸区，靠墙码着备件
+  crates(-99, 13.5, 0.03); props.place(tireStack({ count: 5 }), -85.6, 9.6, 0.2); props.place(tireStack({ count: 4, seed: 1 }), -84.4, 9.7, 1.3); props.place(tireStack({ count: 3, seed: 2 }), -84.9, 10.9, 2.6);
+  props.place(ibcTote({ seed: 2 }), -80.4, 10.2, Math.PI / 2); props.place(ibcTote({ seed: 0 }), -78.9, 10.3, Math.PI / 2 + 0.05);
+  props.place(cableReel({ seed: 2 }), -81.5, 21, 0.2); props.place(tarpCargo({ seed: 0 }), -98.4, 24.5, 1.52); barrels(-78.6, 26.5, 5);
+  props.place(palletStack({ count: 9 }), -88.2, 27.4, 0.1); props.place(palletStack({ count: 6, seed: 1 }), -86.7, 27.6, -0.08); props.place(pallet({ seed: 3 }), -86.4, 25.9, 0.5);
+  cones(-94.6, 11, -Math.PI / 2, 4, 3); cones(-88.4, 11, -Math.PI / 2, 4, 3);
+  // 车间里那台：停在东南角，货叉落地，脚下垫着一块钢板（位置照参考，换算到我们的坐标）
+  group.add(placeOnce(buildForklift({ seed: 21, interior: true }), -79.7, 5.6, 2.75, colliders, 0.03));
+  // 西边原有的几处掩体
+  barrels(-64.5, 30, 5); props.place(crateStack({ seed: 2 }), -68.3, -40.6, 0.1); props.place(crateWood({ seed: 0 }), -66.6, -40.2, 0.3);
+  group.add(props.build(colliders));
 
   group.add(buildDetails(yard, CW, CH, CL, colliders, BOUNDS));
 
@@ -407,8 +484,7 @@ export function buildPort(progress: (msg: string) => void): Port {
   beamList.forEach((b, i) => { beamMesh.setMatrixAt(i, b.m); beamMesh.setColorAt(i, col.setHex(b.c)); });
   beamMesh.castShadow = beamMesh.receiveShadow = true;
   group.add(beamMesh);
-  group.add(drumMesh(drums), barrierMesh(barriers), crateMesh(crateList));
-  group.add(coneMesh(cones.filter((c) => !colliders.pointInside(c.x, 0.3, c.z))));
+  group.add(barrierMesh(barriers));
 
   // ---------------------------------------------------------------- 光照
   // 全场只有这一盏"真灯"：贴着海面照过来的太阳。没有环境光灯 —— 阴影里的亮度来自天空的环境贴图（main.ts）。
@@ -421,11 +497,13 @@ export function buildPort(progress: (msg: string) => void): Port {
   const order = lampPos.map((_, i) => i);
   let lastSort = -1;
   return {
-    group, colliders, nav, relays, evacPos, sun, ground, reflection,
+    group, colliders, nav, relays, evacPos, sun, ground, reflection, interior, shelter,
+    probePos: new THREE.Vector3((interior.min.x + interior.max.x) / 2, 2.4, (interior.min.z + interior.max.z) / 2),
     playerStart: new THREE.Vector3(-18, 0, 93),
     setLampCount(n) { lampCount = n; lastSort = -1; },
     update(t, focus) {
       flare.uniforms.uTime.value = t;
+      shop.update?.(t); // 排风扇
       if (t - lastSort > 0.4) {
         lastSort = t;
         order.sort((a, b) => lampPos[a].distanceToSquared(focus) - lampPos[b].distanceToSquared(focus));

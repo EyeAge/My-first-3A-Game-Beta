@@ -158,14 +158,13 @@ export function buildDetails(containers: BoxSpec[], W: number, H: number, L: num
     if (rng() < 0.2) { [x, z] = side(-0.58 * (ax ? -1 : 1)); wall('hazard', x, c.y + 0.62, z, ax, az, 0.44, 0.44); }
   }
 
-  // ---- 围墙和仓库外墙上的水渍
+  // ---- 围墙上的水渍（车间和库房的外墙有自己的做旧，不用这里的贴花）
   for (let x = bounds.minX + 3; x < bounds.maxX - 3; x += 3 + rng() * 6) {
     const h = 1.6 + rng() * 2.2;
     wall('grime', x, 4.4 - h / 2, bounds.minZ, 0, 1, 1.2 + rng() * 1.6, h);
     wall('grime', x + 2, 4.4 - h / 2, bounds.maxZ, 0, -1, 1.2 + rng() * 1.6, h);
   }
   for (let z = bounds.minZ + 3; z < bounds.maxZ - 3; z += 3 + rng() * 6) { const h = 1.6 + rng() * 2.2; wall('grime', bounds.minX, 4.4 - h / 2, z, 1, 0, 1.2 + rng() * 1.6, h); }
-  for (let z = -34; z < 34; z += 2.5 + rng() * 4) { const h = 2.5 + rng() * 4; wall(rng() < 0.5 ? 'rust' : 'grime', -74, 11 - h / 2, z, 1, 0, 1.4 + rng() * 2, h); }
 
   // ---- 地面：油渍、裂缝、井盖、轮胎印
   const free = (x: number, z: number, r: number) => !colliders.pointInside(x, 0.3, z) && !colliders.pointInside(x + r, 0.3, z) && !colliders.pointInside(x - r, 0.3, z) && !colliders.pointInside(x, 0.3, z + r) && !colliders.pointInside(x, 0.3, z - r);
