@@ -284,13 +284,6 @@ const STEEL = new THREE.MeshStandardMaterial({ color: 0xb9bec2, roughness: 0.22,
 const BOLT = new THREE.MeshBasicMaterial({ color: new THREE.Color(0xff6a2a).multiplyScalar(14) });
 
 const MAX_BOLTS = 32, MAX_WRECKS = 5;
-/**
- * 音量低于这个数就干脆不播。不只是省事：spatial() 给八十多米外的声源算出来的音量正好是 0，
- * 而合成音效用的"指数渐变"不接受 0（浏览器会直接抛异常）。异常从 update() 里冒出去，这一帧后面的事就都不做了 ——
- * 比如远处一架无人机坠地爆炸：声音一抛异常，它就来不及被移除，于是下一帧接着炸、接着抛，画面看着像卡死。
- * 后加的音效方法自己会拦，老的几个（enemyShot / explode / bark）不拦，所以在调用的地方拦。
- */
-const MIN_VOL = 0.02;
 interface Bolt { live: boolean; x: number; y: number; z: number; dx: number; dy: number; dz: number; fromX: number; fromY: number; fromZ: number; speed: number; dmg: number; life: number; len: number; whizzed: boolean }
 
 // ---------------------------------------------------------------------------
@@ -1168,7 +1161,7 @@ export class Enemies {
           if (dist < S.lungeHit && player.alive && level) {
             this.onPlayerHit(S.lungeDamage, pos);
             const [vol, pan] = this.spatial(pos);
-            if (vol > MIN_VOL) audio.bark(vol, pan);
+            audio.bark(vol, pan);
             audio.crash(vol * 0.6, pan, 0.8);
             if (e.kind === 'hound') e.sP.v -= 4;
             e.esT = 0;
@@ -1686,7 +1679,7 @@ export class Enemies {
     b.speed = speed; b.dmg = dmg; b.life = 1.3; b.len = 0; b.whizzed = false;
     _a.set(x, y, z);
     const [vol, pan] = this.spatial(_a);
-    if (vol > MIN_VOL) this.world.audio.enemyShot(vol, pan);
+    this.world.audio.enemyShot(vol, pan);
     this.world.effects.muzzleFlash(_a, dx, dy, dz, 0.55);   // 炮口焰，比机器狗的小一号（自带的灯也按比例小：亮度 8.8，照 3.85 米）
   }
 
@@ -1745,7 +1738,7 @@ export class Enemies {
     const c = _boom.copy(at);                           // 复制一份：at 可能是马上要被回收的敌人的位置
     effects.explosion(c, size);
     const [vol, pan] = this.spatial(c);
-    if (vol > MIN_VOL) audio.explode(vol, pan);
+    audio.explode(vol, pan);
     const ground = this.surfaceBelow(c.x, c.y + 0.3, c.z);
     if (c.y - ground < 1.4 * size && c.x < QUAY_X + 0.8) decals.add(_a.set(c.x, ground, c.z), 0, 1, 0, 'scorch', 2.3 * size, 0.92);   // 离地近：地上留一块焦痕，直径是爆炸规模的 2.3 倍
     for (const o of this.list) {
