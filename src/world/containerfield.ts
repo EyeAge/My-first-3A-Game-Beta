@@ -18,6 +18,10 @@ import { CONTAINER_SIZES, CONTAINER_WIDTH, containerBoxes, containerDetail, cont
 //      中间这一档是后来加的。只有精模和简模两档的时候，二十多米外的箱子就成了光板，走着走着能看见前面的箱子一只只"变平"；
 //      波纹板在斜阳底下一道亮一道暗，其实隔着五六十米还看得出来，所以单独给它留了一档便宜的。
 //
+//   3. 看不见的不升档。码在一起的箱子，大半的面是被旁边的箱子贴身挡住的。搭的时候先算好每只箱子有哪几个面"露在外面"
+//      （见 findExposed）；分档的时候，一只箱子要是没有任何一个露在外面的面朝着镜头，它是精是简根本看不出来，直接用简模。
+//      省下来的名额让给真正看得见的箱子，同样的三角形数，波纹能多留出去十几米。
+//
 // 另外有一个省钱的办法：影子和地面上的倒影一律用简模。箱子的影子就是一个长方块的影子，波纹的起伏在影子里根本看不出来；
 // 湿地面上的倒影是一张缩小了、又被水纹搅过的图，也看不出来。没必要为了这两样把几千个三角形再各画一遍。
 
@@ -83,6 +87,8 @@ interface Item {
   solid: boolean;
   /** 现在归哪一档画。 */
   tier: Tier;
+  /** 哪几个面露在外面、没被别的箱子贴身挡住（PX…TOP 这几个记号按位或在一起）。 */
+  exposed: number;
   /** 开着门的箱子不走实例化，自己有一组网格；第一次走近的时候才搭。 */
   own: THREE.Group | null;
 }
@@ -118,6 +124,46 @@ function hideInMirror(mesh: THREE.InstancedMesh) {
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _p = new THREE.Vector3(), _lo = new THREE.Vector3(), _hi = new THREE.Vector3(), _b = new THREE.Box3();
 const isOpen = (it: Item) => it.v.doors > 0;
 
+/** 一只箱子的五个面（底面不算）：朝东、朝西、朝南、朝北、朝上。每个面占一个二进制位，几个面可以按位或在一起存进一个数。 */
+const PX = 1, NX = 2, PZ = 4, NZ = 8, TOP = 16;
+/** 镜头绕到一个面的"背后"多远以内，仍然算它朝着镜头。留这点余量是因为分档每 0.3 秒才做一次：人拐过箱角的那一瞬间，新露出来的面应该已经升好档了。 */
+const FACING_MARGIN = 1.5;
+/** 这只箱子有没有哪个露在外面的面是朝着 eye 的。 */
+function facing(it: Item, eye: THREE.Vector3) {
+  const e = it.exposed, lo = it.bounds.min, hi = it.bounds.max, m = FACING_MARGIN;
+  return ((e & PX) !== 0 && eye.x > hi.x - m) || ((e & NX) !== 0 && eye.x < lo.x + m) || ((e & PZ) !== 0 && eye.z > hi.z - m) || ((e & NZ) !== 0 && eye.z < lo.z + m) || ((e & TOP) !== 0 && eye.y > hi.y - m);
+}
+/**
+ * 给每只箱子算出哪几个面露在外面。
+ *
+ * 做法是"探针"：在每个面外面 0.4 米的地方取几个点（堆位里箱子之间的缝是 7–30 厘米，0.4 米正好探进隔壁的箱子里），
+ * 这些点如果全都落在别的箱子里面，这个面就是被贴身挡住的。只要有一个点探空了 —— 比如隔壁那摞矮一层，或者隔壁是个空箱位 ——
+ * 就算露在外面。宁可多算，不能漏算：漏了的话，一个看得见的面会一直是光板。
+ * 探针沿长边取 4 个、避开正中间（两只头尾相接的 20 尺箱，接缝正好对着 40 尺箱的正中）。
+ */
+function findExposed(items: Item[]) {
+  const reach = 0.4, grow = new THREE.Vector3(reach + 0.1, reach + 0.1, reach + 0.1), box = new THREE.Box3(), probe = new THREE.Vector3();
+  const along = [0.12, 0.37, 0.63, 0.88], across = [0.25, 0.75];
+  for (const it of items) {
+    const lo = it.bounds.min, hi = it.bounds.max;
+    box.copy(it.bounds).expandByVector(grow);
+    const around = items.filter((o) => o !== it && o.bounds.intersectsBox(box)); // 只有挨着它的箱子才可能挡住它
+    const covered = (x: number, y: number, z: number) => { probe.set(x, y, z); return around.some((o) => o.bounds.containsPoint(probe)); };
+    const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+    // 一个竖着的面：fixed 是它所在的那个坐标（已经往外挪了 reach），另一个水平方向从 a 到 b
+    const wall = (alongX: boolean, fixed: number, a: number, b: number) => (b - a > 4 ? along : across).every((t) => across.every((h) => {
+      const u = lerp(a, b, t), y = lerp(lo.y, hi.y, h);
+      return alongX ? covered(u, y, fixed) : covered(fixed, y, u);
+    }));
+    let exposed = 0;
+    if (!wall(false, hi.x + reach, lo.z, hi.z)) exposed |= PX;
+    if (!wall(false, lo.x - reach, lo.z, hi.z)) exposed |= NX;
+    if (!wall(true, hi.z + reach, lo.x, hi.x)) exposed |= PZ;
+    if (!wall(true, lo.z - reach, lo.x, hi.x)) exposed |= NZ;
+    if (!across.every((s) => across.every((t) => covered(lerp(lo.x, hi.x, s), hi.y + reach, lerp(lo.z, hi.z, t))))) exposed |= TOP;
+    it.exposed = exposed;
+  }
+}
 
 export class ContainerField {
   private items: Item[] = [];
@@ -152,7 +198,7 @@ export class ContainerField {
     const spec = CONTAINER_SIZES[v.size];
     const matrix = new THREE.Matrix4().compose(new THREE.Vector3(o.x, o.y, o.z), new THREE.Quaternion().setFromAxisAngle(UP, o.yaw), ONE);
     const bounds = new THREE.Box3(new THREE.Vector3(-spec.length / 2, 0, -CONTAINER_WIDTH / 2), new THREE.Vector3(spec.length / 2, spec.height, CONTAINER_WIDTH / 2)).applyMatrix4(matrix);
-    this.items.push({ v, matrix, color, x: o.x, y: o.y, z: o.z, yaw: o.yaw, bounds, dist: Infinity, lodOnly: !!o.lodOnly, solid: o.solid ?? true, tier: FAR, own: null });
+    this.items.push({ v, matrix, color, x: o.x, y: o.y, z: o.z, yaw: o.yaw, bounds, dist: Infinity, lodOnly: !!o.lodOnly, solid: o.solid ?? true, tier: FAR, exposed: PX | NX | PZ | NZ | TOP, own: null });
   }
 
   /**
@@ -191,6 +237,7 @@ export class ContainerField {
     if (this.built) return this.root;
     this.built = true;
     prepareContainerMarks();
+    findExposed(this.items.filter((it) => !it.lodOnly)); // 永远用简模的箱子不参加分档，不用算
     const mats = containerMaterials();
     const join = (map: Map<string, Batch>, key: string, it: Item) => {
       let b = map.get(key);
@@ -271,7 +318,8 @@ export class ContainerField {
       // 开着门的只有精模和简模两档，而且不占名额：中模、简模都是关着门的，它要是被名额挤下去，看上去就是门自己"砰"地关上了。
       // 全场只有几只，不设上限也无妨
       if (isOpen(it)) { if (it.dist < openDistance + (it.tier ? H : 0)) want.set(it, DETAIL); }
-      else if (it.dist < midDistance + (it.tier ? H : 0)) candidates.push(it);
+      // 关着门的：够近，而且至少有一个露在外面的面朝着镜头。整只被挡住、或者露出来的面都背对着镜头的，升了档也看不见
+      else if (it.dist < midDistance + (it.tier ? H : 0) && facing(it, cameraPos)) candidates.push(it);
     }
     // 2. 先分精模的名额：够近的里面最近的 maxDetail 只。已经在用精模的算近 H 米，免得名额边上的两只箱子来回抢
     const rank = (tier: Tier) => (a: Item, b: Item) => (a.dist - (a.tier >= tier ? H : 0)) - (b.dist - (b.tier >= tier ? H : 0));
