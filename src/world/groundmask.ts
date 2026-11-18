@@ -76,13 +76,26 @@ const AISLE_X = [-51, -37, 1, 15];                    // 堆位之间南北向�
 const CROSS_Z = [-47.55, -15.85, 15.85, 47.55];       // 堆位之间东西向的横向通道（宽约 7 米），和主干道相交成四个路口
 const RAIL_X = [34, 58];                              // 岸桥的两条轨道
 const QUAY_LANE_X = [41, 51];                         // 码头前沿两条轨道之间，车沿着走的两条线
-// 西侧的三块地：能走进去的维修车间（屋里有自己的地坪）、它北边进不去的附属库房、南边露天的水泥场院。
+// 西侧的三块地：能走进去的维修车间（屋里有自己的地坪）、它北边进不去的三号库房、南边露天的水泥场院。
 // 车间东山墙上的大门在 x = −76、z −2.5…2.5，正对堆场；南墙的卷帘门在 z = 8.5、x −94…−89，开向场院。
+// 库房是 port.ts 里以 (−90, −23.5) 为中心摆的 28×22 米的盒子，和车间之间隔着一条 4 米宽的夹道（z −12.5…−8.5）。
 const WORKSHOP = { minX: -104, maxX: -76, minZ: -8.5, maxZ: 8.5 };
-const ANNEX = { minX: -104, maxX: -76, minZ: -36, maxZ: -12 };
+const ANNEX = { minX: -104, maxX: -76, minZ: -34.5, maxZ: -12.5 };
 const YARD = { minX: -106, maxX: -74, minZ: 8.5, maxZ: 36 };
 /** 有屋顶的地方：淋不到雨，不积水、也不潮。 */
 const ROOFED = [WORKSHOP, ANNEX];
+/**
+ * 不摆洼地的地方：这里要立别的东西（港区大门、场院的铁丝网围栏），水洼正好窝在门柱和围栏脚下会很怪。
+ * 只是“不在这里挖坑”，并不把地面垫高——噪声自己偶尔形成的一小片湿印还是会有。
+ */
+const KEEP_CLEAR = [
+  { minX: -32, maxX: -4, minZ: 85.5, maxZ: 100 },      // 出生点（−18, 93）和它正前方的大门线
+  { minX: -75, maxX: -73, minZ: 8.5, maxZ: 37 },       // 场院东侧的围栏线
+  { minX: -107, maxX: -73, minZ: 35, maxZ: 37 },       // 场院南侧的围栏线
+  { minX: -107, maxX: -105, minZ: 8.5, maxZ: 37 },     // 场院西侧的围栏线
+];
+/** 主干道上的车辙和路缘积水往南只画到这里：再往南是大门区（见 KEEP_CLEAR）。 */
+const ROAD_RUT_SOUTH = 84.5;
 /** 没有堆箱子的两个堆位：甲号中继所在的空场，和车间东门外的门前空场。 */
 const EMPTY_BLOCKS: [number, number][] = [[8, 0], [-58, 0]];
 /** 井盖的位置（details.ts 里贴的贴花）。井盖比路面略高，不能泡在水里。 */
@@ -96,11 +109,12 @@ type Basin = [cx: number, cz: number, rx: number, rz: number, depth: number];
 // 手摆的“主角”洼地：都在玩家一定会经过或者一眼能看到的地方。每个位置都有个说法——
 // 写在注释里，是想说明这张表不是随便撒的点。
 const HERO_BASINS: Basin[] = [
-  // 出生点（−18, 93）一带：南端的掉头区，车在这里调头，磨出几个大浅盆
-  [-19.5, 87.6, 3.4, 1.8, 0.24],   // 正前方，压在斑马线上：一进游戏就能看到水下的白漆
-  [-14.6, 80.5, 2.4, 1.5, 0.2],
-  [-31, 89, 4.2, 1.9, 0.2],
-  [-3.5, 91.5, 4.6, 1.7, 0.2],
+  // 出生点（−18, 93）一带：南端的掉头区，车在这里调头，磨出几个大浅盆。
+  // 出生点脚下到斑马线（z 84…88）之间要留给大门，所以正前方那个水洼摆在斑马线的北沿
+  [-19.6, 82.6, 3.4, 1.7, 0.24],   // 正前方十米：压着斑马线的北半边和停车线，一进游戏就能看到水下的白漆
+  [-13.6, 77.2, 2.2, 1.5, 0.2],
+  [-36.5, 88.5, 3.6, 1.9, 0.2],    // 大门两侧的空地：离主干道远一点，给门柱和岗亭让出位置
+  [1.5, 91, 4.2, 1.7, 0.2],
   [9, 84, 2.6, 2.0, 0.18],
   [21, 88.5, 3.4, 2.2, 0.2],
   [-46, 85.5, 3.6, 2.0, 0.18],
@@ -166,16 +180,28 @@ const HERO_BASINS: Basin[] = [
   [-55.2, 8.0, 2.4, 1.4, 0.18],    // 空场和横向通道交界
   [-66.5, -13.5, 2.6, 1.5, 0.18],
   // 南卷帘门外的水泥场院（x −106…−74，z 8.5…36）
-  [-90.6, 12.8, 2.9, 1.7, 0.22],   // 卷帘门正前方
+  [-90.2, 13.7, 2.9, 1.7, 0.22],   // 卷帘门正前方：淹掉禁停框靠外的一半，贴着坡板的那一半留在水面上
   [-83.5, 20.5, 2.0, 3.0, 0.18],
   [-99, 28, 3.2, 2.0, 0.2],        // 场院西南角：离门最远、最没人管的角落
-  [-78.5, 31.5, 2.4, 1.5, 0.18],
-  // 车间和库房之间那条三米半宽的夹道：两边屋檐的水都往这里滴，又晒不到太阳
-  [-88, -10.2, 5.5, 0.9, 0.2],
-  [-100.5, -10.3, 2.2, 0.8, 0.18],
+  [-79.6, 30.4, 2.2, 1.5, 0.18],   // 场院东南角，离两道围栏各留出三米多
+  // 车间和库房之间那条四米宽的夹道（中线 z = −10.5）：两边屋檐的水都往这里排，又晒不到太阳
+  [-88, -10.6, 5.5, 0.9, 0.2],
+  [-100.5, -10.4, 2.2, 0.8, 0.18],
+  // 车间背后（x −110…−104）贴着西围墙的那条窄带：没人走，也没人修
+  [-107.2, 1.5, 1.3, 3.4, 0.18],
+  [-107.4, -21, 1.2, 2.8, 0.17],
   // 车间以南、以北的场地
   [-67, 40, 2.4, 3.0, 0.18],
   [-68.5, -44, 3.0, 2.0, 0.18],
+];
+
+// 落水管的出口：屋面的雨水汇进天沟，再顺着落水管冲到墙根，日子久了每个出口前面都冲出一个小坑。
+// 位置照 workshop.ts（每榀刚架一根，南墙跳过卷帘门两侧的两根）和 annex.ts（东墙两个角、西墙一个角）。
+const DOWNPIPE_X = [-103.1, -98.7, -93.8, -88.4, -82, -76.1];
+const DOWNPIPE_BASINS: Basin[] = [
+  ...DOWNPIPE_X.map((x): Basin => [x + 0.1, WORKSHOP.minZ - 0.75, 0.6, 0.5, 0.2]),                               // 北墙六根，排进夹道
+  ...DOWNPIPE_X.filter((x) => x < -95 || x > -88).map((x): Basin => [x + 0.1, WORKSHOP.maxZ + 0.75, 0.6, 0.5, 0.2]), // 南墙四根，排进场院
+  [ANNEX.maxX + 0.8, ANNEX.maxZ - 0.5, 0.55, 0.6, 0.19], [ANNEX.maxX + 0.8, ANNEX.minZ + 0.5, 0.55, 0.6, 0.19], [ANNEX.minX - 0.8, ANNEX.maxZ - 0.5, 0.55, 0.6, 0.19],
 ];
 
 const inRect = (r: typeof WORKSHOP, x: number, z: number, margin = 0) => x > r.minX - margin && x < r.maxX + margin && z > r.minZ - margin && z < r.maxZ + margin;
@@ -245,8 +271,10 @@ function scatterBasins(quayX: number): Basin[] {
     const long = range(2.0, 4.0), south = rng() < 0.5;
     out.push([range(-104, 56), (south ? 1 : -1) * range(97.6, 98.8), long, long * range(0.3, 0.45), depth()]);
   }
-  // 中心落在箱子或车间底下的不要；只是边缘伸到箱脚下面的留着（水本来就爱贴着箱脚积）
-  return out.filter(([x, z]) => !occupied(x, z, -0.4));
+  // 中心落在箱子或车间底下的不要；只是边缘伸到箱脚下面的留着（水本来就爱贴着箱脚积）。
+  // 碰到留空区的也不要：拿洼地的外接矩形（缩到八成——最外面那一圈本来就浅得存不住水）去和留空区比
+  return out.filter(([x, z, rx, rz]) => !occupied(x, z, -0.4)
+    && !KEEP_CLEAR.some((r) => x + rx * 0.8 > r.minX && x - rx * 0.8 < r.maxX && z + rz * 0.8 > r.minZ && z - rz * 0.8 < r.maxZ));
 }
 
 // ---------------------------------------------------------------- 车辙与排水沟
@@ -271,11 +299,11 @@ interface Rut {
 function ruts(): Rut[] {
   const list: Rut[] = [];
   // 主干道：西侧车道是重车道，车辙深、几乎连着；东侧车道浅一些、断得多
-  list.push({ axis: 'z', at: [LANE_X[0] - 1.1, LANE_X[0] + 1.1], from: -96, to: 96, halfWidth: 0.5, wander: 0.3, depth: 0.22, presence: 0.8, patch: 9, seed: 19 });
-  list.push({ axis: 'z', at: [LANE_X[1] - 1.1, LANE_X[1] + 1.1], from: -96, to: 96, halfWidth: 0.5, wander: 0.3, depth: 0.17, presence: 0.6, patch: 9, seed: 29 });
+  list.push({ axis: 'z', at: [LANE_X[0] - 1.1, LANE_X[0] + 1.1], from: -96, to: ROAD_RUT_SOUTH, halfWidth: 0.5, wander: 0.3, depth: 0.22, presence: 0.8, patch: 9, seed: 19 });
+  list.push({ axis: 'z', at: [LANE_X[1] - 1.1, LANE_X[1] + 1.1], from: -96, to: ROAD_RUT_SOUTH, halfWidth: 0.5, wander: 0.3, depth: 0.17, presence: 0.6, patch: 9, seed: 29 });
   // 路缘：路面中间高两边低，雨水顺着路拱流到边线内侧，积成细长的一条
-  list.push({ axis: 'z', at: [ROAD_X - 7.15], from: -97, to: 97, halfWidth: 0.42, wander: 0.18, depth: 0.15, presence: 0.42, patch: 7, seed: 37 });
-  list.push({ axis: 'z', at: [ROAD_X + 7.15], from: -97, to: 97, halfWidth: 0.42, wander: 0.18, depth: 0.15, presence: 0.42, patch: 7, seed: 41 });
+  list.push({ axis: 'z', at: [ROAD_X - 7.15], from: -97, to: ROAD_RUT_SOUTH, halfWidth: 0.42, wander: 0.18, depth: 0.15, presence: 0.42, patch: 7, seed: 37 });
+  list.push({ axis: 'z', at: [ROAD_X + 7.15], from: -97, to: ROAD_RUT_SOUTH, halfWidth: 0.42, wander: 0.18, depth: 0.15, presence: 0.42, patch: 7, seed: 41 });
   // 横向通道里东西向的车辙，浅；遇到主干道就断开（路口另有洼地）
   CROSS_Z.forEach((cz, i) => list.push({ axis: 'x', at: [cz - 1.1, cz + 1.1], from: -61, to: 26, halfWidth: 0.45, wander: 0.35, depth: 0.14, presence: 0.45, patch: 8, seed: 53 + i * 7, skip: [[ROAD_X - ROAD_HALF - 1, ROAD_X + ROAD_HALF + 1]] }));
   // 码头前沿的两条行车线
@@ -283,8 +311,9 @@ function ruts(): Rut[] {
   // 轨道内侧：轨道梁和旁边的面层沉降不一样，贴着轨道有一道浅沟
   list.push({ axis: 'z', at: [RAIL_X[0] + 0.62], from: -97, to: 97, halfWidth: 0.34, wander: 0.05, depth: 0.14, presence: 0.5, patch: 6, seed: 101 });
   list.push({ axis: 'z', at: [RAIL_X[1] - 0.62], from: -97, to: 97, halfWidth: 0.34, wander: 0.05, depth: 0.14, presence: 0.5, patch: 6, seed: 107 });
-  // 车间南檐的滴水线（屋脊是东西走向的，水从南北两道檐口成排滴下来，在地上砸出一串小坑）。北檐滴进夹道，那里另有手摆的洼地
-  list.push({ axis: 'x', at: [WORKSHOP.maxZ + 0.7], from: WORKSHOP.minX, to: WORKSHOP.maxX, halfWidth: 0.3, wander: 0.06, depth: 0.16, presence: 0.55, patch: 1.6, seed: 113, skip: [[-94.5, -88.5]] });
+  // 车间南檐的滴水线：天沟接不住的水从檐口成排滴下来，在地上砸出一串小坑。
+  // 位置对着雨里那排屋檐水滴（port.ts 的 shelter.eave，落在南墙外 0.28 米）；卷帘门前是水泥坡板，跳过。北檐滴进夹道，那里另有手摆的洼地
+  list.push({ axis: 'x', at: [WORKSHOP.maxZ + 0.32], from: WORKSHOP.minX, to: WORKSHOP.maxX, halfWidth: 0.26, wander: 0.05, depth: 0.16, presence: 0.55, patch: 1.6, seed: 113, skip: [[-94.5, -88.5]] });
   list.push({ axis: 'x', at: [ANNEX.minZ - 0.7], from: ANNEX.minX, to: ANNEX.maxX, halfWidth: 0.3, wander: 0.06, depth: 0.15, presence: 0.5, patch: 1.6, seed: 127 });
   return list;
 }
@@ -316,7 +345,7 @@ export function bakeGroundMask(quayX: number, res = 1024): GroundMask {
 
   // 第一步：把所有“往下挖”的东西累加到一张图上
   const carve = new Float32Array(res * res);
-  const hero = HERO_BASINS, scattered = scatterBasins(quayX);
+  const hero = [...HERO_BASINS, ...DOWNPIPE_BASINS], scattered = scatterBasins(quayX);
   [...hero, ...scattered].forEach(([cx, cz, rx, rz, dep], index) => {
     // 只处理洼地周围的一小块：归一化距离 a 超过 3 以后 exp(−a²) 已经小到可以不管
     const reach = 1.74, warp = Math.min(0.9, Math.min(rx, rz) * BASIN_WARP), seed = 200 + index * 3;
