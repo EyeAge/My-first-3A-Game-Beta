@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { emissive } from '../render/surfaces';
-import { hex, Kit, type LocalBox, type Mat, type V3 } from './kit';
+import { hex, Kit, type LocalBox, type Mat, type Tint, type V3 } from './kit';
 import { WORKSHOP } from './workshop';
 
 // 四号泊位维修车间 —— 室内陈设（建筑本体在 workshop.ts）。
@@ -39,6 +39,10 @@ const HALF_PI = Math.PI / 2;
 // 而是借一种贴图相同的常用材质，把颜色乘到顶点色里。下面几个就是这样"借"来的颜色。
 /** 深色木头（材质表里的 wood_dark）= 托盘木乘上这个灰褐色。 */
 const DARK_WOOD = hex(0x8a786a);
+/** 磨亮的旧钢（材质表里的 steel_worn）和黑钢（steel_dark）是同一张贴图，只是亮 2.2 倍。 */
+const WORN = 2.2;
+/** 排气管的锈色：黑钢染成红褐。 */
+const RUSTY: Tint = [2.3, 1.1, 0.6];
 
 /** 夹层的钢楼面。 */
 const DECK = { x0: -15.73, x1: -10.25, z0: -27.73, z1: -23.75, top: 2.6 } as const;
@@ -53,6 +57,8 @@ const WALK = { x0: -15.75, x1: -9.75, z: -23.15, top: 2.6 } as const;
 const STAIR = { x: -8.25, z: -23.15, steps: 12, rise: 0.2, run: 0.2, start: -1.5 } as const;
 /** 工作台：台面的左右两端、前沿和后沿（后沿离墙裙 5 厘米）。 */
 const BENCH = { x0: 1.6, x1: 5, front: -12.05, back: -11.3, top: 0.94 } as const;
+/** 龙门吊架：横梁沿 x 方向，两组 A 字腿相距 2.6 米。 */
+const GANTRY = { x: -11.6, z: -17.6, half: 1.3, apex: 3.3 } as const;
 
 // ------------------------------------------------------------------ 小工具
 type BoxOpt = NonNullable<Parameters<Kit['box']>[7]>;
@@ -107,6 +113,13 @@ function postGeo(sx: number, h: number, sz: number, bevel: number, ring: number)
 /** 放一根立柱：截面 sx × sz，中心在 (x, z)，从 y0 立到 y1。 */
 function post(k: Kit, mat: Mat, sx: number, sz: number, x: number, y0: number, y1: number, z: number, o: PartOpt & { bevel?: number; ring?: number } = {}) {
   k.add(mat, postGeo(sx, y1 - y0, sz, o.bevel ?? 0.008, o.ring ?? 0.35), o, moveTo(x, y0, z));
+}
+
+/** 沿 x 方向的工字钢：上下两片翼缘夹一片腹板。depth 是截面的高，width 是翼缘的宽。 */
+function ibeamX(k: Kit, mat: Mat, len: number, depth: number, width: number, x: number, y: number, z: number, tint?: Tint) {
+  const flange = 0.016, web = 0.01;
+  for (const s of [-1, 1]) k.box(mat, len, flange, width, x, y + s * (depth / 2 - flange / 2), z, { c: 0.003, tint });
+  k.box(mat, len, depth - 2 * flange, web, x, y, z, { plain: true, tint });
 }
 
 // ------------------------------------------------------------------ 夹层办公室
@@ -404,6 +417,69 @@ function buildPowerBox(k: Kit) {
   for (const y of [2.9, 4.2]) k.box('steel_galv', 0.07, 0.02, 0.1, -0.42, y, pipeZ + 0.04, { plain: true, cast: false, tint: 0.8 });   // 管卡
 }
 
+// ------------------------------------------------------------------ 龙门吊架和发动机
+function buildGantry(k: Kit, boxes: LocalBox[]) {
+  const { x: cx, z: cz, half, apex } = GANTRY;
+  // A 字腿的中心线从地面的 (cz ± 0.9) 汇到 3.3 米高的 (cz)。腿不直接戳到地上：下面是脚轮，所以从轮架的顶面（离地 14 厘米）开始
+  const legLift = 0.14, legSpread = 0.9 * (1 - legLift / (apex - FLOOR));
+  for (const side of [-1, 1]) {
+    const x = cx + side * half, tint = k.range(0.88, 1);
+    for (const s of [-1, 1]) {
+      const footZ = cz + s * legSpread;
+      k.tube('paint_yellow', [x, FLOOR + legLift, footZ], [x, apex, cz], 0.045, { seg: 10, cap: true, tint });
+      // 脚轮：一块安装板、两片轮叉、一只胶轮
+      k.box('steel_dark', 0.13, 0.016, 0.16, x, FLOOR + legLift - 0.008, footZ, { plain: true });
+      for (const dx of [-0.04, 0.04]) k.box('steel_dark', 0.008, 0.1, 0.07, x + dx, FLOOR + 0.085, footZ, { plain: true });
+      k.cyl('rubber', 0.07, 0.06, x, FLOOR + 0.07, footZ, { axis: 'x', seg: 12 });
+      k.cyl('steel_galv', 0.03, 0.064, x, FLOOR + 0.07, footZ, { axis: 'x', seg: 8, cast: false });
+    }
+    k.tube('paint_yellow', [x, 1, cz - 0.62], [x, 1, cz + 0.62], 0.03, { seg: 8, tint });                 // 横拉杆：不让两条腿劈开
+    k.box('paint_yellow', 0.012, 0.34, 0.3, x, apex - 0.1, cz, { c: 0.004, tint });                       // 腿顶和横梁之间的节点板
+    // 碰撞：一组 A 字腿在碰撞上是一片只挡人的薄墙（腿和拉杆之间人本来也钻不过去），子弹可以从腿之间穿过
+    collide(boxes, x - 0.06, 0, cz - 0.78, x + 0.06, 1.9, cz + 0.78, { playerOnly: true });
+  }
+  ibeamX(k, 'paint_yellow', 2 * half + 0.5, 0.22, 0.14, cx, apex + 0.1, cz);
+  for (const s of [-1, 1]) k.box('steel_dark', 0.02, 0.1, 0.12, cx + s * (half + 0.22), apex + 0.045, cz, { plain: true });   // 梁端的挡块：葫芦滑到头会被它拦住
+
+  // 手拉葫芦：挂在横梁的下翼缘上
+  const hx = cx + 0.2;
+  k.box('steel_dark', 0.3, 0.26, 0.24, hx, apex - 0.14, cz, { c: 0.02 });
+  for (const s of [-1, 1]) k.box('steel_dark', 0.2, 0.1, 0.012, hx, apex + 0.03, cz + s * 0.085, { plain: true });   // 夹住下翼缘的两片吊板
+  k.label('2T', { color: 'yellow', font: 'stencil', distress: 0.4 }, 0.2, 0.09, [hx, apex - 0.14, cz + 0.122]);
+  k.tube('steel_galv', [hx + 0.12, apex - 0.26, cz], [hx + 0.14, 2.2, cz + 0.02], 0.008, { seg: 5, cast: false });   // 手拉链
+
+  // 发动机：在自己的坐标系里搭（原点在缸体中心），整体歪一点 —— 吊着的东西不会是端正的
+  const engine: V3 = [hx, 1.42, cz], tilt: V3 = [0, 0.2, 0.05];
+  k.at(engine, tilt, () => {
+    k.box('steel_dark', 0.85, 0.5, 0.55, 0, 0, 0, { c: 0.03 });                                           // 缸体
+    k.box('steel_dark', 0.7, 0.16, 0.42, 0, 0.32, 0, { c: 0.02, tint: WORN });                            // 缸盖
+    k.box('paint_blue', 0.62, 0.07, 0.3, 0, 0.43, 0, { c: 0.025 });                                       // 气门室盖
+    for (const x of [-0.24, -0.08, 0.08, 0.24]) k.cyl('steel_dark', 0.016, 0.02, x, 0.47, 0, { seg: 6 });
+    k.box('steel_dark', 0.62, 0.14, 0.4, 0, -0.31, 0, { c: 0.03, tint: 0.75 });                           // 油底壳
+    k.cyl('steel_bare', 0.16, 0.12, -0.485, -0.02, 0, { axis: 'x', seg: 14 });                            // 飞轮
+    k.cyl('steel_dark', 0.2, 0.05, -0.44, -0.02, 0, { axis: 'x', seg: 14 });                              // 飞轮壳的法兰
+    k.cyl('steel_dark', 0.09, 0.05, 0.45, -0.1, 0, { axis: 'x', seg: 10 });                               // 曲轴皮带轮
+    k.cyl('steel_dark', 0.05, 0.04, 0.445, 0.14, 0.16, { axis: 'x', seg: 8 });                            // 发电机皮带轮
+    // 排气歧管：四根短管汇到一根总管上，锈的
+    for (const x of [-0.27, -0.09, 0.09, 0.27]) k.tube('steel_dark', [x, 0.26, 0.2], [x, 0.14, 0.34], 0.028, { seg: 6, tint: RUSTY });
+    k.tube('steel_dark', [-0.32, 0.14, 0.34], [0.32, 0.14, 0.34], 0.036, { seg: 7, cap: true, tint: RUSTY });
+    k.box('steel_bare', 0.5, 0.1, 0.12, 0, 0.24, -0.3, { c: 0.02 });                                       // 进气歧管
+    k.cyl('paint_orange', 0.04, 0.1, 0.2, -0.12, -0.31, { axis: 'z', seg: 8 });                           // 机油滤清器
+    // 吊具：缸盖两头各一只吊耳，两根链子在上方汇到吊钩上
+    for (const x of [-0.26, 0.26]) {
+      k.box('steel_galv', 0.012, 0.06, 0.05, x, 0.49, 0, { plain: true });
+      k.tube('steel_galv', [x, 0.5, 0], [0, 0.74, 0], 0.008, { seg: 5, cast: false });
+    }
+    k.torus('steel_galv', 0.035, 0.009, 0, 0.77, 0, { axis: 'z', seg: 10, tubeSeg: 5 });
+    k.box('paint_yellow', 0.07, 0.1, 0.05, 0, 0.86, 0, { c: 0.01 });                                      // 吊钩的滑轮壳
+  });
+  // 起重链：从葫芦垂到吊钩。吊钩在发动机歪过去的那一侧，所以链子的下端也跟着偏一点
+  k.tube('steel_galv', [hx, apex - 0.26, cz], [hx - 0.045, 1.42 + 0.9, cz], 0.012, { seg: 6 });
+
+  // 碰撞：吊在半空的发动机是实的（挡人也挡子弹），它下面是空的
+  collide(boxes, hx - 0.58, 1.1, cz - 0.38, hx + 0.5, 1.92, cz + 0.38);
+}
+
 // ------------------------------------------------------------------ 组装
 export function buildWorkshopFit(): WorkshopFit {
   // 全部放进同一只零件箱：同一种材质的零件（不管是办公室的还是货架的）最后合成一个网格，整套陈设只有二十来次绘制调用。
@@ -416,6 +492,7 @@ export function buildWorkshopFit(): WorkshopFit {
   buildStairs(k, boxes);
   buildWorkbench(k, boxes);
   buildPowerBox(k);
+  buildGantry(k, boxes);
 
   // 碰撞盒是上面手工登记的那一份，所以不要零件箱自动量的外包盒（boxes: []）
   const group = k.finish({ boxes: [], grime: 0.9 }).group;
