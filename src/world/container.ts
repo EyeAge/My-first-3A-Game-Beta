@@ -60,6 +60,12 @@ export const SEED_VARIANTS = 6;
 const HALF_W = CONTAINER_WIDTH / 2;  // 1.219，半个箱宽
 const PANEL_Z = HALF_W - 0.012;      // 侧板"外平面"（波纹凸出来的那一面）离中线多远
 const PANEL_Y0 = 0.16;               // 侧板和端板的下沿：比下侧梁的顶面（0.17）低 1 厘米，插在梁里，接缝才不漏光
+const FLOOR_Y = 0.172;               // 箱内木地板的高度
+const DOOR_Y0 = 0.175;               // 门板下沿。门板上沿是 箱高 - 0.124
+const HINGE_Z = HALF_W - 0.058;      // 铰链轴离中线多远
+const LEAF_W = HINGE_Z - 0.004;      // 一扇门的宽度：从铰链到中缝，两扇之间留 8 毫米给胶条
+/** 两扇门开得不一样大：+z 那扇最多开到 112°，-z 那扇最多 88°。doors 是开门程度（0–1），返回这扇门转过的弧度。 */
+const doorAngle = (doors: number, side: number) => doors * (side > 0 ? 112 : 88) * (Math.PI / 180);
 const HOLE_GAP = 0.004;              // 深色孔的面片浮在表面外 4 毫米。再近的话，四十米外深度缓冲分不清谁在前，两个面会闪烁打架
 
 /**
@@ -73,6 +79,7 @@ const MUD: Rgb = [0.5, 0.44, 0.38];        // 泥：暗一半，并且偏黄褐
 const RUST_TINT: Rgb = [0.62, 0.38, 0.24]; // 淌下来的锈水：红留得多，蓝留得少，所以发红褐
 const BARE: Rgb = [0.66, 0.46, 0.36];      // 撞掉漆以后生的锈
 const HOLE: Rgb = [0.035, 0.035, 0.04];    // 孔洞：几乎全黑
+const RUBBER = 0.05;                       // 门缝的橡胶条
 
 /** 平滑的 0→1 过渡：t 从 a 走到 b 的时候，结果从 0 平滑地升到 1（a 可以比 b 大，那就是反过来）。 */
 const sstep = (a: number, b: number, t: number) => { const u = clamp((t - a) / (b - a), 0, 1); return u * u * (3 - 2 * u); };
@@ -136,6 +143,8 @@ function sheets<T>(knots: T[], n: number): T[][] {
 }
 /** 把一条截面的两头各接长 extra 米（深度照抄端点的）：让板的边插进旁边的梁柱里，接缝处才不漏光。 */
 const embed = (knots: [number, number][], extra: number): [number, number][] => [[knots[0][0] - extra, knots[0][1]], ...knots, [knots[knots.length - 1][0] + extra, knots[knots.length - 1][1]]];
+/** 没有波纹的"截面"：from 到 to 平均分成 n 段。简模和箱内的平板用它，好让同一个铺网格的函数两头通用。 */
+const flatKnots = (from: number, to: number, n: number): [number, number][] => Array.from({ length: n + 1 }, (_, i) => [from + ((to - from) * i) / n, 0]);
 
 /**
  * 把"截面折线 × 若干排"铺成一张网格。
@@ -320,20 +329,24 @@ function makePlan(v: ContainerVariant) {
 // ====================================================================== 材质
 
 /**
- * 箱子用到的两种材质。
+ * 箱子用到的几种材质。
  *   body   箱体漆：白色、开顶点色。箱子的颜色由实例颜色乘上去，所以几百只箱子、八种颜色只要这一个材质
- *   metal  镀锌件，深色的孔也借用它 —— 它们都不跟着箱体颜色变
+ *   inside 开门箱的内壁：同一种漆，但标成"室内" —— 箱子里淋不到雨，不该有水珠和湿漉漉的反光
+ *   metal  镀锌件（锁杆、铰链销、把手），深色的孔也借用它 —— 它们都不跟着箱体颜色变
+ *   wood   箱内的木地板（同样是室内）
  */
 export function containerMaterials() {
   return {
     body: surface(BODY, { vertexColors: true, color: 0xffffff }),
+    inside: surface(BODY, { vertexColors: true, color: 0xffffff, interior: true }),
     metal: surface('steel_galv', { vertexColors: true }),
+    wood: surface('wood_pallet', { vertexColors: true, interior: true }),
   };
 }
 
 // ====================================================================== 精模：箱体
 
-interface Core { body: THREE.BufferGeometry; metal: THREE.BufferGeometry | null; boxes: LocalBox[] }
+interface Core { body: THREE.BufferGeometry; metal: THREE.BufferGeometry | null; inside: THREE.BufferGeometry | null; wood: THREE.BufferGeometry | null; boxes: LocalBox[] }
 
 /** 零件箱的种子：规格、花样、做旧三样都算进去，于是每个变体的贴图挪位都不一样，摞在一起的箱子不会在同一个位置掉同一块漆。 */
 const kitSeed = (v: ContainerVariant) => v.seed + Math.round(v.wear * 2) * 10 + (v.size === 20 ? 0 : v.size === 40 ? 100 : 200);
@@ -344,10 +357,13 @@ function partOf(model: PropModel, name: SurfaceName) {
 }
 
 function buildCore(plan: Plan): Core {
-  const { v, L, H, half: p, top, shade } = plan;
+  const { v, L, H, half: p, top, shade } = plan, hc = v.size === 'hc', open = v.doors > 0;
   const body = BODY;
   const k = new Kit('container', kitSeed(v));
+  const rng = mulberry32(v.seed * 31 + 5);
   const paint = { tint: shade };
+  /** 镀锌件：每个零件深浅略有不同；都不投影（太小了，影子看不出来）。 */
+  const zinc = () => ({ tint: 0.8 + rng() * 0.2, cast: false });
   /** 贴一块深色的孔：w × h 的长圆形，贴在 pos，用 rot 转到朝外。 */
   const hole = (w: number, h: number, pos: V3, rot: V3, shape = slotShape(w, h)) => k.add('steel_galv', shape, { tint: HOLE, cast: false }, xform(pos, rot));
 
@@ -408,16 +424,114 @@ function buildCore(plan: Plan): Core {
   // ---- 箱底：一块朝下的暗板。箱子摞起来、或者被吊在半空的时候，从下面往上看不能看穿
   k.plane(body, L - 0.06, CONTAINER_WIDTH - 0.06, [0, 0.02, 0], { rot: [Math.PI / 2, 0, 0], tint: 0.3 });
 
-  // 门还没装（下一个提交）：现在从 +x 端能直接看进箱子里
+  // ---- 箱门：两扇，各自绕自己的铰链轴转
+  const doorTop = H - 0.124, leafH = doorTop - DOOR_Y0, mid = (DOOR_Y0 + doorTop) / 2, hingeX = p - 0.066;
+  for (const side of [1, -1]) {
+    // 下面都在"门的坐标系"里搭：原点在铰链轴上，x 朝门外，门板从铰链往中缝方向伸出去。along(d) 是离铰链 d 米处的 z
+    k.push([hingeX, 0, side * HINGE_Z], [0, -side * doorAngle(v.doors, side), 0]);
+    const along = (d: number) => -side * d;
+    k.box(body, 0.034, leafH, LEAF_W + 0.003, 0, mid, along(LEAF_W / 2 - 0.0045), { c: 0.008, ...paint }); // 门板。铰链那一侧多伸 6 毫米压进门角柱，不留缝
+    // 门面的横向压型：6 道（高箱 7 道）凸起，每道从 19 毫米凸到 31 毫米，上下各留一段平边和一段斜边。
+    // 左右两头收回到平的（最外面两排顶点不凸），像真的冲压件那样，凸起是封口的
+    const ribs = hc ? 7 : 6, y0 = DOOR_Y0 + 0.085, y1 = doorTop - 0.085, pitch = (y1 - y0) / ribs, LOW = 0.019, HIGH = 0.031;
+    const profile: [number, number][] = [];
+    for (let i = 0; i < ribs; i++) { const y = y0 + i * pitch; profile.push([y, LOW], [y + 0.022, LOW], [y + 0.05, HIGH], [y + pitch - 0.05, HIGH], [y + pitch - 0.022, LOW]); }
+    profile.push([y1, LOW]);
+    k.add(body, ribbedSheet(profile, [0.06, 0.085, LEAF_W - 0.095, LEAF_W - 0.07], (y, bulge, d, row) => [row === 0 || row === 3 ? LOW : bulge, y, along(d)], [1, 0, 0]), paint);
+    // 胶条：中缝一条竖的，上下各一条横的
+    k.box(body, 0.022, leafH + 0.012, 0.018, 0.004, mid, along(LEAF_W + 0.001), { plain: true, tint: RUBBER });
+    for (const y of [doorTop + 0.004, DOOR_Y0 - 0.004]) k.box(body, 0.022, 0.016, LEAF_W, 0.004, y, along(LEAF_W / 2), { plain: true, tint: RUBBER });
+    // 铰链：一片铰链板 + 一根镀锌销
+    for (let i = 0, n = hc ? 5 : 4; i < n; i++) {
+      const y = DOOR_Y0 + 0.16 + (i * (leafH - 0.32)) / (n - 1);
+      k.box(body, 0.012, 0.062, 0.15, 0.021, y, along(0.085), { plain: true, ...paint });
+      k.cyl('steel_galv', 0.013, 0.086, 0.026, y, along(-0.002), { seg: 6, open: true, ...zinc() });
+    }
+    // 锁杆：每扇两根竖的镀锌圆管，贯穿门的上下。转动把手，杆两头的凸轮就卡进门楣和门槛上的锁座
+    for (const d of [0.31, 0.83]) {
+      k.cyl('steel_galv', 0.0155, leafH + 0.2, 0.052, mid, along(d), { seg: 7, open: true, ...zinc() });
+      for (const e of [-1, 1]) {
+        k.box('steel_galv', 0.03, 0.045, 0.085, 0.048, mid + e * (leafH / 2 + 0.065), along(d), { plain: true, ...zinc() }); // 凸轮
+        k.box(body, 0.03, 0.05, 0.075, 0.04, mid + e * (leafH / 2 - 0.035), along(d), { plain: true, ...paint });           // 把杆固定在门上的托架
+      }
+      for (const t of [0.3, 0.72]) k.box(body, 0.026, 0.04, 0.07, 0.04, DOOR_Y0 + leafH * t, along(d), { plain: true, ...paint }); // 导向卡
+      // 把手：两根杆的把手一个朝左一个朝右、一高一低，这样才不打架
+      const inner = d > 0.5, handleY = inner ? 1.02 : 1.15, dir = inner ? -1 : 1;
+      k.box('steel_galv', 0.02, 0.05, 0.05, 0.06, handleY, along(d), { plain: true, ...zinc() });
+      k.box('steel_galv', 0.011, 0.032, 0.36, 0.068, handleY, along(d + dir * 0.19), { c: 0.004, ...zinc() });
+      k.box(body, 0.03, 0.07, 0.05, 0.044, handleY, along(d + dir * 0.33), { plain: true, ...paint });                      // 把手的卡座
+      k.box('steel_galv', 0.012, 0.085, 0.012, 0.064, handleY + 0.005, along(d + dir * 0.33), { plain: true, ...zinc() }); // 卡扣
+    }
+    k.pop();
+  }
+  // 门楣和门槛上的锁座：对着四根锁杆各一个（它们长在门框上，不跟着门转）
+  for (const side of [1, -1]) for (const d of [0.31, 0.83]) for (const y of [H - 0.07, 0.115]) {
+    k.box(body, 0.035, 0.05, 0.11, p - 0.03, y, side * (HINGE_Z - d), { plain: true, ...paint });
+  }
 
-  const model = k.finish({ grime: 0, size: [L, H, CONTAINER_WIDTH], boxes: containerBoxes(v.size) });
-  return { body: partOf(model, BODY)!, metal: partOf(model, 'steel_galv'), boxes: model.boxes };
+  // 开着门的箱子：门口的地板边上压着一条镀锌的门槛压条
+  if (open) k.box('steel_galv', 0.05, 0.006, 2 * PANEL_Z - 0.2, p - 0.11, FLOOR_Y + 0.001, 0, { plain: true, ...zinc() });
+
+  const model = k.finish({ grime: 0, size: [L, H, CONTAINER_WIDTH], boxes: containerBoxes(v.size, v.doors) });
+  const interior = open ? buildInterior(plan) : null;
+  return { body: partOf(model, BODY)!, metal: partOf(model, 'steel_galv'), inside: interior && partOf(interior, BODY), wood: interior && partOf(interior, 'wood_pallet'), boxes: model.boxes };
 }
 
-/** 一只箱子的碰撞盒（箱子自己的坐标）：一个整盒。箱顶踩上去是金属声。 */
-export function containerBoxes(size: ContainerSize): LocalBox[] {
-  const { length, height: H } = CONTAINER_SIZES[size], p = length / 2;
-  return [{ min: [-p, 0, -HALF_W], max: [p, H, HALF_W], surface: 'metal' }];
+/**
+ * 开着门的箱子：补上从门口能看到的内部 —— 两面内壁、顶板、后壁、木地板。
+ * 它们单独搭成一组，因为要用"室内"版的材质（淋不到雨）。
+ *
+ * 内壁要投影，而且箱子里晒不晒得到太阳全靠它：外皮是一层没有厚度、只有朝外那一面的铁皮，而画阴影图时
+ * 只画"背对太阳"的面（这是 three 的默认做法，可以避免物体自己给自己投出条纹）—— 迎着太阳的那块外皮正好不算数。
+ * 内壁朝里，对太阳来说是背面，由它来把阳光挡在箱子外面。
+ */
+function buildInterior(plan: Plan): PropModel {
+  const { half: p, top } = plan;
+  const k = new Kit('container-inside', kitSeed(plan.v));
+  // 越往里越黑：亮度从最里面的 0.16 升到门口的 0.78；贴近地板的一截再暗两成。这是画上去的"箱内阴影"：
+  // 天空的环境光是不认遮挡的，箱子里和外面一样亮，只能靠顶点色把它压下去
+  const dark = (x: number, y: number): Rgb => { const t = sstep(-p, p, x), b = (0.16 + 0.62 * t * t) * (0.8 + 0.2 * sstep(0.2, 1.4, y)); return [b, b, b]; };
+  // 内壁比外皮往里收 5 厘米，而不是紧贴着。原因在外面的喷字：字的面片带着"深度偏移"（好稳稳盖在侧板上），
+  // 从箱子里面贴着墙斜看过去时，这个偏移会被放大，紧贴的内壁挡不住，外面的字就透进来了。隔开 5 厘米就透不过来
+  const wallTop = top - 0.02, inZ = PANEL_Z - 0.05, lengthwise = flatKnots(plan.sideFrom, plan.sideTo, 8), shell = { tint: dark };
+  for (const side of [-1, 1]) for (const sheet of sheets(plan.sideKnots, 16)) {
+    k.add(BODY, ribbedSheet(sheet, [FLOOR_Y, wallTop], (x, rib, y) => [x, y, side * (inZ - rib)], [0, 0, -side]), shell);            // 两面内壁：同样的波纹，朝里
+  }
+  for (const sheet of sheets(lengthwise, 2)) k.add(BODY, ribbedSheet(sheet, [-inZ, inZ], (x, _d, z) => [x, top - 0.03, z], [0, -1, 0]), shell); // 顶板
+  k.add(BODY, ribbedSheet(flatKnots(-inZ, inZ, 1), [FLOOR_Y, wallTop], (z, _d, y) => [plan.sideFrom + 0.03, y, z], [1, 0, 0]), shell);       // 后壁
+  // 木地板：两边各多伸 1 厘米插到内壁后面，免得墙根露出一条缝；门口那头伸到门槛上
+  k.add('wood_pallet', ribbedSheet(flatKnots(plan.sideFrom, plan.sideTo + 0.1, 8), [-inZ - 0.01, inZ + 0.01], (x, _d, z) => [x, FLOOR_Y, z], [0, 1, 0]), {
+    tint: (x) => { const b = 0.3 + 0.6 * sstep(-p, p, x) ** 2; return [b, b * 0.97, b * 0.93]; }, grain: 'x', cast: false,
+  });
+  return k.finish({ grime: 0 });
+}
+
+/**
+ * 一只箱子的碰撞盒（箱子自己的坐标）。
+ * 关着门的箱子就是一个整盒；开着门的换成空壳 —— 地板、顶板、两侧壁、后壁各一片薄盒，再沿每扇门板排三个小盒，
+ * 人可以从门口走进去。
+ */
+export function containerBoxes(size: ContainerSize, doors = 0): LocalBox[] {
+  const { length, height: H } = CONTAINER_SIZES[size], p = length / 2, f = HALF_W, v = containerVariant({ size, doors });
+  if (v.doors <= 0) return [{ min: [-p, 0, -f], max: [p, H, f], surface: 'metal' }];
+  const WALL = 0.07;
+  const boxes: LocalBox[] = [
+    { min: [-p, 0, -f], max: [p, FLOOR_Y, f], surface: 'wood' },
+    { min: [-p, H - 0.09, -f], max: [p, H, f], surface: 'metal' },
+    { min: [-p, 0, -f], max: [p, H, -f + WALL], surface: 'metal' },
+    { min: [-p, 0, f - WALL], max: [p, H, f], surface: 'metal' },
+    { min: [-p, 0, -f], max: [-p + WALL, H, f], surface: 'metal' },
+  ];
+  // 碰撞盒只能是横平竖直的，斜开着的门板用三个小盒子沿着它排开来近似
+  for (const side of [1, -1]) {
+    const a = doorAngle(v.doors, side), hx = p - 0.066, hz = side * HINGE_Z;
+    for (let i = 0; i < 3; i++) {
+      const d0 = (LEAF_W * i) / 3, d1 = (LEAF_W * (i + 1)) / 3;
+      const x0 = hx + Math.sin(a) * d0, x1 = hx + Math.sin(a) * d1, z0 = hz - side * Math.cos(a) * d0, z1 = hz - side * Math.cos(a) * d1;
+      boxes.push({ min: [Math.min(x0, x1) - 0.03, DOOR_Y0, Math.min(z0, z1) - 0.03], max: [Math.max(x0, x1) + 0.03, H - 0.124, Math.max(z0, z1) + 0.03], surface: 'metal' });
+    }
+  }
+  return boxes;
 }
 
 // ====================================================================== 对外：带缓存的几何
@@ -427,6 +541,10 @@ export interface ContainerDetail {
   body: THREE.BufferGeometry;
   /** 镀锌件和深色的孔。 */
   metal: THREE.BufferGeometry | null;
+  /** 内壁、顶板、后壁，只有开门的箱子有。也要染箱体颜色。 */
+  inside: THREE.BufferGeometry | null;
+  /** 木地板，只有开门的箱子有。 */
+  wood: THREE.BufferGeometry | null;
   boxes: LocalBox[];
   triangles: number;
 }
@@ -446,7 +564,7 @@ export function containerDetail(o: ContainerOpts): ContainerDetail {
   let d = details.get(key);
   if (!d) {
     const core = buildCore(planOf(v));
-    d = { ...core, triangles: triangles(core.body) + triangles(core.metal) };
+    d = { ...core, triangles: triangles(core.body) + triangles(core.metal) + triangles(core.inside) + triangles(core.wood) };
     details.set(key, d);
   }
   return d;
@@ -464,16 +582,20 @@ export function tintedMesh(geometry: THREE.BufferGeometry, material: THREE.Mater
   mesh.userData.tintable = true;
   return mesh;
 }
-/** 把一只箱子的几块几何各配上材质，装成一组网格。只有箱体投影：镀锌的小件和深色的孔太小，影子看不出来。 */
+/** 把一只精模箱子的几块几何各配上材质，装成一组网格。只有外皮和内壁投影：别的零件太小，影子看不出来。 */
 export function containerMeshes(d: ContainerDetail, color: THREE.ColorRepresentation): THREE.Group {
   const mats = containerMaterials(), group = new THREE.Group();
-  const body = tintedMesh(d.body, mats.body, color);
-  body.castShadow = true;
-  group.add(body);
-  if (d.metal) {
-    const metal = new THREE.Mesh(d.metal, mats.metal);
-    metal.receiveShadow = true;
-    group.add(metal);
+  for (const [geometry, material] of [[d.body, mats.body], [d.inside, mats.inside]] as const) {
+    if (!geometry) continue;
+    const mesh = tintedMesh(geometry, material, color);
+    mesh.castShadow = true;
+    group.add(mesh);
+  }
+  for (const [geometry, material] of [[d.metal, mats.metal], [d.wood, mats.wood]] as const) {
+    if (!geometry) continue;
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.receiveShadow = true;
+    group.add(mesh);
   }
   return group;
 }
@@ -483,7 +605,7 @@ export function buildContainer(o: ContainerOpts & { color?: number } = {}): Prop
   const v = containerVariant(o), spec = CONTAINER_SIZES[v.size];
   const group = containerMeshes(containerDetail(v), o.color ?? CONTAINER_COLORS.blue);
   group.name = `container${v.size}`;
-  return { group, boxes: containerBoxes(v.size), size: [spec.length, spec.height, CONTAINER_WIDTH], name: group.name };
+  return { group, boxes: containerBoxes(v.size, v.doors), size: [spec.length, spec.height, CONTAINER_WIDTH], name: group.name };
 }
 
 // ======================================================================================================================
