@@ -10,6 +10,13 @@ import { SKY, SUN_COLOR, SUN_DIR } from './atmosphere';
 // 每根雨丝是一张窄长的小面片（几千张用"实例化"一次画完），位置全在顶点着色器里算：
 // 所有雨丝包在相机周围的一个盒子里循环下落，相机走到哪，雨就跟到哪。
 
+/**
+ * 雨量，0..1：0 不下，1 是瓢泼大雨。整局固定在 0.6（参考也是恒定的 0.6，它留了改雨量的接口但从没调用过）。
+ * 这是全场唯一的“雨有多大”：雨丝的根数、地上溅起的水花、水洼里涟漪的疏密（world/ground.ts）都读这一个对象，
+ * 以后想做“雨渐渐变小”，只要逐帧改它的 value。
+ */
+export const rainLevel = { value: 0.6 };
+
 const BOX = new THREE.Vector3(26, 15, 26);           // 包着相机的那个盒子（米）
 const VEL = new THREE.Vector3(-2.6, -9.4, 1.1);      // 雨的速度：每秒 9.8 米，被风吹得往西偏
 const MAX_BOXES = 4, MAX_HOLES = 8;
@@ -91,7 +98,7 @@ void main(){
 }`;
 
 const SPLASH_VERT = /* glsl */ `
-uniform float uTime, uRain, uQuayX, uHasMask; uniform vec3 uSunDir, uSunCol, uAmb, uMaskRect; uniform sampler2D uMask;
+uniform float uTime, uRain, uQuayX, uHasMask, uMaskWater; uniform vec3 uSunDir, uSunCol, uAmb; uniform vec4 uMaskRect; uniform sampler2D uMask;
 attribute vec4 aSeed;
 varying vec3 vCol; varying float vA; varying vec2 vUv; varying float vLife;
 ${SHARED}
@@ -106,10 +113,11 @@ void main(){
   vec2 snap = floor(cameraPosition.xz / 4.0) * 4.0;
   vec3 p = vec3(snap.x + rr.x * 30.0, 0.0, snap.y + rr.y * 30.0);
   float kill = 0.0;
-  // 水花优先落在水洼里：干一点的路面上只留三成
-  vec2 muv = (p.xz - uMaskRect.xy) * uMaskRect.z;
+  // 水花优先落在水洼里：干一点的路面上只留三成。
+  // 掩码的红色通道存的是路面高度（world/groundmask.ts），比 uMaskWater 低的地方才有水
+  vec2 muv = (p.xz - uMaskRect.xy) * uMaskRect.zw;
   float inM = step(0.0, muv.x) * step(muv.x, 1.0) * step(0.0, muv.y) * step(muv.y, 1.0);
-  float pud = step(0.5, textureLod(uMask, muv, 0.0).r) * inM * uHasMask;
+  float pud = step(textureLod(uMask, muv, 0.0).r, uMaskWater) * inM * uHasMask;
   float k = fract(aSeed.w * 5.3 + cyc * 0.17);
   if (pud < 0.5 && k > 0.3) kill = 1.0;
   if (k > 0.2 + 0.8 * uRain) kill = 1.0;
@@ -153,13 +161,13 @@ export function createRain(count: number, quayX: number) {
   const boxMin = Array.from({ length: MAX_BOXES }, () => new THREE.Vector3()), boxMax = Array.from({ length: MAX_BOXES }, () => new THREE.Vector3());
   const sky = Array.from({ length: MAX_HOLES }, () => new THREE.Vector4(0, 0, -1, -1));
   const shared = {
-    uTime: { value: 0 }, uRain: { value: 0.6 }, uBoxMin: { value: boxMin }, uBoxMax: { value: boxMax }, uQuayX: { value: quayX },
+    uTime: { value: 0 }, uRain: rainLevel, uBoxMin: { value: boxMin }, uBoxMax: { value: boxMax }, uQuayX: { value: quayX },
     uSunDir: { value: SUN_DIR }, uSunCol: { value: SUN_COLOR.clone().multiplyScalar(1.9) }, uAmb: { value: SKY.fog.clone().multiplyScalar(0.15) },
   };
   const streakU = { ...shared, uSky: { value: sky }, uPix: { value: 0.002 }, uDrip: { value: 0 }, uVel: { value: VEL }, uBox: { value: BOX }, uEave: { value: new THREE.Vector4(0, 0, 0, 7) } };
   const opts = { transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false } as const;
   const streaks = new THREE.Mesh(quads(count + DRIPS, rng, DRIPS), new THREE.ShaderMaterial({ uniforms: streakU, vertexShader: STREAK_VERT, fragmentShader: STREAK_FRAG, ...opts }));
-  const splashU = { ...shared, uMask: { value: null as THREE.Texture | null }, uMaskRect: { value: new THREE.Vector3(0, 0, 1) }, uHasMask: { value: 0 } };
+  const splashU = { ...shared, uMask: { value: null as THREE.Texture | null }, uMaskRect: { value: new THREE.Vector4(0, 0, 1, 1) }, uMaskWater: { value: 0.5 }, uHasMask: { value: 0 } };
   const splashes = new THREE.Mesh(quads(Math.round(count / 10), rng), new THREE.ShaderMaterial({ uniforms: splashU, vertexShader: SPLASH_VERT, fragmentShader: SPLASH_FRAG, ...opts }));
   const group = new THREE.Group();
   for (const [m, order] of [[streaks, 900], [splashes, 890]] as const) { m.frustumCulled = false; m.renderOrder = order; m.matrixAutoUpdate = false; group.add(m); }
@@ -185,9 +193,13 @@ export function createRain(count: number, quayX: number) {
       streakU.uDrip.value = s.eave ? 1 : 0;
       if (s.eave) streakU.uEave.value.set(s.eave.x0, s.eave.x1, s.eave.z, s.eave.y);
     },
-    /** 积水掩码（r 通道 ≥ 0.5 表示那里有水）：水花优先落在水洼里。rect = (左下角 x, 左下角 z, 1/边长)。 */
-    setPuddleMask(tex: THREE.Texture, x0: number, z0: number, invSize: number) {
-      splashU.uMask.value = tex; splashU.uMaskRect.value.set(x0, z0, invSize); splashU.uHasMask.value = 1;
+    /**
+     * 积水掩码：水花优先落在水洼里。
+     * tex 的红色通道是路面高度，低于 waterBelow 的地方有水；rect 是这张图盖住的世界范围（x0、z0 是西北角，w、h 是东西、南北各多少米）。
+     */
+    setPuddleMask(tex: THREE.Texture, rect: { x0: number; z0: number; w: number; h: number }, waterBelow: number) {
+      splashU.uMask.value = tex; splashU.uMaskRect.value.set(rect.x0, rect.z0, 1 / rect.w, 1 / rect.h);
+      splashU.uMaskWater.value = waterBelow; splashU.uHasMask.value = 1;
     },
     dispose() { streaks.geometry.dispose(); splashes.geometry.dispose(); (streaks.material as THREE.Material).dispose(); (splashes.material as THREE.Material).dispose(); },
   };

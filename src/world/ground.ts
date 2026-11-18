@@ -3,6 +3,7 @@ import { mulberry32 } from '../core/math';
 import { reflectionUniforms } from '../render/reflection';
 import { wetness } from '../render/surfaces';
 import { bakeGroundMask, isPuddleAt, puddleDepthAt } from './groundmask';
+import { rainLevel } from './rain';
 import { groundDetailTextures, groundPaintTexture, stencilText } from './textures';
 
 // 港区的地面：一整块湿漉漉的路面。
@@ -605,8 +606,8 @@ export function buildGround(quayX: number) {
     uPaintRoad: { value: new THREE.Vector4(PAINT.road.x0, 1 / PAINT.road.width, PAINT.road.u0, PAINT.road.uSpan) },
     uPaintQuay: { value: new THREE.Vector4(PAINT.quay.x0, 1 / PAINT.quay.width, PAINT.quay.u0, PAINT.quay.uSpan) },
     uPaintZ: { value: new THREE.Vector2(PAINT.z0, 1 / PAINT.zLength) },
-    /** 雨量 0..1：决定涟漪有多密、多强。 */
-    uRain: { value: 0.6 },
+    /** 雨量 0..1：决定涟漪有多密、多强。和雨丝、雨点溅落共用同一个对象（rain.ts），改一处全场一起变。 */
+    uRain: rainLevel,
     /** 全局湿度 0..1：1 是正在下雨的样子，往 0 调地面逐渐变干、水洼消失。和材质库共用同一个对象，全场的湿度一起变。 */
     uWet: wetness,
   };

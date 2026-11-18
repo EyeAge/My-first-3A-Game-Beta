@@ -62,6 +62,8 @@ const BASIN_EXTRA = 0.02;
 const BASIN_WARP = 0.45;
 /** 水深超过这个值才算“踩得到水”。比 0 略大，是因为着色器还会用噪声把水边咬碎，贴着岸线的那几厘米说不准。 */
 export const PUDDLE_THRESHOLD = 0.015;
+/** 同一件事换成掩码贴图里的数：红色通道低于它的地方踩得到水（通道里 0.5 正好是水位线，越低水越深）。雨点溅落的着色器直接读贴图，用这个数。 */
+export const MASK_WATER_BELOW = 0.5 - PUDDLE_THRESHOLD;
 /** 掩码盖住的世界范围：比可玩区域（x −110…62，z −100…100）四周各多出几米，留给边缘的过渡。 */
 export const MASK_RECT = { x0: -116, z0: -106, w: 184, h: 212 };
 
@@ -451,6 +453,11 @@ export function bakeGroundMask(quayX: number, res = 1024): GroundMask {
   texture.generateMipmaps = false;
   texture.needsUpdate = true;
   baked = { data, res, rect: MASK_RECT, texture, quayX, stats: { heroBasins: hero.length, scatteredBasins: scattered.length, ruts: rutList.reduce((s, r) => s + r.at.length, 0) } };
+  return baked;
+}
+
+/** 已经烘好的那张掩码（地面在 buildGround 里烘的）；还没烘过就是 null。 */
+export function bakedGroundMask(): GroundMask | null {
   return baked;
 }
 

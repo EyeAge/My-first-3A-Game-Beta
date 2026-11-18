@@ -16,6 +16,7 @@ import { initSurfaces } from './render/surfaces';
 import { UI, type HudFrame, type Marker } from './ui/ui';
 import { bakeEnvironment, createSea, createSky } from './world/atmosphere';
 import { createRain } from './world/rain';
+import { bakedGroundMask, MASK_WATER_BELOW } from './world/groundmask';
 import { buildPort, QUAY_X } from './world/port';
 
 type State = 'menu' | 'playing' | 'paused' | 'dead' | 'won';
@@ -50,6 +51,9 @@ async function boot() {
   scene.add(sea.mesh);
   let rain = createRain(profileOf(settings.quality).rain, QUAY_X);
   rain.setShelter(port.shelter);
+  // 雨点砸在地上的小水花优先落在水洼里：把地面烘好的那张积水掩码交给雨。切换画质会重建雨，所以包成函数，那边再调一次
+  const givePuddles = (r: typeof rain) => { const m = bakedGroundMask(); if (m) r.setPuddleMask(m.texture, m.rect, MASK_WATER_BELOW); };
+  givePuddles(rain);
   scene.add(rain.group);
   renderer.interior = port.interior; // 车间里的空气更"浑"：从门洞和屋顶破洞照进来的阳光会显出光柱
 
@@ -84,7 +88,7 @@ async function boot() {
     renderer.setQuality(p, port.sun);
     port.setLampCount(p.lamps);
     scene.remove(rain.group); rain.dispose();
-    rain = createRain(p.rain, QUAY_X); rain.setShelter(port.shelter); scene.add(rain.group);
+    rain = createRain(p.rain, QUAY_X); rain.setShelter(port.shelter); givePuddles(rain); scene.add(rain.group);
     effects.setScale(canvas.clientHeight * p.pixelRatio, camera.fov);
   };
   applyQuality();
