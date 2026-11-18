@@ -60,6 +60,8 @@ async function boot() {
   await step('正在加载弹道与烟雾', 0.68);
   const effects = new Effects();
   scene.add(effects.group);
+  effects.colliders = port.colliders;    // 特效要查"这里晒不晒得到太阳""脚下的地面多高"
+  renderer.overlay = effects.overlay;    // 粒子不和场景一起画：等场景和空气都合成完再盖上去，这样它能查到场景的深度（见 post.ts）
   const decals = new Decals();
   scene.add(decals.mesh);
   const audio = new GameAudio();
@@ -89,7 +91,6 @@ async function boot() {
     port.setLampCount(p.lamps);
     scene.remove(rain.group); rain.dispose();
     rain = createRain(p.rain, QUAY_X); rain.setShelter(port.shelter); givePuddles(rain); scene.add(rain.group);
-    effects.setScale(canvas.clientHeight * p.pixelRatio, camera.fov);
   };
   applyQuality();
 
@@ -123,7 +124,7 @@ async function boot() {
     for (const m of gunMats) { m.envMap = v ? interiorEnv : null; m.envMapIntensity = 1; } // 设回 null 就是重新用天空（强度由场景统一给）
   };
 
-  window.addEventListener('resize', () => { renderer.resize(); effects.setScale(canvas.clientHeight * profileOf(settings.quality).pixelRatio, camera.fov); });
+  window.addEventListener('resize', () => renderer.resize());
 
   // ------------------------------------------------------------------ 状态切换
   let state: State = 'menu';
@@ -244,7 +245,7 @@ async function boot() {
       startMission(state === 'dead'); // 结算画面按 A 再来一局
     }
 
-    effects.update(dt);
+    effects.update(dt, camera.position);
     decals.update(dt);
     port.update(t, state === 'menu' ? camera.position : player.pos);
     sea.update(t);

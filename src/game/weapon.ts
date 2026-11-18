@@ -64,7 +64,6 @@ export class Weapon {
 
   update(dt: number, t: number, input: Input, player: Player, colliders: Colliders, enemies: Enemies, world: World, stats: Stats, wantAds: boolean) {
     const { effects, decals, audio, camera } = world;
-    effects.colliders ??= colliders;      // 特效要查"这里晒不晒得到太阳""脚下地面多高"，把碰撞世界交给它（只在第一次赋值）
     this.cooldown -= dt; this.meleeT -= dt;
     this.hitMarker = Math.max(0, this.hitMarker - dt * 4);
     this.ads = damp(this.ads, wantAds && this.reloading <= 0 && !player.sprinting ? 1 : 0, 14, dt);

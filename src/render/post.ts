@@ -11,6 +11,7 @@ import { HORIZON_GLSL, NOISE_GLSL, SKY, skyNoiseTexture, SUN_COLOR, SUN_DIR, SUN
 //     → 环境光遮蔽：墙角、缝隙、物体挨着地面的地方压暗一点
 //     → 体积光：沿着视线一步步走，每一步问"这里的空气被太阳照到了吗"，照到的发亮 —— 于是有了光柱和雾
 //     → 合成
+//     → 粒子：烟、火星、闪光最后才盖上去（为什么放在这里，见下面的 sceneUniforms）
 //     → 泛光：亮的东西往外晕开（不设门槛，按固定比例混，暗处不会发灰）
 //     → 自动曝光：像眼睛一样，暗处久了画面提亮，看向太阳画面压暗
 //     → 调色：色调映射（把 HDR 压进屏幕能显示的范围）、冷暖分离、暗角……
@@ -130,6 +131,8 @@ void main(){
   gl_FragColor = ws > 1e-4 ? acc / ws : texture2D(tSrc, vUv);
 }`;
 
+/** 体积光沿视线最远走多少米：有东西挡着的视线走到 volMaxDist；看向天空的视线只走它的这么多成（天上的空气稀，再走也加不了多少）。 */
+const VOL_SKY_REACH = 0.55;
 const VOL = /* glsl */ `${COMMON}
 uniform sampler2D tDepthHalf, tShadow;
 uniform mat4 uShadowMatrix, uCamWorld;
@@ -156,7 +159,7 @@ void main(){
   vec3 rd = normalize(mat3(uCamWorld) * vd);
   float dist = z * rl;
   bool isSky = z > uFarZ * 0.97;
-  float maxD = min(dist, isSky ? uMaxDist * 0.55 : uMaxDist);
+  float maxD = min(dist, isSky ? uMaxDist * ${VOL_SKY_REACH} : uMaxDist);
   float mu = dot(rd, uSunDir);
   // 两个叶瓣：一个很窄的往前散（朝太阳看时的金色辉光），一个宽的（侧着看光柱也还看得见）
   float ph = min(hg(mu, 0.78) * 0.55 + hg(mu, 0.25) * 0.45, 1.15);
@@ -222,9 +225,54 @@ void main(){
   gl_FragColor = vec4(col, 1.0);
 }`;
 
+/**
+ * 粒子（烟、火星、闪光）是等场景和空气都合成完了才盖上去的，不和场景一起画。原因有两个：
+ *
+ *   1. 软粒子要查场景的深度。烟团和地面、墙相交的地方，如果照常画，会被切出一条笔直的硬线；画烟的时候要是知道
+ *      "这个像素上最近的表面离镜头多远"，就能在快碰到它的地方提前变淡。可是显卡不允许一张深度图"一边被这一趟渲染写、一边被它读"。
+ *      等场景画完，深度图只读不写，粒子画进另一张贴图（合成后的画面），就没有这个冲突，拿到的还是这一帧的深度，不用拷贝。
+ *   2. 体积光是按"视线一路走到背后那堵墙"算的。烟要是先画进场景，离镜头 3 米的黑烟也会被盖上背后几十米空气的雾，发灰发白；
+ *      后画的话，烟自己按"到它为止的那一小段空气"取雾（slAirTo），近处的烟是实的，远处的烟才融进雾里。
+ *
+ * 这几个 uniform 全游戏只有一份：后处理每帧在"盖粒子"那一步把它们填好，粒子的材质直接引用同一批对象。
+ */
+export const sceneUniforms = {
+  /** 1 = 现在正在画"盖在场景上面的那一层"，下面几个量有效；0 = 别的渲染（比如地面倒影），不要用它们。 */
+  uSceneOn: { value: 0 },
+  /** 场景的深度图（显卡深度缓冲的原样，0..1 的非线性值）。 */
+  tSceneDepth: { value: null as THREE.Texture | null },
+  /** x、y：画面的宽、高（像素）；z、w：相机的近、远裁剪面（米）。 */
+  uSceneInfo: { value: new THREE.Vector4(1, 1, 0.05, 1400) },
+  /** 体积光的结果（半分辨率）：rgb = 整条视线上空气散射进来的光，a = 背后的东西还剩多少透过来。 */
+  tSceneAir: { value: null as THREE.Texture | null },
+  /** x：体积光开没开（0 / 1）；y：它沿视线最远算到多少米；z：看向天空时只算到多少米。 */
+  uSceneAir: { value: new THREE.Vector3(0, 170, 93) },
+};
+/** 取用上面那几个量的着色器片段。要用的材质把 sceneUniforms 并进自己的 uniforms，再把这段拼进片元着色器。 */
+export const SCENE_GLSL = /* glsl */ `
+uniform float uSceneOn; uniform sampler2D tSceneDepth, tSceneAir; uniform vec4 uSceneInfo; uniform vec3 uSceneAir;
+${SAFE_GLSL}
+// 这个像素上，场景里最近的不透明表面离镜头多少米（沿镜头正前方量）
+float slSceneZ(){
+  float d = texture2D(tSceneDepth, gl_FragCoord.xy / uSceneInfo.xy).r;
+  return (uSceneInfo.z * uSceneInfo.w) / max(uSceneInfo.w - d * (uSceneInfo.w - uSceneInfo.z), 1e-6);
+}
+// 半路上的东西该吃多少雾。ray 是它沿视线离镜头多远，viewZ 是它沿镜头正前方的深度，sceneZ 是 slSceneZ() 的结果。
+// 返回：rgb = 镜头到它这一段空气散射进来的光，a = 它自己的颜色穿过这段空气还剩多少。
+// 算法：体积光贴图里存的是"走完全程"的结果。假设空气沿视线大致均匀，走了全程的几成，光学厚度就是全程的几成。
+vec4 slAirTo(float ray, float viewZ, float sceneZ){
+  if (uSceneAir.x < 0.5) return vec4(0.0, 0.0, 0.0, 1.0);
+  vec4 air = texture2D(tSceneAir, gl_FragCoord.xy / uSceneInfo.xy);
+  float sceneRay = sceneZ * ray / max(viewZ, 1e-3);                                   // 背后那个表面沿这条视线的距离
+  float reach = min(sceneRay, sceneZ > uSceneInfo.w * 0.97 ? uSceneAir.z : uSceneAir.y);   // 体积光在这个像素上实际走了多远
+  float part = clamp(ray / max(reach, 1e-3), 0.0, 1.0);
+  float through = pow(clamp(air.a, 1e-4, 1.0), part);
+  return vec4(max(air.rgb, vec3(0.0)) * ((1.0 - through) / max(1.0 - air.a, 1e-3)), through);
+}`;
+
 const DOWN = /* glsl */ `${COMMON}
 uniform sampler2D tSrc; uniform vec2 uTexel; uniform float uFirst;
-vec3 s(vec2 o){ return slSafe(texture2D(tSrc, vUv + o * uTexel).rgb); }
+vec3 s(vec2 o){ return slSafe(texture2D(tSrc, vUv + o * uTexel).rgb); }   // 粒子是合成之后才画上去的，没过合成那道保险丝，这里再过一次
 float kw(vec3 c){ return 1.0 / (1.0 + luma(c) * 0.08); }
 void main(){
   vec3 a = s(vec2(-2.0, 2.0)), b = s(vec2(0.0, 2.0)), c = s(vec2(2.0, 2.0));
@@ -567,8 +615,11 @@ export class PostChain {
   /** 镜头切换了（重开、传送）：接下来两帧的曝光直接取当前画面，不做慢慢适应。 */
   cut() { this.frames = 0; }
 
-  /** 场景已经画进 hdr 以后调用：跑完整条链，把结果画到屏幕上。 */
-  render(f: PostFrame) {
+  /**
+   * 场景已经画进 hdr 以后调用：跑完整条链，把结果画到屏幕上。
+   * overlay 是"把粒子画上去"的函数（没有粒子就传 null）：合成之后、泛光之前会调用它，这时渲染目标已经换成合成好的画面。
+   */
+  render(f: PostFrame, overlay: (() => void) | null = null) {
     const { gl, camera, mats: m, rt, q, W, H } = this;
     const hw = rt.depthHalf.width, hh = rt.depthHalf.height;
     const proj = camera.projectionMatrix.elements, tanHalfX = 1 / proj[0], tanHalfY = 1 / proj[5];
@@ -613,6 +664,16 @@ export class PostChain {
     u.tColor.value = this.hdr.texture; u.tDepth.value = depth; u.tDepthHalf.value = rt.depthHalf.texture; u.tAO.value = rt.aoA.texture; u.tVol.value = rt.volA.texture;
     u.uHalfRes.value.set(hw, hh); u.uNear.value = camera.near; u.uFar.value = camera.far; u.uAoOn.value = q.ao > 0 ? 1 : 0; u.uVolOn.value = q.volSteps > 0 ? 1 : 0;
     this.run(m.composite, rt.scene);
+
+    // 4.5 粒子：盖在合成好的画面上。深度图这时只读不写（rt.scene 自己没有深度缓冲），所以粒子可以放心地查它
+    if (overlay) {
+      const s = sceneUniforms;
+      s.uSceneOn.value = 1; s.tSceneDepth.value = depth; s.uSceneInfo.value.set(W, H, camera.near, camera.far);
+      s.tSceneAir.value = rt.volA.texture; s.uSceneAir.value.set(q.volSteps > 0 ? 1 : 0, P.volMaxDist, P.volMaxDist * VOL_SKY_REACH);
+      gl.setRenderTarget(rt.scene);
+      overlay();
+      s.uSceneOn.value = 0; s.tSceneDepth.value = null; s.tSceneAir.value = null;
+    }
 
     // 5. 泛光：一级级缩小（每级模糊一点），再一级级放大叠回来
     let bloomTex = rt.scene.texture, lumTex = rt.scene.texture, blurTex = rt.scene.texture, streakTex: THREE.Texture | null = null;

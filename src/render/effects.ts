@@ -11,6 +11,7 @@ import { DebrisPool, ShellPool } from './fxsolids';
 // 粒子怎么画在 fxparticles.ts，粒子的贴图怎么来的在 fxatlas.ts，碎片和弹壳在 fxsolids.ts。
 //
 // 整个特效系统只有 4 个绘制调用（受光粒子、叠加粒子、碎片、弹壳），没有东西在飞的时候是 0 个。
+// 其中两池粒子不和场景一起画，而是由渲染器留到后处理中途再盖上去（见下面的 overlay）。
 // 所有粒子开局一次分配好，之后循环复用，游戏过程中不申请内存。
 //
 // 颜色的数值大多大于 1：画面是先按"真实的亮度"算，最后才压进屏幕能显示的范围（见 post.ts）。
@@ -65,6 +66,11 @@ export class Effects {
    * 不给也能用：一律当作晒得到、地面在 y=0。
    */
   colliders: Colliders | null = null;
+  /**
+   * 交给渲染器的"粒子层"（renderer.ts 的 OverlayLayer）：object 里是两池粒子的网格，active 是这一帧有没有粒子要画。
+   * 它是 group 的子节点，所以地面倒影那一趟照常会画到它；主画面那一趟由渲染器先藏起来，等场景画完再单独画。
+   */
+  readonly overlay: { readonly object: THREE.Group; readonly active: boolean };
   private view = new FxView();
   private lit = new ParticlePool(LIT_MAX, true);
   private glow = new ParticlePool(ADD_MAX - TRACER_RESERVE, false);
@@ -81,7 +87,10 @@ export class Effects {
     this.litDraw = new ParticleRenderer(LIT_MAX, true, atlasTexture(bakeLitAtlas()), 10, this.view);
     this.glowDraw = new ParticleRenderer(ADD_MAX, false, atlasTexture(bakeAddAtlas()), 20, this.view);
     this.shells = new ShellPool((x, y, z) => this.groundBelow(x, y, z, 6));
-    this.group.add(this.litDraw.mesh, this.glowDraw.mesh, this.debrisPool.mesh, this.shells.mesh);
+    const layer = new THREE.Group(), lit = this.litDraw.mesh, glow = this.glowDraw.mesh;
+    layer.add(lit, glow);
+    this.overlay = { object: layer, get active() { return lit.visible || glow.visible; } };
+    this.group.add(layer, this.debrisPool.mesh, this.shells.mesh);
     // 闪光用的灯：6 盏点光常驻在场景里，不用的时候亮度是 0。
     // 为什么不"要用时加一盏、用完删掉"：场景里灯的数量一变，所有材质的着色器都要重新编译，画面会卡一下。
     for (let i = 0; i < LIGHTS; i++) {
@@ -94,10 +103,6 @@ export class Effects {
   /** 软粒子（烟和地面、墙相交处淡出）的开关。 */
   get softParticles() { return this.view.soft; }
   set softParticles(on: boolean) { this.view.soft = on; }
-  /** 渲染器如果能提供一张"离镜头多少米"的场景深度贴图（r 通道，米，和画面同分辨率），交到这里，特效就不用自己再拷一份。 */
-  setSceneDepth(tex: THREE.Texture | null) { this.view.externalDepth = tex; }
-  /** 以前的点状粒子要靠它换算屏幕上的大小；现在粒子是真的四边形，不需要了。留着是因为 main.ts 还在调用。 */
-  setScale(_viewportH: number, _fovDeg: number) { /* 不需要了 */ }
   stats() { return { lit: this.lit.count, additive: this.glowDraw.count, litMax: LIT_MAX, additiveMax: ADD_MAX, drawCalls: +this.litDraw.mesh.visible + +this.glowDraw.mesh.visible + +this.debrisPool.mesh.visible + +this.shells.mesh.visible }; }
   clear() {
     this.lit.clear(); this.glow.clear(); this.tracers.clear(); this.debrisPool.clear(); this.shells.clear();
@@ -588,10 +593,12 @@ export class Effects {
 
   // ------------------------------------------------------------------ 每帧
 
-  update(dt: number) {
-    this.time += dt; this.dt = dt; this.view.tick++;
+  /** 每帧调用。eye 是主镜头的位置：受光粒子要按离它的远近排序。不给就沿用上一次的。 */
+  update(dt: number, eye?: THREE.Vector3) {
+    this.time += dt; this.dt = dt;
+    if (eye) this.view.eye.copy(eye);
     this.updateEmitters(dt);
-    const eye = this.view.eye;
+    eye = this.view.eye;
     this.lit.update(dt, this.time, this.wind);
     this.litDraw.begin(); this.lit.write(this.litDraw, this.time, eye); this.litDraw.end();
     this.glow.update(dt, this.time, this.wind);

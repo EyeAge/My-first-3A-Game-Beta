@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { SKY, SUN_COLOR, SUN_DIR, SUN_INTENSITY } from '../world/atmosphere';
 import { ADD_FRAME, ATLAS_COLS, ATLAS_ROWS } from './fxatlas';
+import { SCENE_GLSL, sceneUniforms } from './post';
 
 // 粒子是怎么画出来的。
 //
@@ -12,7 +13,11 @@ import { ADD_FRAME, ATLAS_COLS, ATLAS_ROWS } from './fxatlas';
 //           颜色不是定死的，而是"被太阳和天光照出来的"—— 朝太阳的一面亮，背面暗，在影子里就整体暗下去。
 //   叠加池  火星、闪光、光晕、曳光。它们自己发光，颜色直接加到画面上，谁先谁后结果都一样，不用排序。
 //
-// 这个文件里有四样东西：FxView（镜头在哪 + 场景深度的副本）、ParticleRenderer（把数据交给显卡）、
+// 粒子不和场景一起画，而是等场景、空气都合成完了才盖上去（由渲染器安排，见 renderer.ts 的 OverlayLayer 和 post.ts 的 sceneUniforms）。
+// 那一趟里粒子能查到场景的深度图：被墙挡住的部分不画，快碰到地面、墙的地方提前变淡（"软粒子"）。
+// 地面倒影那一趟粒子也会被画一次，那时没有深度图可查，就退回显卡自带的深度测试、不做软粒子。
+//
+// 这个文件里有四样东西：FxView（两池共用的镜头信息）、ParticleRenderer（把数据交给显卡）、
 // ParticlePool（每个粒子的运动和生老病死）、TracerPool（曳光弹）。
 
 /** 粒子朝哪摆。BILLBOARD 正对镜头；STRETCH 沿运动方向拉成一条（火星、水滴、曳光）；FLAT 平贴在地上（冲击环、涟漪）。 */
@@ -22,84 +27,12 @@ export const BOUNCE = 1, DIE_ON_GROUND = 2, STICK = 4;
 /** 颜色随年龄怎么变：不变 / 火星冷却（白黄 → 橙 → 暗红）/ 火焰（亮黄 → 橙红 → 熄灭）/ 余烬（忽明忽暗地闪）。 */
 export const RAMP_NONE = 0, RAMP_SPARK = 1, RAMP_FIRE = 2, RAMP_EMBER = 3;
 
-/**
- * 主镜头的信息，两池粒子共用一份。
- *
- * 另外负责"软粒子"要用的场景深度。软粒子是说：烟团和地面、墙相交的地方，本来会被切出一条笔直的硬线；
- * 如果画烟的时候知道"这个像素上，场景里最近的东西离镜头多远"，就能让烟在快要碰到它的地方提前变淡，硬线就没了。
- * 可是画粒子的时候深度缓冲正在被使用，不能同时读。所以在画第一池粒子之前，先把深度拷一份出来（换算成"离镜头多少米"），粒子读这份副本。
- */
+/** 两池粒子共用的一点镜头信息。 */
 export class FxView {
-  /** 主镜头的位置。排序、"太远就少画点"都用它。每次主画面渲染时更新，所以是上一帧的值，差一帧无所谓。 */
+  /** 主镜头的位置：受光池按离它的远近排序，弹着效果用它判断"太远就少画点"。由 Effects.update 每帧更新。 */
   readonly eye = new THREE.Vector3();
-  /** 软粒子总开关。网址里加 ?fxsoft=0 可以关掉对比效果。 */
+  /** 软粒子总开关。网址里加 ?fxsoft=0 可以关掉对比效果（关掉以后烟和地面相交处是一条硬线）。 */
   soft = new URLSearchParams(globalThis.location?.search ?? '').get('fxsoft') !== '0';
-  /** 渲染器如果自己有一张"离镜头多少米"的深度贴图（r 通道，单位米，和画面同分辨率），交到这里就不用再拷一次。 */
-  externalDepth: THREE.Texture | null = null;
-  /** 游戏每推进一帧加一。同一帧里两池粒子、多次渲染都只拷一次深度。 */
-  tick = 0;
-  /** 深度副本的分辨率。 */
-  readonly resolution = new THREE.Vector2(1, 1);
-  private copiedAt = -1; private copying = false;
-  private target: THREE.WebGLRenderTarget | null = null;
-  private scene = new THREE.Scene(); private camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-  private material = new THREE.ShaderMaterial({
-    depthTest: false, depthWrite: false, toneMapped: false,
-    uniforms: { tDepth: { value: null }, uNear: { value: 0.05 }, uFar: { value: 1400 } },
-    vertexShader: /* glsl */ `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
-    // 深度缓冲里存的不是距离，而是一个 0..1 的非线性的数（近处精度高、远处精度低）。这个公式把它换回"离镜头多少米"
-    fragmentShader: /* glsl */ `uniform sampler2D tDepth; uniform float uNear, uFar; varying vec2 vUv;
-      void main(){ float d = texture2D(tDepth, vUv).r; gl_FragColor = vec4((uNear * uFar) / max(uFar - d * (uFar - uNear), 1e-6), 0.0, 0.0, 1.0); }`,
-  });
-
-  constructor() {
-    // 一个比屏幕大的三角形，正好盖住整个画面（比用两个三角形拼矩形少一条对角线接缝）
-    const tri = new THREE.BufferGeometry();
-    tri.setAttribute('position', new THREE.Float32BufferAttribute([-1, -1, 0, 3, -1, 0, -1, 3, 0], 3));
-    tri.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 2, 0, 0, 2], 2));
-    const mesh = new THREE.Mesh(tri, this.material); mesh.frustumCulled = false;
-    this.scene.add(mesh);
-  }
-
-  /**
-   * 粒子每次被画之前调用。返回这一趟渲染能用的深度贴图；不该做软粒子的时候返回 null。
-   *
-   * 怎么知道现在是"主画面"而不是地面倒影那一趟？主画面是画进一张带深度贴图的渲染目标里的，倒影那张没有。
-   * 倒影用的是另一台（翻到地下的）相机，拿主画面的深度去比没有意义，所以那一趟不做软粒子。
-   */
-  prepare(renderer: THREE.WebGLRenderer, camera: THREE.Camera): THREE.Texture | null {
-    const rt = renderer.getRenderTarget(), source = rt?.depthTexture ?? null;
-    if (rt && !source) return null;                                   // 倒影等其它渲染：既不更新镜头位置，也不做软粒子
-    this.eye.setFromMatrixPosition(camera.matrixWorld);
-    const cam = camera as THREE.PerspectiveCamera;
-    if (!rt || !source || !this.soft || this.copying || !cam.isPerspectiveCamera) return null;
-    this.resolution.set(rt.width, rt.height);
-    if (this.externalDepth) return this.externalDepth;
-    if (!this.target || this.target.width !== rt.width || this.target.height !== rt.height) {
-      this.target?.dispose();
-      // 能用 32 位浮点就用：16 位浮点只有三位有效数字，五十米外的深度差几厘米就分不清了
-      const float32 = renderer.extensions.has('EXT_color_buffer_float');
-      this.target = new THREE.WebGLRenderTarget(rt.width, rt.height, {
-        type: float32 ? THREE.FloatType : THREE.HalfFloatType, format: float32 ? THREE.RedFormat : THREE.RGBAFormat,
-        minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, depthBuffer: false,
-      });
-      this.copiedAt = -1;
-    }
-    if (this.copiedAt !== this.tick) {
-      this.copiedAt = this.tick;
-      const u = this.material.uniforms;
-      u.tDepth.value = source; u.uNear.value = cam.near; u.uFar.value = cam.far;
-      // 在一次渲染的半路上插进去另一次渲染（three 允许这么做，镜面反射的官方示例就是这个写法）：
-      // 换到副本目标 → 画一个全屏三角形 → 换回来接着画粒子。统计数字先冻住，不然这一趟会把主画面的绘制调用数清零
-      const info = renderer.info, autoReset = info.autoReset;
-      info.autoReset = false; this.copying = true;
-      renderer.setRenderTarget(this.target);
-      renderer.render(this.scene, this.camera);
-      renderer.setRenderTarget(rt);
-      this.copying = false; info.autoReset = autoReset;
-    }
-    return this.target.texture;
-  }
 }
 
 const VERTEX = /* glsl */ `
@@ -114,6 +47,7 @@ varying vec3 vOff;      // 这个角相对粒子中心的偏移（以粒子尺�
 varying vec3 vToCam;
 varying vec3 vInfo;     // x 视空间深度（负数，越小越远），y 年龄，z 就是 aMisc.w
 varying float vSoftD;   // 软粒子在离表面多远以内开始变淡（米）
+varying float vRay;     // 这个角离镜头多远（米，沿视线量）。算它该吃多少雾要用
 varying vec3 vT; varying vec3 vB;   // 方片自己的"右"和"上"在世界里的方向，片元里把贴图上的法线转到世界空间要用
 void main() {
   vec2 corner = position.xy;                         // 方片的四个角：(±0.5, ±0.5)
@@ -163,32 +97,36 @@ void main() {
   vOff = off / max(size, 1e-4);
   vToCam = toCam;
   vInfo = vec3(mv.z, aMisc.z, aMisc.w);
+  vRay = length(mv.xyz);
   // 小粒子 4 厘米内淡出，大烟团 0.7 米内淡出。平贴在地上的环例外：它本来就该贴着地，离地只有一厘米多，
   // 按大烟团的标准去淡的话整圈都被淡没了；所以只留 6 毫米，真的插进地里才淡
   vSoftD = mode > 1.5 ? 0.006 : clamp(size * 0.4, 0.04, 0.7);
 }`;
 
 const SOFT_FADE = /* glsl */ `
-uniform sampler2D uTex; uniform sampler2D uDepth; uniform vec2 uRes; uniform float uSoft;
-varying vec2 vUv; varying vec4 vCol; varying vec3 vOff; varying vec3 vToCam; varying vec3 vInfo; varying float vSoftD; varying vec3 vT; varying vec3 vB;
-// 软粒子：这个像素上，场景里最近的表面比粒子远多少米？远得多 = 1（照常画）；马上要碰到 = 接近 0（淡掉）
-float softFade() {
-  if (uSoft < 0.5) return 1.0;
-  float sceneDepth = texture2D(uDepth, gl_FragCoord.xy / max(uRes, vec2(1.0))).r;
-  return clamp((sceneDepth + vInfo.x) / max(vSoftD, 1e-3), 0.0, 1.0);
+uniform sampler2D uTex; uniform float uSoftK;
+varying vec2 vUv; varying vec4 vCol; varying vec3 vOff; varying vec3 vToCam; varying vec3 vInfo; varying float vSoftD; varying float vRay; varying vec3 vT; varying vec3 vB;
+${SCENE_GLSL}
+// 软粒子：这个像素上，场景里最近的表面比粒子远多少米？远得多 = 1（照常画）；马上要碰到 = 接近 0（淡掉）；粒子已经在表面后面 = 0（不画）。
+// 盖粒子的那一趟没有开显卡的深度测试（目标贴图没有深度缓冲），"被墙挡住就不画"也是靠这个函数。
+// uSoftK = 0 是关掉软粒子做对比：淡出的距离缩到 1 毫米，相交处就是一条硬线。
+float softFade(float sceneZ) {
+  if (uSceneOn < 0.5) return 1.0;                    // 地面倒影那一趟：没有深度图可查，遮挡交给显卡的深度测试
+  return clamp((sceneZ + vInfo.x) / max(vSoftD * uSoftK, 1e-3), 0.0, 1.0);
 }`;
 
 const FRAGMENT_LIT = /* glsl */ `${SOFT_FADE}
 uniform vec3 uSun, uSunDir, uAmbLo, uAmbHi;
 void main() {
   vec4 t = texture2D(uTex, vUv);                     // rg 鼓包法线，b 厚度，a 不透明度
+  float sceneZ = uSceneOn > 0.5 ? slSceneZ() : 1e6;
   // 年龄侵蚀：烟不是整团均匀变淡，而是越老"门槛"越高 —— 薄的地方先消失，边缘先碎掉，最后只剩几缕
   float erode = vInfo.y * 0.45;
   float hot = step(1.5, vInfo.z);                    // 这一团是火（见下）还是烟
   float a = smoothstep(erode, erode + mix(0.6, 0.38, hot), t.a) * vCol.a;   // 火的身体更实、边缘更利落
   // 软粒子 + 贴近镜头时淡出：离镜头 0.9 米开始变淡，0.2 米完全消失，镜头穿过烟的时候不会被一整张方片糊住
-  a *= softFade() * smoothstep(0.2, 0.9, -vInfo.x);
-  if (a < 0.004) discard;
+  a *= softFade(sceneZ) * smoothstep(0.2, 0.9, -vInfo.x);
+  if (!(a >= 0.004)) discard;                        // 写成"不是（够大）"：万一算出了非数，也会被丢掉
   vec3 V = normalize(vToCam);
   // 法线由两部分混出来：把整团当成一个球的法线（给出整体的明暗面）+ 贴图里一鼓一鼓的小法线（给出表面的起伏）
   vec3 q = vOff * 2.0; float r2 = min(dot(q, q), 1.0);
@@ -201,7 +139,8 @@ void main() {
   // 逆光：迎着太阳看过去，薄的边缘会被光打透、发亮
   float back = pow(clamp(dot(-V, uSunDir), 0.0, 1.0), 5.0);
   float thin = 1.0 - t.b * smoothstep(0.0, 0.5, a);
-  float shade = vInfo.z - 2.0 * hot;                 // 太阳可见度：发射时查过一次这里晒不晒得到太阳（晒不到是 0.2）
+  // 太阳可见度：发射时查过一次这里晒不晒得到太阳。晒得到是 1；晒不到是 0.2 —— 那两成是被太阳照亮的地面、箱子反过来的光
+  float shade = vInfo.z - 2.0 * hot;
   vec3 sun = uSun * (wrap * wrap * 0.85 + back * (0.15 + 1.3 * thin)) * shade;
   // 天光：法线朝上的地方受天空的光多，朝下的受地面反上来的光；厚的地方再暗一点
   vec3 amb = mix(uAmbLo, uAmbHi, N.y * 0.5 + 0.5) * (1.0 - 0.35 * t.b);
@@ -214,7 +153,9 @@ void main() {
     vec3 fire = vCol.rgb * (0.10 + 1.7 * core) * (0.45 + 1.1 * lump);
     col = vec3(0.045, 0.042, 0.04) * (amb + sun) + fire;
   }
-  gl_FragColor = vec4(max(col, vec3(0.0)), a);
+  // 镜头和这团烟之间的那一小段空气：烟的颜色被它挡掉一点，再加上它自己散射的光。离得近几乎没影响，远处的烟就融进雾里了
+  if (uSceneOn > 0.5) { vec4 air = slAirTo(vRay, -vInfo.x, sceneZ); col = col * air.a + air.rgb; }
+  gl_FragColor = vec4(slSafe(col), min(a, 1.0));
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
   gl_FragColor.rgb *= gl_FragColor.a;                // 预乘：颜色先乘上不透明度再交给混合（见材质的混合设置）
@@ -222,9 +163,12 @@ void main() {
 
 const FRAGMENT_ADD = /* glsl */ `${SOFT_FADE}
 void main() {
-  float k = texture2D(uTex, vUv).r * vCol.a * softFade();
-  if (k < 0.002) discard;
-  gl_FragColor = vec4(max(vCol.rgb, vec3(0.0)) * k, 1.0);
+  float sceneZ = uSceneOn > 0.5 ? slSceneZ() : 1e6;
+  float k = texture2D(uTex, vUv).r * vCol.a * softFade(sceneZ);
+  if (!(k >= 0.002)) discard;
+  vec3 col = vCol.rgb * k;
+  if (uSceneOn > 0.5) col *= slAirTo(vRay, -vInfo.x, sceneZ).a;   // 自己发光的东西只会被空气挡掉一点，不需要加空气的散射光（背景上已经有了）
+  gl_FragColor = vec4(slSafe(col), 1.0);
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
 }`;
@@ -254,9 +198,10 @@ export class ParticleRenderer {
     this.attrs = [p.attr, x.attr, c.attr, m.attr];
     geo.instanceCount = 0;
 
+    // sceneUniforms 是后处理那边的一组共享 uniform（场景深度、体积光）：并进来的是同一批对象，后处理一填，这里就能用
     const uniforms: Record<string, THREE.IUniform> = {
-      uTex: { value: atlas }, uAtlas: { value: new THREE.Vector2(ATLAS_COLS, ATLAS_ROWS) }, uPx: { value: 0.001 },
-      uDepth: { value: null }, uRes: { value: new THREE.Vector2(1, 1) }, uSoft: { value: 0 },
+      uTex: { value: atlas }, uAtlas: { value: new THREE.Vector2(ATLAS_COLS, ATLAS_ROWS) }, uPx: { value: 0.001 }, uSoftK: { value: 1 },
+      ...sceneUniforms,
     };
     if (lit) {
       // 粒子自己算光照，所以太阳和天光的颜色要告诉它。数值和场景里那盏太阳、那片天是同一套：
@@ -290,9 +235,9 @@ export class ParticleRenderer {
       const height = rt ? rt.height : renderer.getDrawingBufferSize(target).y;
       // 投影矩阵的 [5] 是 1 / tan(视野的一半)。离镜头 1 米处画面高 2·tan(视野/2) 米，除以像素行数就是一个像素有多少米
       uniforms.uPx.value = 2 / (Math.max(camera.projectionMatrix.elements[5], 0.001) * Math.max(height, 1));
-      const depth = view.prepare(renderer, camera);
-      uniforms.uSoft.value = depth ? 1 : 0; uniforms.uDepth.value = depth;
-      if (depth) (uniforms.uRes.value as THREE.Vector2).copy(view.resolution);
+      // 盖在场景上的那一趟：遮挡由着色器查深度图来做（softFade），显卡的深度测试关掉；其余的渲染（地面倒影）用显卡的深度测试
+      material.depthTest = sceneUniforms.uSceneOn.value < 0.5;
+      uniforms.uSoftK.value = view.soft ? 1 : 0;
     };
   }
 

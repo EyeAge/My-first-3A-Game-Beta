@@ -9,14 +9,20 @@ import { followSunShadow, installSoftShadows, setupSunShadow } from './shadows';
 // 每一帧画面是怎么出来的：
 //   1. 镜像相机把场景画一遍 → 湿地面的倒影（reflection.ts）
 //   2. 太阳的阴影图（隔一帧更新一次）
-//   3. 场景画进一张 HDR 贴图：亮度不封顶，太阳照到的地方可以是阴影里的几十倍亮
-//   4. 后处理链把这张贴图加工成最终画面（post.ts）
+//   3. 场景画进一张 HDR 贴图：亮度不封顶，太阳照到的地方可以是阴影里的几十倍亮（粒子这一趟先不画）
+//   4. 后处理链把这张贴图加工成最终画面（post.ts）；粒子在它中途——空气合成完、泛光之前——才盖上去
 //
 // 色调映射（把 HDR 压进屏幕能显示的范围）放在后处理的最后做，而不是让 three 在每个材质里做：
 // 这样泛光、体积光、曝光都能在"真实的亮度"上计算。
 
 /** 一帧最多画多少像素。高分屏上按这个上限把内部分辨率压下来，再放大到屏幕 —— 后处理的开销和像素数成正比。 */
 const PIXEL_BUDGET = { 0: 1.0e6, 1: 1.5e6, 2: 2.3e6, 3: 3.7e6 } as const;
+
+/**
+ * 等场景画完才盖上去的一层：粒子（烟、火星、闪光）。为什么要后画，见 post.ts 的 sceneUniforms。
+ * object 是要画的东西；active 为假的那些帧（场上一个粒子都没有）整层跳过。
+ */
+export interface OverlayLayer { readonly object: THREE.Object3D; readonly active: boolean }
 
 export class Renderer {
   readonly gl: THREE.WebGLRenderer;
@@ -26,6 +32,8 @@ export class Renderer {
   reflection: PlanarReflection | null = null;
   /** 室内范围（车间）：体积光在这个盒子里更浓。 */
   interior: THREE.Box3 | null = null;
+  /** 粒子层。它仍然挂在场景里（地面倒影那一趟照常画它），只是主画面那一趟先藏起来，留到后处理中途再画。 */
+  overlay: OverlayLayer | null = null;
   private frame = 0; private lastTime = -1;
   private shadowAt = new THREE.Vector3(1e9, 0, 0); private eye = new THREE.Vector3();
   private fx: PostFrame = { dt: 0.016, time: 0, damage: 0, lowHealth: 0, ads: 0, fade: 0, saturation: 1, flash: 0, interior: null };
@@ -100,13 +108,24 @@ export class Renderer {
     this.frame++;
 
     this.reflection?.render(time);
+    const layer = this.overlay;
+    if (layer) layer.object.visible = false;
     gl.setRenderTarget(this.post.hdr);
     gl.clear();
     gl.render(this.scene, camera);
+    if (layer) layer.object.visible = true;
 
     Object.assign(this.fx, { damage: 0, ads: 0, fade: 0, saturation: 1, flash: 0 }, fx);
     this.fx.dt = cut ? 0.016 : Math.min(0.1, Math.max(0.001, gap));
     this.fx.time = time; this.fx.lowHealth = hurt; this.fx.interior = this.interior;
-    this.post.render(this.fx);
+    this.post.render(this.fx, layer?.active ? this.drawOverlay : null);
   }
+
+  /** 把粒子层盖到当前的渲染目标上。three 默认每次 render 之前先清空目标，这里要盖在已有的画面上，所以临时关掉。 */
+  private drawOverlay = () => {
+    const { gl } = this, autoClear = gl.autoClear;
+    gl.autoClear = false;
+    gl.render(this.overlay!.object, this.camera);
+    gl.autoClear = autoClear;
+  };
 }
