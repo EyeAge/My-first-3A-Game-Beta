@@ -216,16 +216,20 @@ export class ContainerField {
     const D = this.opt.detailDistance ?? 45, H = this.opt.hysteresis ?? 4, cap = this.opt.maxDetail ?? 72;
     // 1. 哪些箱子"想"用精模：够近的。开着门的箱子门板支出去很显眼，远一倍才换成（关着门的）简模
     let want: Item[] = [];
+    const open: Item[] = [];
     for (const it of this.items) {
       it.dist = it.bounds.distanceToPoint(cameraPos);
-      if (!it.lodOnly && it.dist < (isOpen(it) ? 2 : 1) * D + (it.near ? H : 0)) want.push(it);
+      if (it.lodOnly) continue;
+      if (isOpen(it)) { if (it.dist < 2 * D + (it.near ? H : 0)) open.push(it); }
+      else if (it.dist < D + (it.near ? H : 0)) want.push(it);
     }
-    // 2. 太多的话只留最近的 cap 只。已经在用精模的算近 H 米，免得名额边上的两只箱子来回抢
+    // 2. 太多的话只留最近的 cap 只。已经在用精模的算近 H 米，免得名额边上的两只箱子来回抢。
+    //    开着门的不占名额：简模是关着门的，它要是因为名额被挤掉而退回简模，看上去就是门自己"砰"地关上了。全场只有几只，不设上限也无妨
     if (want.length > cap) {
       const rank = (it: Item) => it.dist - (it.near ? H : 0);
       want = want.sort((a, b) => rank(a) - rank(b)).slice(0, cap);
     }
-    const chosen = new Set(want);
+    const chosen = new Set([...want, ...open]);
     // 3. 换。一种变体第一次用到精模时要现搭几何（十几毫秒），平时每轮最多搭一种，免得走着走着卡一下；
     //    镜头是跳过来的就一次搭完 —— 那一刻本来就在切画面
     let builds = jumped ? Infinity : 1;
