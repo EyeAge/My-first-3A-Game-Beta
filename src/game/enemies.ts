@@ -79,6 +79,7 @@ const GULL = {
   // 进了屋（车间）之后的飞法：屋顶下面挂着一排吊灯（灯盘离地 6 米），所以最高飞到 5.2 米；
   // 目标点离墙至少 1.6 米；穿门洞时压到 2.6 米（门洞净高 4.5 米）
   indoorAltMin: 3.2, indoorAltMax: 5.2, indoorWall: 1.6, indoorClearance: 1.2, doorAlt: 2.6,
+  indoorMax: 3,                                   // 屋里最多同时有几架
 };
 /** 云台相机（"眼睛"）和炮口在机身坐标里的位置：[上下, 前后]。 */
 const GULL_CAM = { y: -0.25, z: 0.44 }, GULL_MUZZLE = { y: -0.195, z: 0.28 };
@@ -834,7 +835,16 @@ export class Enemies {
       // "对象"：交战时是玩家（跟丢超过 1.5 秒就是最后见到他的位置），调查 / 搜索时是可疑位置，巡逻时是自己的巡逻中心
       const subj = e.mode === 'patrol' ? e.home : engage && e.noSeeT <= 1.5 ? player.pos : lk;
       const subjIn = subj.x > box.min.x && subj.x < box.max.x && subj.z > box.min.z && subj.z < box.max.z && subj.y < box.max.y;
-      if (e.indoor !== subjIn && this.site.doors.length) {
+      // 屋里最多同时进 3 架：车间只有 28 × 17 米，再多就挤得转不开身，对玩家也太密了。
+      // 名额满了的留在外面照常盘旋（看不见人，过一会儿就在屋顶上空转入搜索），等屋里的同伴被打掉、又听到动静时再进来。
+      // 已经在穿门的（door >= 0）不受影响，免得飞到一半掉头
+      let room = true;
+      if (subjIn && !e.indoor && e.door < 0) {
+        let inside = 0;
+        for (const o of this.list) if (o.kind === 'gull' && o.alive && (o.indoor || o.door >= 0)) inside++;
+        room = inside < GULL.indoorMax;
+      }
+      if (e.indoor !== subjIn && this.site.doors.length && room) {
         door = this.throughDoor(e, subj, _v);
         tx = _v.x; ty = _v.y; tz = _v.z;
       } else {
