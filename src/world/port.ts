@@ -3,6 +3,7 @@ import { mulberry32, pick } from '../core/math';
 import { Colliders } from './colliders';
 import { buildDetails, type BoxSpec } from './details';
 import { NavGrid } from './nav';
+import { labelMaterial } from '../render/labels';
 import { weathered } from '../render/weathered';
 import { barrierMesh, flares, lightCones } from './props';
 import { buildAnnex } from './annex';
@@ -464,6 +465,11 @@ export function buildPort(progress: (msg: string) => void): Port {
     else indoorProps.place(INDOOR_MODELS[p.name](args), x, z, p.yaw, y);
   }
   indoor.add(indoorProps.buildMerged(colliders));
+  // 贴纸和喷字全场共用一个材质（render/labels.ts）。它不分屋里屋外，映出来的永远是天空 —— 屋里地上那两摊发亮的油渍于是泛着一层天蓝色。
+  // 所以给屋里的贴片换上它的一份副本，标成"室内"：main.ts 会让带这个标记的材质改映屋里的环境（副本和原件共用同一张图集）
+  const outdoorLabels = labelMaterial(), indoorLabels = outdoorLabels.clone();
+  indoorLabels.userData.interior = true;
+  indoor.traverse((o) => { if ((o as THREE.Mesh).material === outdoorLabels) (o as THREE.Mesh).material = indoorLabels; });
   // 西边原有的几处掩体
   barrels(-64.5, 30, 5); props.place(crateStack({ seed: 2 }), -68.3, -40.6, 0.1); props.place(crateWood({ seed: 0 }), -66.6, -40.2, 0.3);
   group.add(props.build(colliders));
