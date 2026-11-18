@@ -133,8 +133,13 @@ const HOUND_POSE = {
   headDroop: 0.4,                  // 瘫倒后头垂下多少（弧度）：我们的狗头长，再多嘴就戳进地里了
 };
 
-/** 镜头（所有"眼睛"材质的零件）的颜色：平时是琥珀色，交战时变红。数值超过 1 是为了让泛光把它晕开。 */
-const LENS_CALM: [number, number, number] = [2.4, 1.2, 0.21], LENS_HOT: [number, number, number] = [4.2, 0.3, 0.1];
+/**
+ * 镜头（所有"眼睛"材质的零件）的颜色：平时是琥珀色，交战时变红。
+ * 数值远大于 1：屏幕能显示的最亮就是 1，多出来的部分由后处理的泛光晕成一圈光。预警时还要再乘四倍多（见 updateLens），
+ * 十几米外也是一个扎眼的红点 —— 游戏里没有任何"敌人要开火了"的图标，玩家只靠这个光点和充能声来判断。
+ * 这两组数就是参考的原值。（暂停前用的是它的三成，那是按旧的后处理调的；换成新的曝光和泛光之后，三成的亮度在十米外几乎看不出变化。）
+ */
+const LENS_CALM: [number, number, number] = [8, 4, 0.7], LENS_HOT: [number, number, number] = [14, 1, 0.35];
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -252,8 +257,8 @@ const ACCENT = new THREE.MeshStandardMaterial({ color: 0xa8501c, map: PLATE.map,
 const DARK = new THREE.MeshStandardMaterial({ color: 0x24282c, map: PLATE.map, roughness: 0.9, metalness: 0.9, roughnessMap: PLATE.roughnessMap, metalnessMap: PLATE.roughnessMap, normalMap: PLATE.normalMap, normalScale: new THREE.Vector2(0.7, 0.7) });
 const BLUR = new THREE.MeshBasicMaterial({ color: 0x0b0d0f, transparent: true, opacity: 0.2, depthWrite: false, side: THREE.DoubleSide }); // 旋翼转起来的残影
 const STEEL = new THREE.MeshStandardMaterial({ color: 0xb9bec2, roughness: 0.22, metalness: 1 }); // 液压杆的活塞杆：磨得发亮的镀铬钢
-// 敌方弹丸：一根很亮的橙红色细条。颜色远大于 1，泛光会把它晕成一道光
-const BOLT = new THREE.MeshBasicMaterial({ color: new THREE.Color(10, 4.2, 1.6) });
+// 敌方弹丸：一根很亮的橙红色细条。颜色是 0xff6a2a 再乘 14（参考的原值）—— 远大于 1 的部分会被泛光晕成一道光
+const BOLT = new THREE.MeshBasicMaterial({ color: new THREE.Color(0xff6a2a).multiplyScalar(14) });
 
 const MAX_BOLTS = 32, MAX_WRECKS = 5;
 interface Bolt { live: boolean; x: number; y: number; z: number; dx: number; dy: number; dz: number; fromX: number; fromY: number; fromZ: number; speed: number; dmg: number; life: number; len: number; whizzed: boolean }
@@ -1135,7 +1140,13 @@ export class Enemies {
       if (Math.hypot(qx - cx, qz - cz) < 0.38 && Math.abs(qy - cy) < half) { hitPlayer = true; end = along; }
     }
     _a.set(mx, my, mz); _b.set(mx + dx * end, my + dy * end, mz + dz * end);
-    effects.tracerThin(_a, _b);
+    // 曳光只画到"离镜头还有 3 米"的地方。这一枪要是擦着镜头过去（或者干脆打中了玩家），亮条离镜头只有几十厘米，
+    // 透视会把它放大成一根横贯半个画面的光柱（实际截图里就是这样）。子弹该打到哪还是打到哪，下面的弹着火星照常放在真正的落点上。
+    const cam = this.world.camera.position;
+    const nearest = clamp((cam.x - mx) * dx + (cam.y - my) * dy + (cam.z - mz) * dz, 0, end);   // 弹道上离镜头最近的那个点，离炮口多远
+    const miss = Math.hypot(mx + dx * nearest - cam.x, my + dy * nearest - cam.y, mz + dz * nearest - cam.z);
+    const shown = miss < 1.5 ? Math.max(0.5, nearest - 3) : end;
+    effects.tracerThin(_a, _v.set(mx + dx * shown, my + dy * shown, mz + dz * shown));
     effects.flash(_a, 90, 0.05);
     effects.puff(_a, { size: 0.5, life: 0.07, color: 0xffb060, rise: 0, count: 1, fire: true, vx: dx * 3, vy: dy * 3, vz: dz * 3 });   // 枪口焰
     const [vol, pan] = this.spatial(_a);
@@ -1410,7 +1421,7 @@ export class Enemies {
       e.jaw = damp(e.jaw, 0.06, 4, dt);
       // 镜头：约每秒 9.5 次的红光闪烁，1.2 秒内越闪越暗，最后几乎全灭
       const k = D < 1.2 ? (Math.sin(D * 60) > 0.2 ? 1 - D / 1.2 : 0.05) : 0.02;
-      e.eyeMat.color.setRGB(3 * k + 0.03, 0.3 * k + 0.006, 0.1 * k);
+      e.eyeMat.color.setRGB(6 * k + 0.05, 0.6 * k + 0.01, 0.2 * k);
       // 外壳慢慢熏黑
       e.bodyMat.color.lerp(_scorched, 1 - Math.exp(-0.9 * dt));
       this.poseHound(e, 0);
@@ -1484,7 +1495,7 @@ export class Enemies {
         if (p) p.addShake(clamp(1 - p.pos.distanceTo(pos) / 14, 0, 1) * 0.3);       // 两百多公斤的铁疙瘩砸在地上，近处能感到一震
       }
       const k = D < 1.4 ? (Math.sin(D * 60) > 0.2 ? 1 - D / 1.4 : 0.05) : 0.02;
-      e.eyeMat.color.setRGB(3 * k + 0.03, 0.3 * k + 0.006, 0.1 * k);
+      e.eyeMat.color.setRGB(6 * k + 0.05, 0.6 * k + 0.01, 0.2 * k);
       e.bodyMat.color.lerp(_scorched, 1 - Math.exp(-0.9 * dt));
     }
     if (D < 7.5) {
