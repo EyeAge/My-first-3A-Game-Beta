@@ -61,6 +61,7 @@ async function boot() {
   const effects = new Effects();
   scene.add(effects.group);
   effects.colliders = port.colliders;    // 特效要查"这里晒不晒得到太阳""脚下的地面多高"
+  effects.setInterior(port.interior);    // 车间里的烟看不到天，不该被整片天空照亮
   renderer.overlay = effects.overlay;    // 粒子不和场景一起画：等场景和空气都合成完再盖上去，这样它能查到场景的深度（见 post.ts）
   const decals = new Decals();
   scene.add(decals.mesh);

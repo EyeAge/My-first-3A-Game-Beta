@@ -49,6 +49,10 @@ varying vec3 vInfo;     // x 视空间深度（负数，越小越远），y 年�
 varying float vSoftD;   // 软粒子在离表面多远以内开始变淡（米）
 varying float vRay;     // 这个角离镜头多远（米，沿视线量）。算它该吃多少雾要用
 varying vec3 vT; varying vec3 vB;   // 方片自己的"右"和"上"在世界里的方向，片元里把贴图上的法线转到世界空间要用
+#ifndef ADDITIVE
+uniform vec3 uRoomMin, uRoomMax;    // 室内范围（一个盒子）的两个对角
+varying float vIndoor;              // 这个粒子的中心在不在屋里：1 在，0 不在
+#endif
 void main() {
   vec2 corner = position.xy;                         // 方片的四个角：(±0.5, ±0.5)
   vec3 center = aPos.xyz; float size = aPos.w, mode = aMisc.y;
@@ -98,6 +102,11 @@ void main() {
   vToCam = toCam;
   vInfo = vec3(mv.z, aMisc.z, aMisc.w);
   vRay = length(mv.xyz);
+  #ifndef ADDITIVE
+  // step(a, b) 是"b ≥ a 就得 1，否则 0"。三个方向都落在盒子的两个对角之间，三个 1 乘起来才是 1
+  vec3 inside = step(uRoomMin, center) * step(center, uRoomMax);
+  vIndoor = inside.x * inside.y * inside.z;
+  #endif
   // 小粒子 4 厘米内淡出，大烟团 0.7 米内淡出。平贴在地上的环例外：它本来就该贴着地，离地只有一厘米多，
   // 按大烟团的标准去淡的话整圈都被淡没了；所以只留 6 毫米，真的插进地里才淡
   vSoftD = mode > 1.5 ? 0.006 : clamp(size * 0.4, 0.04, 0.7);
@@ -116,7 +125,8 @@ float softFade(float sceneZ) {
 }`;
 
 const FRAGMENT_LIT = /* glsl */ `${SOFT_FADE}
-uniform vec3 uSun, uSunDir, uAmbLo, uAmbHi;
+uniform vec3 uSun, uSunDir, uAmbLo, uAmbHi, uRoomLo, uRoomHi;
+varying float vIndoor;
 void main() {
   vec4 t = texture2D(uTex, vUv);                     // rg 鼓包法线，b 厚度，a 不透明度
   float sceneZ = uSceneOn > 0.5 ? slSceneZ() : 1e6;
@@ -141,9 +151,13 @@ void main() {
   float thin = 1.0 - t.b * smoothstep(0.0, 0.5, a);
   // 太阳可见度：发射时查过一次这里晒不晒得到太阳。晒得到是 1；晒不到是 0.2 —— 那两成是被太阳照亮的地面、箱子反过来的光
   float shade = vInfo.z - 2.0 * hot;
+  // 屋里晒不到太阳的地方，那点反光减半（屋里被太阳照亮的只有门口一小片地）。
+  // 站在门洞、屋顶破洞射进来的光柱里的烟（shade = 1）不减，它是真被太阳照着的
+  shade *= mix(1.0, mix(0.5, 1.0, smoothstep(0.2, 1.0, shade)), vIndoor);
   vec3 sun = uSun * (wrap * wrap * 0.85 + back * (0.15 + 1.3 * thin)) * shade;
-  // 天光：法线朝上的地方受天空的光多，朝下的受地面反上来的光；厚的地方再暗一点
-  vec3 amb = mix(uAmbLo, uAmbHi, N.y * 0.5 + 0.5) * (1.0 - 0.35 * t.b);
+  // 天光：法线朝上的地方受天空的光多，朝下的受地面反上来的光；厚的地方再暗一点。
+  // 屋里看不到天，这两个颜色换成屋里的：朝上的面被吊灯照着（暖黄），朝下的面只有地面反上来的一点光
+  vec3 amb = mix(mix(uAmbLo, uRoomLo, vIndoor), mix(uAmbHi, uRoomHi, vIndoor), N.y * 0.5 + 0.5) * (1.0 - 0.35 * t.b);
   vec3 col = vCol.rgb * (amb + sun);
   if (hot > 0.5) {
     // 火球。它和烟一样是"盖上去"的而不是"加上去"的 —— 十几团发光的方片加在一起会饱和成一整块纯色，轮廓只剩方片的外形；
@@ -183,6 +197,7 @@ export class ParticleRenderer {
   private pos: Float32Array; private axis: Float32Array; private col: Float32Array; private misc: Float32Array;
   private attrs: THREE.InstancedBufferAttribute[];
   private geo = new THREE.InstancedBufferGeometry();
+  private uniforms: Record<string, THREE.IUniform>;
 
   constructor(readonly capacity: number, lit: boolean, atlas: THREE.Texture, renderOrder: number, view: FxView) {
     const geo = this.geo;
@@ -199,7 +214,7 @@ export class ParticleRenderer {
     geo.instanceCount = 0;
 
     // sceneUniforms 是后处理那边的一组共享 uniform（场景深度、体积光）：并进来的是同一批对象，后处理一填，这里就能用
-    const uniforms: Record<string, THREE.IUniform> = {
+    const uniforms: Record<string, THREE.IUniform> = this.uniforms = {
       uTex: { value: atlas }, uAtlas: { value: new THREE.Vector2(ATLAS_COLS, ATLAS_ROWS) }, uPx: { value: 0.001 }, uSoftK: { value: 1 },
       ...sceneUniforms,
     };
@@ -213,6 +228,9 @@ export class ParticleRenderer {
       uniforms.uSunDir = { value: SUN_DIR };
       uniforms.uAmbHi = { value: mix3(zenith, 0.6, SKY.horizonAway, 0.5, SKY.fog, 0.25) };
       uniforms.uAmbLo = { value: mix3(zenith, 0, SKY.horizonAway, 0.3, SKY.fog, 0.14) };
+      // 室内范围：默认是一个"空盒子"（最小角比最大角还大，什么点都不在里面），等 setRoom 来填
+      uniforms.uRoomMin = { value: new THREE.Vector3(1, 1, 1) }; uniforms.uRoomMax = { value: new THREE.Vector3(0, 0, 0) };
+      uniforms.uRoomHi = { value: new THREE.Color(0, 0, 0) }; uniforms.uRoomLo = { value: new THREE.Color(0, 0, 0) };
     }
     const material = new THREE.ShaderMaterial({
       uniforms, vertexShader: VERTEX, fragmentShader: lit ? FRAGMENT_LIT : FRAGMENT_ADD, defines: lit ? {} : { ADDITIVE: 1 },
@@ -239,6 +257,19 @@ export class ParticleRenderer {
       material.depthTest = sceneUniforms.uSceneOn.value < 0.5;
       uniforms.uSoftK.value = view.soft ? 1 : 0;
     };
+  }
+
+  /**
+   * 告诉受光池"哪里算屋里"：盒子里的粒子不再被天空照亮，改用屋里的环境光。传 null 表示没有室内。
+   * up / down 是屋里朝上、朝下的面各自受到的环境光。默认值是在车间里量出来的：摆一个白球，读它顶上和侧面的亮度，
+   * 和屋外阴影里的同一个白球比 —— 屋里顶面是屋外的 (1.1, 0.65, 0.3) 倍（暖色的吊灯在头顶），侧面是 (0.65, 0.42, 0.29) 倍，
+   * 再乘到屋外的那两个天光颜色上。也就是说屋里并不比屋外的阴影暗多少，主要是颜色从天空的蓝变成了灯的黄。
+   */
+  setRoom(box: THREE.Box3 | null, up = new THREE.Color(0.24, 0.18, 0.11), down = new THREE.Color(0.07, 0.055, 0.045)) {
+    const u = this.uniforms;
+    if (!u.uRoomMin) return;                           // 叠加池的粒子自己发光，不受环境光影响，没有这几个量
+    if (box) { u.uRoomMin.value.copy(box.min); u.uRoomMax.value.copy(box.max); u.uRoomHi.value.copy(up); u.uRoomLo.value.copy(down); }
+    else { u.uRoomMin.value.set(1, 1, 1); u.uRoomMax.value.set(0, 0, 0); }
   }
 
   begin() { this.count = 0; }

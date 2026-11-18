@@ -103,6 +103,11 @@ export class Effects {
   /** 软粒子（烟和地面、墙相交处淡出）的开关。 */
   get softParticles() { return this.view.soft; }
   set softParticles(on: boolean) { this.view.soft = on; }
+  /**
+   * 告诉特效"哪里算屋里"（车间的范围盒）。屋里的烟和尘看不到天，不该被整片天空照成蓝灰色：盒子里的粒子改用屋里的环境光（偏暗、偏暖）。
+   * 判断是按粒子当时的位置做的，所以从门里飘出去的烟会自己变回屋外的颜色。
+   */
+  setInterior(box: THREE.Box3 | null) { this.litDraw.setRoom(box); }
   stats() { return { lit: this.lit.count, additive: this.glowDraw.count, litMax: LIT_MAX, additiveMax: ADD_MAX, drawCalls: +this.litDraw.mesh.visible + +this.glowDraw.mesh.visible + +this.debrisPool.mesh.visible + +this.shells.mesh.visible }; }
   clear() {
     this.lit.clear(); this.glow.clear(); this.tracers.clear(); this.debrisPool.clear(); this.shells.clear();
