@@ -1,8 +1,9 @@
 import * as THREE from 'three';
+import { label as labelPatch, decal as decalPatch, labelMaterial, type Patch } from '../../render/labels';
 import { emissive, surface, type SurfaceName } from '../../render/surfaces';
 import { Kit, noise3, type PropModel, type Rgb, type V3 } from '../kit';
 
-// 设备与杂物类道具：发电机、三脚投光灯、垃圾箱、工具车。
+// 设备与杂物类道具：发电机、三脚投光灯、垃圾箱、工具车、气瓶架、钢管堆。
 //
 // 这些东西不参与玩法，作用只有一个：让堆场看起来"有人在这里干过活"。
 // 所以每一件都是成组出现的：发电机旁边立着投光灯，中间拖一根电缆；工具车的台面上丢着扳手和抹布。
@@ -438,9 +439,191 @@ export function toolboxCart(o: EquipOpts & { color?: PaintColor; label?: string 
   });
 }
 
+// ================================================================ 气瓶架
+/**
+ * 弯贴片：把一块字或贴纸裹在圆柱面上（平的贴片贴在气瓶上会翘出去两个角）。
+ * 在自己的坐标里，贴片的中心朝 +z，离轴线 radius 远；m 再把它摆到圆柱上。
+ *   wrap = 'u'：圆柱竖着（轴是 y），贴片的"左右"方向绕着圆柱走。arc 是绕过去的弧长（贴片的宽），len 是贴片的高。气瓶上的字。
+ *   wrap = 'v'：圆柱横着（轴是 x），贴片的"上下"方向绕着圆柱走。arc 是贴片的高，len 是贴片的宽。钢管上顺着管子喷的一长行字。
+ */
+function curvedPatch(k: Kit, p: Patch, radius: number, arc: number, len: number, m: THREE.Matrix4, wrap: 'u' | 'v' = 'u', seg = 4) {
+  const pos: number[] = [], nor: number[] = [], uv: number[] = [], idx: number[] = [];
+  const [u0, v0, u1, v1] = p.uv;
+  for (let i = 0; i <= seg; i++) {
+    const t = i / seg, a = (t - 0.5) * (arc / radius), s = Math.sin(a), c = Math.cos(a);
+    if (wrap === 'u') {
+      pos.push(radius * s, -len / 2, radius * c, radius * s, len / 2, radius * c);
+      nor.push(s, 0, c, s, 0, c);
+      const u = u0 + (u1 - u0) * t;
+      uv.push(u, v0, u, v1);
+    } else {
+      pos.push(-len / 2, radius * s, radius * c, len / 2, radius * s, radius * c);
+      nor.push(0, s, c, 0, s, c);
+      const v = v0 + (v1 - v0) * t;
+      uv.push(u0, v, u1, v);
+    }
+  }
+  // 每一小段是一个四边形，拆成两个三角形；顶点顺序保证从圆柱外面看是逆时针（正面朝外）
+  for (let i = 0; i < seg; i++) {
+    const a = i * 2;
+    if (wrap === 'u') idx.push(a, a + 2, a + 3, a, a + 3, a + 1); else idx.push(a, a + 1, a + 3, a, a + 3, a + 2);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  k.add(labelMaterial(), g, { raw: true, cast: false }, m);
+}
+
+/**
+ * 气瓶架 0.9 × 1.6 × 0.5：花纹钢板底座 + 背后的钢架，三只气瓶并排站着，前面拦一条防倒链。
+ * 气瓶的瓶身和瓶肩是两种颜色（工业气瓶靠瓶肩的颜色区分里面是什么气）。
+ */
+export function gasCylinders(o: EquipOpts = {}): PropModel {
+  const seed = o.seed ?? 0;
+  return cached('gas_cylinders', [seed, o.interior], () => {
+    const k = new Kit('gas_cylinders', seed, { interior: o.interior });
+    const SEG = 12, R = 0.115, PITCH = 0.272; // 车削的段数、瓶身半径、相邻两只瓶的间距
+    const frame = () => k.range(0.6, 0.9);    // 钢架每根杆的明暗都随机一点
+    k.box('diamond_plate', 0.9, 0.016, 0.5, 0, 0.008, 0, { c: 0.004, tint: 0.8 });
+    for (const x of [-0.43, 0.43]) {
+      k.box('steel_dark', 0.04, 1.14, 0.04, x, 0.585, -0.225, { c: 0.005, tint: frame() });  // 后立柱
+      k.box('steel_dark', 0.036, 0.036, 0.43, x, 1.06, -0.01, { c: 0.005, tint: frame() });  // 上扶手
+      k.box('steel_dark', 0.036, 0.036, 0.43, x, 0.3, -0.01, { c: 0.005, tint: frame() });   // 下扶手
+      k.box('steel_dark', 0.036, 0.32, 0.036, x, 0.16, 0.19, { c: 0.005, tint: frame() });   // 前面的短柱
+      k.torus('steel_galv', 0.016, 0.004, x, 1.06, 0.215, { axis: 'x', tubeSeg: 4, seg: 8, tint: 0.8 }); // 挂链子的环
+    }
+    for (const y of [0.45, 1.06]) k.box('steel_dark', 0.9, 0.04, 0.036, 0, y, -0.225, { c: 0.005, tint: frame() });
+    k.box('paint_yellow', 0.3, 0.2, 0.004, 0, 0.76, -0.245, { c: 0.001, tint: 0.9 });        // 背面一块黄牌
+    k.decal('hazard_flammable', 0.15, [0, 0.76, -0.2475], [0, PI, 0]);
+
+    const shoulders: [SurfaceName, number][] = [['paint_red', 1], ['paint_white', 1], ['paint_blue', 1], ['paint_yellow', 1], ['paint_grey', 0.5]];
+    const bodies: [SurfaceName, Rgb][] = [['paint_grey', [0.75, 0.75, 0.75]], ['paint_grey', [0.55, 0.55, 0.55]], ['paint_red', [0.55, 0.4, 0.4]], ['paint_blue', [0.8, 0.8, 0.8]]];
+    const gases = ['乙炔', '氧气', '氩气', '丙烷'];
+    for (let i = 0; i < 3; i++) {
+      const cx = (i - 1) * PITCH, cz = 0.015 + k.range(-0.01, 0.01), base = 0.016; // 瓶子站在底板上
+      const tall = 1 - k.range(0, 0.05);                                           // 三只瓶高矮差一点点
+      const [capMat, capShade] = shoulders[(seed + i * 2) % shoulders.length];
+      const [bodyMat, bodyShade] = bodies[(seed + i) % bodies.length];
+      const scratch = i * 5.3 + seed;
+      const up = (prof: [number, number][]): [number, number][] => prof.map(([r, y]) => [r, y * tall]);
+      // 瓶身。轮廓中间多写了两个点（0.4、0.8 米处），不是为了形状，是为了那里有顶点 —— 竖向的划痕是按顶点染色的
+      k.lathe(bodyMat, up([[0, 0.012], [0.095, 0.012], [0.095, 0.012], [0.1, 0], [0.111, 0], [R, 0.008], [R, 0.4], [R, 0.8], [R, 1.22]]), cx, base, cz, {
+        seg: SEG,
+        tint: (x, y, z) => {
+          // 绕着瓶子转一圈取噪声：噪声大的那几个方向是一道道竖着的划痕（搬运时瓶子互相蹭的），发暗发黄
+          const worn = noise3(Math.atan2(z - cz, x - cx) * 3 + scratch, y * 5, 0) > 0.7;
+          return worn ? [bodyShade[0] * 0.55, bodyShade[1] * 0.55 * 0.85, bodyShade[2] * 0.55 * 0.7] : bodyShade;
+        },
+      });
+      k.lathe(capMat, up([[R, 1.22], [0.111, 1.285], [0.098, 1.34], [0.075, 1.385], [0.052, 1.41], [0.04, 1.42]]), cx, base, cz, { seg: SEG, tint: capShade }); // 瓶肩
+      // 瓶帽：罩住阀门的钢帽，两侧各一个通气孔（画成两个小黑点）
+      k.lathe('steel_dark', up([[0.04, 1.42], [0.057, 1.42], [0.057, 1.42], [0.057, 1.448], [0.057, 1.448], [0.05, 1.452], [0.053, 1.53], [0.046, 1.565], [0.026, 1.585], [0, 1.588]]), cx, base, cz, { seg: SEG, tint: 0.8 });
+      const spin = k.rng() * 6;
+      for (const a of [spin, spin + PI]) k.cyl('steel_dark', 0.016, 0.004, cx + Math.cos(a) * 0.052, base + 1.5 * tall, cz + Math.sin(a) * 0.052, { seg: 6, rot: [0, -a, HALF], tint: 0.12 });
+      // 贴在瓶身上的危险品标和气体名，各自随机歪一点（没有人会把三只瓶子都摆成标签朝正前）
+      if (i !== 1) curvedPatch(k, decalPatch(i ? 'hazard_general' : 'hazard_flammable'), R + 0.0015, 0.1, 0.1, xf([cx, base + 1.08 * tall, cz], [0, k.range(-0.5, 0.5), 0]));
+      const name = labelPatch(gases[(seed + i) % 4], { color: 'white', font: 'stencil', distress: 0.4 });
+      curvedPatch(k, name, R + 0.0015, 0.2, 0.2 / name.aspect, xf([cx, base + 0.86 * tall, cz], [0, k.range(-0.4, 0.4), 0]));
+    }
+    // 防倒链：19 个小环，一平一竖交替，横拦在瓶子前面。链子贴着瓶身的弧面走，两只瓶子之间往下垂一点
+    const frontZ = (x: number) => {
+      let z = 0.215; // 两头挂在架子的环上
+      for (let i = -1; i <= 1; i++) {
+        const d = x - i * PITCH;
+        if (Math.abs(d) < R) z = Math.max(z, 0.015 + Math.sqrt(Math.max(0, 0.123 * 0.123 - d * d))); // 瓶身前表面（半径留 8 毫米余量）
+      }
+      return z;
+    };
+    const LINKS = 19;
+    for (let i = 0; i < LINKS; i++) {
+      const t = i / (LINKS - 1), x = -0.425 + 0.85 * t;
+      const z = Math.max(frontZ(x), frontZ(x - 0.03), frontZ(x + 0.03)) + 0.004;
+      const y = 1.05 - 0.035 * Math.sin(PI * ((t * 3) % 1)) - 0.01; // 分三段，每段中间垂下去 3.5 厘米
+      const link = new THREE.TorusGeometry(0.017, 0.0045, 3, 6);
+      link.scale(1.35, 1, 1); // 链环是长圆的
+      k.add('steel_galv', link, { tint: k.range(0.6, 0.95) }, xf([x, y, z], [i % 2 ? HALF : 0.15, 0, 0]));
+    }
+    return k.finish({ size: [0.9, 1.6, 0.5], boxes: [{ min: [-0.45, 0, -0.25], max: [0.45, 1.6, 0.25] }], surface: 'metal' });
+  });
+}
+
+// ================================================================ 钢管堆
+/** 平滑的 0→1 过渡：v 从 a 走到 b 的过程中，结果从 0 缓缓升到 1。调用处保证 a ≠ b。 */
+const smooth = (a: number, b: number, v: number) => { const t = clamp01((v - a) / (b - a)); return t * t * (3 - 2 * t); };
+
+/** 空心管的内壁：一个法线朝里的圆筒（沿 x 轴）。两个管口各一圈顶点，往里 deep 米处再各一圈，好让颜色从管口到深处渐渐变黑。 */
+function boreGeometry(r: number, len: number, seg: number, deep: number) {
+  const g = new THREE.CylinderGeometry(r, r, len, seg, 3, true);
+  const p = g.getAttribute('position'), n = g.getAttribute('normal'), idx = g.getIndex()!;
+  for (let i = 0; i < p.count; i++) {
+    const y = p.getY(i);
+    if (Math.abs(y) < len / 2 - 1e-4) p.setY(i, Math.sign(y) * (len / 2 - deep)); // 中间两圈挪到离管口 deep 的地方
+    n.setXYZ(i, -n.getX(i), -n.getY(i), -n.getZ(i));                               // 法线翻向里面
+  }
+  const arr = idx.array;
+  for (let i = 0; i < arr.length; i += 3) { const t = arr[i + 1]; arr[i + 1] = arr[i + 2]; arr[i + 2] = t; } // 三角形也翻个面，不然从管口看进去是透的
+  return g.rotateZ(-HALF);
+}
+
+/**
+ * 一垛钢管 6 × 0.9 × 1.2：三根枕木上，9 根外径 273 毫米的钢管按 4-3-2 码成金字塔，两道钢带箍住。
+ * 管子是真的空心：从管口能看进去，越往里越黑。
+ */
+export function pipeStack(o: EquipOpts = {}): PropModel {
+  const seed = o.seed ?? 0;
+  return cached('pipe_stack', [seed, o.interior], () => {
+    const k = new Kit('pipe_stack', seed, { interior: o.interior });
+    const R = 0.1365, WALL = 0.012, SLEEPER = 0.08, SEG = 14; // 管子外半径、壁厚、枕木高、圆周段数
+    const wood = (m = 1): Rgb => { const v = k.range(0.6, 0.95) * m; return [v, v * 0.95, v * 0.86]; }; // 每块木头深浅不同，略偏黄
+    for (const x of [-2.2, 0, 2.2]) {
+      k.box('wood_dark', 0.11, SLEEPER, 1.2, x + k.range(-0.1, 0.1), SLEEPER / 2, 0, { c: 0.008, rot: [0, k.range(-0.03, 0.03), 0], tint: wood(), grain: 'z' });
+      // 两头各一个三角木楔，挡住最外面那根管子不让它滚下去。三角形画在 (z, y) 平面里，斜面朝着管子
+      for (const s of [1, -1]) {
+        const tri: [number, number][] = s > 0 ? [[0, 0], [0.158, 0], [0.158, 0.1]] : [[-0.158, 0], [0, 0], [-0.158, 0.1]];
+        k.extrude('wood_pallet', tri, 0.1, { pos: [x, SLEEPER, s * 0.44], rot: [0, -HALF, 0], soft: 0, tint: wood(0.9) });
+      }
+    }
+    // 圆管码垛：上一层的管子落在下一层两根管子之间的凹槽里，三个圆心正好是等边三角形，所以层高 = 直径 × sin60°
+    const rise = 2 * R * Math.sin(PI / 3);
+    [4, 3, 2].forEach((count, row) => {
+      for (let i = 0; i < count; i++) {
+        const z = (i - (count - 1) / 2) * 2 * R, y = SLEEPER + R + row * rise;
+        const len = k.range(5.78, 5.92);
+        const cx = Math.max(-3, Math.min(3 - len, k.range(-3, 3 - len))) + len / 2; // 长短不一、前后错开，但不超出 6 米
+        const mat: SurfaceName = k.rng() < 0.7 ? 'steel_rust' : 'steel_dark';
+        const patch = k.rng() * 50, shade = k.range(0.75, 1);
+        const outer = new THREE.CylinderGeometry(R, R, len, SEG, 4, true).rotateZ(-HALF); // 沿长度分 4 段，颜色才能一段深一段浅
+        k.add(mat, outer, { tint: (x, yy, zz) => shade * (0.75 + 0.35 * noise3(x * 1.3 + patch, zz * 9, yy * 9)) }, xf([cx, y, z]));
+        // 内壁：管口处 0.66，往里 0.9 米就暗到 0.16
+        k.add('steel_rust', boreGeometry(R - WALL, len - 0.002, SEG, 0.9), { tint: (x) => 0.16 + 0.5 * smooth(len / 2 - 0.9, len / 2, Math.abs(x - cx)) }, xf([cx, y, z]));
+        // 两端的管口端面：一圈窄环，把外壁和内壁接起来
+        k.lathe(mat, [[R, 0], [R - WALL, 0]], cx + len / 2, y, z, { axis: 'x', seg: SEG, tint: shade * 1.1 });
+        k.lathe(mat, [[R - WALL, 0], [R, 0]], cx - len / 2, y, z, { axis: 'x', seg: SEG, tint: shade * 1.1 });
+      }
+    });
+    // 两道钢带：沿着金字塔的外轮廓箍一圈（从最外侧管子的腰 → 顶层管子的肩 → 顶 → 另一边下来 → 从管子底下兜回去）
+    const D = 2 * R, top = SLEEPER + R + 2 * rise + R + 0.004;
+    const hoop: [number, number][] = [
+      [-(1.5 * D + R + 0.004), SLEEPER + R], [-(0.5 * D + R * 0.5 + 0.004), SLEEPER + R + 2 * rise + R * 0.87], [-0.5 * D, top], [0.5 * D, top],
+      [0.5 * D + R * 0.5 + 0.004, SLEEPER + R + 2 * rise + R * 0.87], [1.5 * D + R + 0.004, SLEEPER + R], [1.5 * D, SLEEPER - 0.004], [-1.5 * D, SLEEPER - 0.004], [-(1.5 * D + R + 0.004), SLEEPER + R],
+    ];
+    for (const x of [-1.35, 1.5]) {
+      k.strip('steel_dark', hoop.map(([z, y]): V3 => [x, y, z]), [0.016, 0, 0], { tint: 0.7, cast: true });
+      k.box('steel_galv', 0.04, 0.012, 0.05, x, top + 0.005, 0.03, { c: 0.003, tint: 0.8 }); // 钢带的锁扣
+    }
+    // 顶层靠 +z 的那根管子上喷着规格。字顺着管子走，1.6 米长；贴片沿"字高"的方向弯，裹在管壁上。
+    // （参考里把这张贴片横竖弄反了，字被压成一条细线，这里按正常的喷法做）
+    const spec = labelPatch('API 5L X52  273.1 x 12.5  HEAT 40719', { color: 'white', font: 'stencil', distress: 0.5 });
+    curvedPatch(k, spec, R + 0.002, 1.6 / spec.aspect, 1.6, xf([0.9, SLEEPER + R + 2 * rise, R], [-0.75, 0, 0]), 'v');
+    return k.finish({ size: [6, 0.9, 1.2], boxes: [{ min: [-3, 0, -0.6], max: [3, 0.9, 0.6] }], surface: 'metal' });
+  });
+}
+
 // ================================================================ 名字 → 建模函数
 /** 按参考道具表里的名字取建模函数。每个函数都只接受一个参数对象，都可以不给。 */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const EQUIPMENT: Record<string, (o?: any) => PropModel> = {
-  generator, floodlight_stand: floodlightStand, dumpster, toolbox_cart: toolboxCart,
+  generator, floodlight_stand: floodlightStand, dumpster, toolbox_cart: toolboxCart, gas_cylinders: gasCylinders, pipe_stack: pipeStack,
 };
