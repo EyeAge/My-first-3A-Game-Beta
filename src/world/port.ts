@@ -5,14 +5,17 @@ import { buildDetails, type BoxSpec } from './details';
 import { NavGrid } from './nav';
 import { labelMaterial } from '../render/labels';
 import { weathered } from '../render/weathered';
-import { barrierMesh, flares, lightCones } from './props';
+import { flares, lightCones } from './props';
 import { buildAnnex } from './annex';
 import { buildForklift } from './forklift';
-import { GATE } from './layout/gate';
+import { GATE, layGate } from './layout/gate';
+import { layQuay } from './layout/quay';
+import { layRoad } from './layout/road';
+import { Stage } from './layout/stage';
+import { layWest, MAST } from './layout/west';
 import { placeOnce, PropField } from './propfield';
-import { barrel, cableReel, cardboardBoxes, CARGO, crateStack, crateWood, ibcTote, jerryCan, pallet, palletStack, sandbags, tarpCargo, tireStack, trafficCone } from './props/cargo';
+import { CARGO } from './props/cargo';
 import { EQUIPMENT } from './props/equipment';
-import { bollardPost } from './props/site';
 import type { RainShelter } from './rain';
 import { buildRelay, type Relay, type RelaySpec } from './relay';
 import { buildWorkshop, placeWorkshop, WORKSHOP } from './workshop';
@@ -249,8 +252,9 @@ export function buildPort(progress: (msg: string) => void): Port {
     for (const x of [28, 46, 70, 92]) for (const s of [-1, 1]) { box(x, GB - 0.5, cz + s * 3.9, 0.7, 0.3, 0.5, 0x1c1e20); glow(x, GB - 0.68, cz + s * 3.9, 0.56, 0.06, 0.36, 0.55, 0.5, 0.42); flareList.push({ x, y: GB - 0.75, z: cz + s * 3.9, r: 1.3, g: 1.1, b: 0.85, size: 1.5 }); }
     craneLights.push(new THREE.Vector3(54, 62.9, cz), new THREE.Vector3(104.5, GT + 0.8, cz), new THREE.Vector3(21.5, GT + 0.8, cz));
   };
-  crane(-42, 78);
-  crane(20, 86);
+  // 两台岸桥：[在码头上的位置 z, 小车停在大梁上的位置 x]。码头的摆放清单（layout/quay.ts）要知道门腿在哪，好在腿脚下立防撞柱
+  const CRANES = [[-42, 78], [20, 86]] as const;
+  for (const [cz, trolleyX] of CRANES) crane(cz, trolleyX);
 
   // ---------------------------------------------------------------- 货轮
   const HULL = 0x121c26;
@@ -296,9 +300,9 @@ export function buildPort(progress: (msg: string) => void): Port {
   progress('正在搭建维修车间');
   // 车间是按参考的坐标搭的（workshop.ts），这里整体平移 (−88, +19.5) 挪到地图西侧，占 x −104…−76、z −8.5…8.5。
   // 朝向不变：东门（z −2.5…2.5）正对堆场和太阳，贴着海面来的晨光能从门洞一直照到屋子深处；南面是卷帘门。
-  // 屋外那根电缆从门前的路灯杆顶拉到东南檐角（坐标是车间自己的，所以要减去平移量）
+  // 屋外那根电缆从东南角外那根高杆灯的杆顶拉到东南檐角（坐标是车间自己的，所以要减去平移量）
   const SHOP_DX = -88, SHOP_DZ = 19.5;
-  const shell = buildWorkshop({ mastCables: [[[-63.4 - SHOP_DX, 9.3, 0 - SHOP_DZ], [12.3, 7.3, -11.3], 1]] });
+  const shell = buildWorkshop({ mastCables: [[[MAST.x - SHOP_DX, MAST.cableY, MAST.z - SHOP_DZ], [12.3, 7.3, -11.3], 0.9]] });
   // 屋里的陈设（workshopfit.ts）：夹层办公室、走道和钢梯、工作台、龙门吊架、九组货架、地上的油渍和电缆。
   // 它要知道屋面的洞在哪（每个洞的正下方贴一块漏雨的水渍），认的是车间自己的坐标 —— 所以用还没平移过的那一份 roofHoles
   const fit = placeWorkshopFit(buildWorkshopFit({ roofHoles: shell.roofHoles }), SHOP_DX, SHOP_DZ);
@@ -346,7 +350,6 @@ export function buildPort(progress: (msg: string) => void): Port {
   }
   plane(signTexture(['激战港区 · 南门', '出场车辆请停车交验'], { bg: '#1d3a5c', fg: '#f3ece0' }), 3.2, 1.6, GATE.x0 - PIER - 2.6, 2.9, BOUNDS.maxZ - 0.03, Math.PI);
   box(QUAY_X + 0.4, -1.6, 0, 0.8, 3.2, 600, 0x3c3f40); // 岸壁
-  for (let z = -96; z <= 96; z += 12) box(QUAY_X - 0.9, 0.35, z, 0.7, 0.7, 0.7, 0x1e2022, true); // 系缆桩
 
   // ---------------------------------------------------------------- 撤离艇
   const evacPos = new THREE.Vector3(66, 0, 90);
@@ -373,103 +376,18 @@ export function buildPort(progress: (msg: string) => void): Port {
     return relay;
   });
 
-  // ---------------------------------------------------------------- 路灯
-  const lampPos: THREE.Vector3[] = [];
-  const pole = (x: number, z: number, dir: number) => {
-    box(x, 0.2, z, 0.5, 0.4, 0.5, 0x2c3033, true);                              // 水泥基座
-    box(x, 5, z, 0.2, 10, 0.2, 0x3a3f42, true);
-    beam(x, 9.2, z, x + dir * 1.9, 9.95, z, 0.12, 0x3a3f42);                    // 斜挑出去的灯臂
-    box(x + dir * 2.2, 9.98, z, 0.95, 0.14, 0.4, 0x23272a);                     // 灯壳
-    glow(x + dir * 2.2, 9.9, z, 0.72, 0.03, 0.26, 1, 1, 1);                     // 透光罩
-    flareList.push({ x: x + dir * 2.2, y: 9.84, z, r: 1.5, g: 0.95, b: 0.45, size: 2.0 });
-    lampPos.push(new THREE.Vector3(x + dir * 2.2, 9.86, z));
-  };
-  for (const z of [-79, -47.55, -15.85, 15.85, 47.55, 82]) { pole(-26.6, z, 1); pole(-9.4, z, -1); }
-  for (const z of [-90, -62, -18, 2, 44, 72]) pole(28.6, z, 1);
-  for (const z of [-48, 0, 48]) pole(-63.4, z, -1);
-  pole(60.4, 78, -1); pole(60.4, -80, -1);
-  craneLights.forEach((p) => { glow(p.x, p.y, p.z, 0.3, 0.3, 0.3, 1.2, 0.08, 0.06); flareList.push({ x: p.x, y: p.y, z: p.z, r: 2.2, g: 0.14, b: 0.1, size: 2.2, blink: 2.2 }); }); // 航空障碍灯：慢慢地一明一灭
-  const glowMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ color: new THREE.Color(8, 6.1, 4.1) }), glows.length); // 灯罩的亮度是白纸的好几倍：泛光会把超出的部分晕开，湿地面里也会映出它
-  glows.forEach((gl, i) => { glowMesh.setMatrixAt(i, m4.compose(v1.set(gl.x, gl.y, gl.z), q.identity(), v2.set(gl.sx, gl.sy, gl.sz))); glowMesh.setColorAt(i, col.setRGB(gl.r, gl.g, gl.b)); });
-  group.add(glowMesh);
-  const flare = flares(flareList);
-  group.add(flare.points);
-  // 路灯是往下照的：用聚光灯在地上打出一圈一圈的光斑，而不是朝四面八方发光的灯泡。
-  // 真正发光的灯只有几盏，哪几盏路灯离玩家最近就"借"给谁
-  const lightPool: THREE.SpotLight[] = [];
-  for (let i = 0; i < 8; i++) {
-    const l = new THREE.SpotLight(0xffa858, 0, 40, 1.08, 0.85, 1.5);
-    lightPool.push(l); group.add(l, l.target);
-  }
-  // 每盏路灯下面一个光锥：从灯往正下方张开，一直到地面（9.86 米），底面半径 6.4 米
-  group.add(lightCones(lampPos.map((pos) => ({ pos, dir: new THREE.Vector3(0, -1, 0), length: 9.86, radius: 6.4 }))));
-  let lampCount = 6;
-
-  // ---------------------------------------------------------------- 杂物
+  // ---------------------------------------------------------------- 室外场地的陈设
   // 道具不是均匀撒的，而是"一组一组"摆：每一组像是有人干活干到一半留下的 —— 叉车叉着货停在半路、
-  // 几只油桶码在托盘上旁边倒了一只、木箱堆边上靠着两块托盘。这样既是掩体，也让场地像真的有人用过。
-  const barriers: { x: number; z: number; alongX: boolean }[] = [];
-  const barrier = (x: number, z: number, alongX: boolean) => { barriers.push({ x, z, alongX }); colliders.add(x, 0.45, z, alongX ? 2.4 : 0.6, 0.9, alongX ? 0.6 : 2.4); };
-  for (const z of [70, 22, -24, -70]) { barrier(-21.5, z, true); barrier(-14.5, z - 9, true); }
-  for (const z of [60, 34, -4, -56, -84]) { barrier(38 + rng() * 14, z, rng() < 0.5); barrier(34 + rng() * 20, z + 6, rng() < 0.5); }
-  barrier(-66, 20, false); barrier(-70, -26, false); barrier(8, -8.5, true); barrier(8, 8.5, true);
+  // 发电机拖着电缆带一盏投光灯、中继柜脚下拖着从配电箱引来的粗电缆。这样既是掩体，也让场地像真的有人用过。
+  // 清单按地方分成四个文件（layout/）；它们只管往 stage 上"报"东西，最后由 stage.build() 统一生成网格和碰撞盒
+  progress('正在布置场地');
+  const stage = new Stage(colliders);
+  layGate(stage);
+  layRoad(stage);
+  layQuay(stage, QUAY_X, CRANES.map(([cz]) => cz));
+  layWest(stage);
+  group.add(stage.build());
 
-  const props = new PropField();
-  const jit = (a: number) => (rng() - 0.5) * 2 * a;        // ±a 之间的随机数：东西不会摆得横平竖直
-  const COLORS = ['blue', 'red', 'green', 'yellow'] as const;
-  /** 一小片油桶：n 只立着的挤在一起，外加一只倒在旁边的。 */
-  const barrels = (x: number, z: number, n: number, fallen = true) => {
-    for (let i = 0; i < n; i++) props.place(barrel({ color: pick(rng, COLORS), seed: i, open: rng() < 0.15 }), x + (i % 3) * 0.66 + jit(0.04), z + Math.floor(i / 3) * 0.66 + jit(0.04), rng() * 6.28);
-    if (fallen) props.place(barrel({ color: pick(rng, COLORS), lying: true, seed: n }), x + 2.3 + jit(0.3), z + 0.4 + jit(0.4), rng() * 6.28);
-  };
-  /** 木箱堆：一摞三只的塔，旁边一两只单的，再靠一摞托盘。 */
-  const crates = (x: number, z: number, yaw: number, extra = 2) => {
-    const c = Math.cos(yaw), s = Math.sin(yaw), at = (dx: number, dz: number): [number, number] => [x + dx * c + dz * s, z - dx * s + dz * c];
-    props.place(crateStack({ seed: Math.floor(rng() * 4) }), ...at(0, 0), yaw + jit(0.06));
-    for (let i = 0; i < extra; i++) props.place(crateWood({ seed: i + Math.floor(rng() * 3) }), ...at(1.7 + i * 1.5, jit(0.25)), yaw + jit(0.2));
-    props.place(palletStack({ count: 3 + Math.floor(rng() * 5), seed: Math.floor(rng() * 3) }), ...at(-1.8, 0.2), yaw + jit(0.15));
-  };
-  /** 一排路锥，从 (x, z) 起朝 yaw 方向每隔 gap 米一只，偶尔倒一只。 */
-  const cones = (x: number, z: number, yaw: number, n: number, gap = 2.2) => {
-    for (let i = 0; i < n; i++) {
-      const lying = rng() < 0.14;
-      props.place(trafficCone({ lying, seed: i }), x + Math.cos(yaw) * gap * i + jit(0.12), z - Math.sin(yaw) * gap * i + jit(0.12), lying ? rng() * 6.28 : jit(0.3));
-    }
-  };
-
-  // 主干道两侧
-  crates(-16.8, 54, 0.05); barrels(-24.6, 8, 5); crates(-20.8, -48, 3.1, 1); barrels(-12.8, -40, 4);
-  cones(-25.2, 62, Math.PI / 2, 5); cones(-10.8, -8, -Math.PI / 2, 4); cones(-25.2, -66, Math.PI / 2, 4, 2.6);
-  props.place(tarpCargo({ seed: 1 }), -11.6, 28, Math.PI / 2 + jit(0.05));
-  props.place(cableReel({ seed: 0 }), -24.2, -20, 0.4); props.place(cableReel({ seed: 1 }), -23.9, -22.6, 1.9);
-  // 码头前沿
-  crates(42, 40, 1.57); crates(52, -52, 0.1, 1); crates(50, 76, -0.2); barrels(30, 30, 6); barrels(54, 4, 3); barrels(44, -86, 5, false);
-  props.place(ibcTote({ seed: 0 }), 56.4, 6.2, 0.04); props.place(ibcTote({ seed: 1 }), 56.5, 7.6, -0.03);
-  props.place(tarpCargo({ seed: 2 }), 38.6, -14, 0.08); props.place(tireStack({ count: 4 }), 41.4, -15.2, 0.7); props.place(tireStack({ count: 2, seed: 1 }), 42.5, -14.3, 2.1);
-  props.place(sandbags({ courses: 4 }), 47.5, 70.5, 0.02); props.place(sandbags({ courses: 3, seed: 1 }), 53.8, 82, Math.PI / 2);
-  cones(31.5, -6, Math.PI / 2, 4, 3); cones(31.5, 52, Math.PI / 2, 3, 3);
-  // 甲号中继旁：一台叉着木箱停在半路的叉车。货叉朝着 (cos yaw, −sin yaw)，托盘和木箱就顺着这个方向放在叉面上
-  {
-    const x = 5.9, z = 4.6, yaw = -0.22, fx = x + Math.cos(yaw) * 1.42, fz = z - Math.sin(yaw) * 1.42;
-    group.add(placeOnce(buildForklift({ seed: 6, forksUp: 0.3 }), x, z, yaw, colliders));
-    props.place(pallet({ seed: 1 }), fx, fz, yaw, 0.535);
-    props.place(crateWood({ seed: 2 }), fx, fz, yaw + 0.05, 0.679);
-    props.place(palletStack({ count: 5 }), 3.4, 7.6, 0.3); props.place(pallet({ broken: true }), 2.2, 6.1, 1.1);
-  }
-  // 车间东门外的空场：只放矮的东西 —— 高的会挡住照进门的阳光
-  props.place(sandbags({ courses: 3 }), -66.5, -5.2, Math.PI / 2 + 0.06); props.place(sandbags({ courses: 3, seed: 1 }), -58.8, 6.4, 0.1);
-  props.place(pallet({ seed: 2 }), -70.2, 6.6, 0.25); props.place(cardboardBoxes({ seed: 1 }), -70.2, 6.6, 0.3, 0.144);
-  props.place(crateWood({ seed: 1 }), -61.5, -8.6, 0.4); props.place(crateWood({ seed: 3 }), -59.9, -9.1, -0.2);
-  cones(-73, -4.2, 0, 3, 2.4); cones(-73, 4.2, 0, 3, 2.4); barrels(-55.6, -3.5, 3);
-  props.place(jerryCan({ color: 'red' }), -60.7, -7.5, 0.8); props.place(jerryCan({ color: 'olive' }), -60.9, -7.1, 2.2);
-  // 车间南面的水泥场院：卷帘门外是装卸区，靠墙码着备件
-  crates(-99, 13.5, 0.03); props.place(tireStack({ count: 5 }), -85.6, 9.6, 0.2); props.place(tireStack({ count: 4, seed: 1 }), -84.4, 9.7, 1.3); props.place(tireStack({ count: 3, seed: 2 }), -84.9, 10.9, 2.6);
-  props.place(ibcTote({ seed: 2 }), -80.4, 10.2, Math.PI / 2); props.place(ibcTote({ seed: 0 }), -78.9, 10.3, Math.PI / 2 + 0.05);
-  props.place(cableReel({ seed: 2 }), -81.5, 21, 0.2); props.place(tarpCargo({ seed: 0 }), -98.4, 24.5, 1.52); barrels(-78.6, 26.5, 5);
-  props.place(palletStack({ count: 9 }), -88.2, 27.4, 0.1); props.place(palletStack({ count: 6, seed: 1 }), -86.7, 27.6, -0.08); props.place(pallet({ seed: 3 }), -86.4, 25.9, 0.5);
-  cones(-94.6, 11, -Math.PI / 2, 4, 3); cones(-88.4, 11, -Math.PI / 2, 4, 3);
-  // 车间两个门口的 3 根防撞柱：卷帘门两侧各一根，推拉门扇停靠的那一侧一根（车间自己的坐标，照参考）
-  ([[-6.45, -10.45], [-0.55, -10.45], [12.6, -22.4]] as const).forEach(([x, z], i) => props.place(bollardPost({ seed: i }), x + SHOP_DX, z + SHOP_DZ, i * 1.3));
   // 车间里面的通用道具：清单在 workshopfit.ts（WORKSHOP_PROPS，车间自己的坐标，这里加上平移量）。
   // 全部用"室内版"材质 —— 淋不到雨，反射的是屋里而不是天空。二十几件几乎件件不同，实例化帮不上忙，
   // 所以单开一份清单、用 buildMerged 按材质焊成十几个网格（见 propfield.ts）。
@@ -487,11 +405,32 @@ export function buildPort(progress: (msg: string) => void): Port {
   const outdoorLabels = labelMaterial(), indoorLabels = outdoorLabels.clone();
   indoorLabels.userData.interior = true;
   indoor.traverse((o) => { if ((o as THREE.Mesh).material === outdoorLabels) (o as THREE.Mesh).material = indoorLabels; });
-  // 西边原有的几处掩体
-  barrels(-64.5, 30, 5); props.place(crateStack({ seed: 2 }), -68.3, -40.6, 0.1); props.place(crateWood({ seed: 0 }), -66.6, -40.2, 0.3);
-  group.add(props.build(colliders));
 
   group.add(buildDetails(yard, CW, CH, CL, colliders, BOUNDS));
+
+  // ---------------------------------------------------------------- 灯
+  // 灯具有三样东西要画，都在这里汇总：
+  //   glows   灯具上发光的小方块（岸桥的作业灯、障碍灯、亮着灯的窗）；高杆灯、投光灯的灯面是道具模型自带的
+  //   flares  远处那一点柔和的光晕
+  //   cones   灯下雨雾里那个朦胧的光锥
+  craneLights.forEach((p) => { glow(p.x, p.y, p.z, 0.3, 0.3, 0.3, 1.2, 0.08, 0.06); flareList.push({ x: p.x, y: p.y, z: p.z, r: 2.2, g: 0.14, b: 0.1, size: 2.2, blink: 2.2 }); }); // 航空障碍灯：慢慢地一明一灭
+  flareList.push(...stage.flares);
+  const glowMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ color: new THREE.Color(8, 6.1, 4.1) }), glows.length); // 灯罩的亮度是白纸的好几倍：泛光会把超出的部分晕开，湿地面里也会映出它
+  glows.forEach((gl, i) => { glowMesh.setMatrixAt(i, m4.compose(v1.set(gl.x, gl.y, gl.z), q.identity(), v2.set(gl.sx, gl.sy, gl.sz))); glowMesh.setColorAt(i, col.setRGB(gl.r, gl.g, gl.b)); });
+  group.add(glowMesh);
+  const flare = flares(flareList);
+  group.add(flare.points);
+  group.add(lightCones(stage.cones));
+  // 灯是往下照的：用聚光灯在地上打出一圈一圈的光斑，而不是朝四面八方发光的灯泡。
+  // 真正发光的灯只有几盏（多了每个像素都要多算几盏灯），哪几个灯位离玩家最近就"借"给谁。
+  // 候选灯位由摆放清单登记：每根高杆灯一个、每只投光灯架一个
+  const lampSpots = stage.lamps;
+  const lightPool: THREE.SpotLight[] = [];
+  for (let i = 0; i < 8; i++) {
+    const l = new THREE.SpotLight(0xffc48a, 0, 40, 1.08, 0.85, 1.5);
+    lightPool.push(l); group.add(l, l.target);
+  }
+  let lampCount = 6;
 
   // ---------------------------------------------------------------- 把收集到的东西变成网格
   const cGeo = containerGeometry(CW, CH, CL), cFar = new THREE.BoxGeometry(CW, CH, CL);
@@ -510,7 +449,6 @@ export function buildPort(progress: (msg: string) => void): Port {
   beamList.forEach((b, i) => { beamMesh.setMatrixAt(i, b.m); beamMesh.setColorAt(i, col.setHex(b.c)); });
   beamMesh.castShadow = beamMesh.receiveShadow = true;
   group.add(beamMesh);
-  group.add(barrierMesh(barriers));
 
   // ---------------------------------------------------------------- 光照
   // 全场只有这一盏"真灯"：贴着海面照过来的太阳。没有环境光灯 —— 阴影里的亮度来自天空的环境贴图（main.ts）。
@@ -520,7 +458,7 @@ export function buildPort(progress: (msg: string) => void): Port {
 
   const nav = new NavGrid(BOUNDS.minX, BOUNDS.minZ, BOUNDS.maxX, BOUNDS.maxZ, colliders);
 
-  const order = lampPos.map((_, i) => i);
+  const order = lampSpots.map((_, i) => i);
   let lastSort = -1;
   return {
     group, colliders, nav, relays, evacPos, sun, ground, reflection, interior, indoor, shelter,
@@ -534,12 +472,17 @@ export function buildPort(progress: (msg: string) => void): Port {
       // 屋里的东西有十几万个三角形、七十来个网格。隔着 100 米，门洞在画面上只剩指甲盖大，里面又暗，画了也看不出来 —— 干脆不画。
       // （地图上能直着看进门洞的最远的地方是南围墙根，离车间 92 米，所以这个距离上不会看到东西突然冒出来）
       indoor.visible = interior.distanceToPoint(focus) < INDOOR_DRAW_RANGE;
+      stage.cull(focus); // 室外的道具也一样：离得远的整片不画（layout/stage.ts）。全场只有十来片，每帧算一遍不费事
       if (t - lastSort > 0.4) {
         lastSort = t;
-        order.sort((a, b) => lampPos[a].distanceToSquared(focus) - lampPos[b].distanceToSquared(focus));
+        // 按水平距离排：高杆灯挂在 13 米高处，要是算直线距离，它永远排在两米高的投光灯后面
+        const flat = (i: number) => (lampSpots[i].pos.x - focus.x) ** 2 + (lampSpots[i].pos.z - focus.z) ** 2;
+        order.sort((a, b) => flat(a) - flat(b));
         lightPool.forEach((l, i) => {
           l.visible = i < lampCount && i < order.length;
-          if (l.visible) { l.position.copy(lampPos[order[i]]); l.target.position.set(l.position.x, 0, l.position.z); l.intensity = 150; }
+          if (!l.visible) return;
+          const spot = lampSpots[order[i]];
+          l.position.copy(spot.pos); l.target.position.copy(spot.target); l.intensity = spot.intensity; l.angle = spot.angle;
         });
       }
     },
