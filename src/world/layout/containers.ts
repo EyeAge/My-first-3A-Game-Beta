@@ -105,7 +105,7 @@ function layYard(f: ContainerField, s: Stage) {
         const x = bx + row * ROW_PITCH;
         if (bx === GATE_BOX.bx && bz === GATE_BOX.bz && bay === GATE_BOX.bay && row === GATE_BOX.row) {
           // 南半个箱位是那只敞着门的 20 尺箱（门口朝南，对着大门）；北半个箱位是两只摞起来的，给它挡住背后
-          f.stack(x, z + HALF_20, [paint(s, 20, 'grey', { doors: 0.6, wear: 0.7 })], DOOR.south, 0);
+          f.stack(x, z + HALF_20, [paint(s, 20, 'grey', { doors: 0.65, wear: 0.7 })], DOOR.south, 0);
           f.stack(x, z - HALF_20, [paint(s, 20, 'red'), paint(s, 20, 'teal')], DOOR.south);
           last = 1;
           continue;
@@ -166,8 +166,9 @@ function layReeferBay(f: ContainerField, s: Stage, bx: number, z: number) {
  * 堆位以外的箱子：停在主干道上的、码头前沿的、车间东边那条路上的。它们是手摆的 —— 每一处旁边都有别的清单里
  * 配着它摆的道具（road.ts 的隔离墩和路锥、quay.ts 的防撞柱），所以位置不能随便动。
  *
- * 其中四只开着门、能走进去（doors 是开门的程度）：进去以后三面是铁皮，只有门口一面要防，是现成的掩体。
+ * 其中四只开着门、能走进去：进去以后三面是铁皮，只有门口一面要防，是现成的掩体。
  * 开门箱一律放在最底层，门口朝着开阔的地方，不对着墙。（全场一共五只，还有一只在堆场里，见 GATE_BOX。）
+ * doors 是开门的程度，都给在 0.65 以上：两扇门是斜着支在门口的，开得再小，中间剩下的口子就不够一个人走进去了。
  */
 function layLoose(f: ContainerField, s: Stage) {
   const p = (size: ContainerSize, color: ColorName, extra?: Partial<StackItem>) => paint(s, size, color, extra);
@@ -199,7 +200,7 @@ function layLoose(f: ContainerField, s: Stage) {
   f.stack(42.2, -30, [p(40, 'red')], DOOR.east);
   // 堆场边线上：两只 20 尺箱头尾相接，南边那只敞着门、门口朝南
   f.stack(31, 10 - HALF_20, [p(20, 'teal')], DOOR.north);
-  f.stack(31, 10 + HALF_20, [p(20, 'orange', { doors: 0.5 })], DOOR.south, 0);
+  f.stack(31, 10 + HALF_20, [p(20, 'orange', { doors: 0.7 })], DOOR.south, 0);
   // 二号岸桥底下：东边那只敞着门，门口朝东 —— 钻进去以后背对着堆场，面前只有岸壁和货轮
   f.stack(47 - HALF_20, 24, [p(20, 'red'), p(20, 'grey')], DOOR.west);
   f.stack(47 + HALF_20, 24, [p(20, 'green', { doors: 0.8 })], DOOR.east, 0);
