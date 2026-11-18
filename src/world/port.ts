@@ -92,8 +92,9 @@ export function buildPort(progress: (msg: string) => void): Port {
   // ---------------------------------------------------------------- 集装箱
   // 全场的箱子都交给一个 ContainerField：它负责实例化绘制、按远近在精模 / 中模 / 简模三档之间切换、登记碰撞盒（containerfield.ts）。
   // 这里先把它建出来，岸桥、货轮、堆场各自往里"报"箱子（堆场和零散箱子的清单在 layout/containers.ts）；
-  // 等全部报完，在下面"室外场地的陈设"那里统一 build()
-  const containers = new ContainerField({ seed: 4207 });
+  // 等全部报完，在下面"室外场地的陈设"那里统一 build()。
+  // prebuild：27 种箱体的精模在加载画面里一次搭完（一共不到一秒），而不是等玩家第一次走到某种箱子跟前才搭 —— 那样每搭一种，游戏就要顿一下
+  const containers = new ContainerField({ seed: 4207, prebuild: true });
 
   // ---------------------------------------------------------------- 起重机
   progress('正在架设起重机');
